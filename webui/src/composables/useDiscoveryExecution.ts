@@ -1,9 +1,9 @@
 // 021 B8 T027：DiscoveryView execution 动作层（自 DiscoveryView.vue script 原样搬运，函数体零改动，跨域引用经 deps 调用时解析）。
 // 031 B8：deps 形参类型 = discoveryDeps.ts 的 ExecutionNeeds（跨域依赖契约）。
+import { computed, nextTick } from "vue";
 import type { Ref } from "vue";
 import type { DiscoveryState } from "./useDiscoveryState";
 import type { ExecutionNeeds } from "./discoveryDeps";
-import { nextTick } from "vue";
 import { ApiError, apiRequest, errorMessage, settingsApi, userFacingMessage } from "../api";
 import type { PipelineResult, RoundStatusPayload } from "../discovery";
 import type {
@@ -42,11 +42,63 @@ import { setThemePlatform } from "../composables/useTheme";
 import type { AiScreenLaunch } from "./useDiscoveryState";
 import type { OneClickLaunch } from "./useDiscoveryState";
 import type { TaskSnapshot } from "./useDiscoveryState";
+import type { ScrapePrimaryAction } from "../screenFlow";
+
+type CleanupActionResponse = {
+  ok?: boolean;
+  error?: string;
+  cleanup_error?: string;
+  cleanup?: {
+    ok?: boolean;
+    error_code?: string | null;
+    message?: string;
+  } | null;
+};
+
+function cleanupFailureMessage(
+  data: CleanupActionResponse,
+  action: "cancel" | "finish",
+): string {
+  const failed = data.error === "browser_cleanup_failed"
+    || data.cleanup_error === "browser_cleanup_failed"
+    || data.cleanup?.ok === false;
+  if (!failed) return "";
+  return action === "finish"
+    ? "结果已保存，但浏览器清理失败"
+    : "任务已停止，但浏览器清理失败";
+}
 
 export function useDiscoveryExecution(state: DiscoveryState, deps: ExecutionNeeds) {
-  const { activeCategory, activeStep, activeTaskRestored, advancedPanelsOpen, analysisReady, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityList, currentRoundStatus, draftPlatform, effectiveSearchCities, filterValues, finishSaveBusy, finishedPartial, historyDetail, historyMode, historyRound, historyScreenBusy, interruptedRunId, locationDraft, nationalScopeConfirm, oneClickOpen, pausedRunId, pipelineBusy, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, pollRetryCount, pollTimer, profileConfirmed, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, restoredTaskHint, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, schemaRef, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, switchAccountId, switchAccounts } = state;
+  const { activeCategory, activeStep, activeTaskRestored, advancedPanelsOpen, analysisReady, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityList, currentRoundStatus, draftPlatform, effectiveSearchCities, filterValues, finishSaveBusy, finishedPartial, historyDetail, historyMode, historyRound, historyScreenBusy, interruptedRunId, locationDraft, nationalScopeConfirm, oneClickOpen, pausedRunId, pipelineBusy, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, pollRetryCount, pollTimer, profileConfirmed, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, restoredTaskHint, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, schemaRef, scrapeActionBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords } = state;
   const { clearWorkflowState, enrichPausedSnapshot, enterScreenStep, enterSearchStep, isCompletedTaskStatus, isLoginErrorCode, loadCityCatalog, loadFilterLabels, loadLatestResult, notify, pollRecrawl, pollTask, refreshScopePreview, requireProfileConfirmed, restoreLocationsFromContext, returnToLatest, saveScrapedOnlySnapshot, setDraftPlatform, setPipelineResult, showLoginGuide, validateProfileForScreen } = deps;
 
+  const scrapeAction = computed<ScrapePrimaryAction>(() => {
+    const status = String(scrapeSnapshot.value?.status || "");
+    // Keep the clicked action visible while its request is in flight.  The
+    // optimistic continue snapshot is already running, but the user is still
+    // waiting for the continue request rather than being asked to pause it.
+    if (scrapeActionBusy.value === "continue-scrape") {
+      return { kind: "continue-scrape", label: "继续" };
+    }
+    if (scrapeActionBusy.value === "pause-scrape") {
+      return { kind: "pause-scrape", label: "暂停" };
+    }
+    if (scrapeTaskId.value && status !== "failed" && status !== "interrupted"
+        && (pausedRunId.value || status === "paused")) {
+      return { kind: "continue-scrape", label: "继续" };
+    }
+    if (scrapeTaskId.value && (scrapeBusy.value || status === "running" || status === "queued" || status === "pausing")) {
+      return { kind: "pause-scrape", label: "暂停" };
+    }
+    return { kind: "none" };
+  });
+
+  // 失败/中断不再占用新任务槽，但已抓取的岗位仍可通过“结束并保存结果”
+  // 收口。这个入口与暂停态共用 finish API，不能因为没有暂停/继续主动作而消失。
+  const scrapeCanFinish = computed(() => Boolean(
+    scrapeTaskId.value
+      && ["failed", "interrupted"].includes(String(scrapeSnapshot.value?.status || "")),
+  ));
 
 async function restoreRunningTask() {
   try {
@@ -173,39 +225,24 @@ async function restoreRunningTask() {
       recrawlSnapshot.value = null;
       currentRoundStatus.value = "";
     }
-    if (data.status === "interrupted") {
-      // 服务重启打断的任务：工作线程已死不能 poll；提示用户重开（后端会自动接着上次进度）
-      interruptedRunId.value = data.task_id;
-      if (data.kind === "scrape") {
-        scrapeTaskId.value = data.task_id;
-        analysisReady.value = true;
-        activeStep.value = "search";
-        restoredTaskHint.value = "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取";
-        scrapeSnapshot.value = {
-          ...snapshot,
-          scraped_count: data.scraped_count,
-          source_total: data.source_total,
-        };
-        if (data.round_context) deps.restoreLocationsFromContext(data.round_context);
-        return;
-      }
-      if (data.kind === "recrawl") {
-        recrawlTaskId.value = data.task_id;
-        resultLoaded.value = true;
-        activeCategory.value = "uncertain";
-        activeStep.value = "results";
-        restoredTaskHint.value = "上次补抓因服务重启被中断；可结束保存已有结果";
-        return;
-      }
-      restoredTaskHint.value = "上次 AI 筛选因服务重启被中断；重新开始 AI 筛选会接着上次进度，不重复消耗";
+    if (kind === "screen" && ["failed", "interrupted"].includes(String(data.status))) {
+      // AI 失败/中断是终态事实：保留快照和任务身份供错误查看/继续入口使用，
+      // 但不能把它当作仍在运行或占用新任务槽的恢复任务。
+      // Keep the restored error scene from being mistaken for a blank page by
+      // the post-mount auto-new-round check.  This marker means “restore UI
+      // state completed”, not “the task still occupies a pipeline slot”; the
+      // actual occupancy flags below remain cleared.
+      activeTaskRestored.value = true;
+      screenBusy.value = false;
+      pausedRunId.value = "";
+      interruptedRunId.value = "";
+      screenTaskId.value = data.task_id;
       scrapeTaskId.value = data.scrape_task_id || "";
       scrapeCompleted.value = Boolean(data.scrape_completed);
-      screenTaskId.value = data.task_id;
+      screenSnapshot.value = snapshot;
       analysisReady.value = true;
-      deps.enterScreenStep();
+      deps.enterSearchStep();
       const savedFilters = data.frozen_filters || {};
-      // T509：写入任务平台对应的草稿槽（platform-schema.md L157），
-      // 不再用草稿平台槽 — 否则 zhilian 任务恢复后 filters 落到 boss 槽会被 boss schema 拒绝。
       const drafts = filterValues.value[filterPlatform];
       for (const key of Object.keys(drafts)) delete drafts[key];
       Object.assign(
@@ -219,12 +256,57 @@ async function restoreRunningTask() {
       profileSummary.value = data.profile_summary || "";
       profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
         ? (data.profile_facts as Record<string, unknown>) : {};
-      if (data.round_context) deps.roundFlow.restoreRoundContext(data.round_context);
-      deps.restoreLocationsFromContext(data.round_context);
+      if (data.round_context) deps.restoreLocationsFromContext(data.round_context);
+      restoredTaskHint.value = data.status === "failed"
+        ? "上次 AI 筛选失败，已保留错误信息，可重新开始筛选"
+        : "上次 AI 筛选因服务重启被中断，已保留中断信息，可重新开始筛选";
       return;
+    }
+    if (data.status === "interrupted") {
+      // 服务重启打断的任务：工作线程已死不能 poll；提示用户重开（后端会自动接着上次进度）
+      if (data.kind === "scrape") {
+        // 抓取中断是错误快照，不是可恢复的公共任务入口；清除可能由旧快照
+        // 带入的恢复标记，避免刷新后继续阻塞切平台/新任务。
+        pausedRunId.value = "";
+        interruptedRunId.value = "";
+        scrapeTaskId.value = data.task_id;
+        analysisReady.value = true;
+        activeStep.value = "search";
+        restoredTaskHint.value = "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取";
+        scrapeSnapshot.value = {
+          ...snapshot,
+          scraped_count: data.scraped_count,
+          source_total: data.source_total,
+        };
+        if (data.round_context) deps.restoreLocationsFromContext(data.round_context);
+        return;
+      }
+      if (data.kind === "recrawl") {
+        // 重抓中断同样是错误终态：保留结果/错误快照，但不登记为公共
+        // 可恢复占用，避免切平台或新任务被旧任务卡住。
+        pausedRunId.value = "";
+        interruptedRunId.value = "";
+        recrawlBusy.value = false;
+        recrawlTaskId.value = data.task_id;
+        resultLoaded.value = true;
+        activeCategory.value = "uncertain";
+        activeStep.value = "results";
+        recrawlSnapshot.value = {
+          ...snapshot,
+          progress: {
+            ...snapshot.progress,
+            message: "任务因服务重启被中断，已保存进度",
+          },
+        };
+        restoredTaskHint.value = "上次补抓因服务重启被中断；可结束保存已有结果";
+        return;
+      }
     }
     // 切片7：paused 状态从 DB 恢复（无内存工作线程，不能 poll）
     if (data.status === "failed" && kind === "scrape") {
+      pausedRunId.value = "";
+      interruptedRunId.value = "";
+      scrapeBusy.value = false;
       scrapeTaskId.value = data.task_id;
       analysisReady.value = true;
       activeStep.value = "search";
@@ -235,6 +317,18 @@ async function restoreRunningTask() {
       };
       restoredTaskHint.value = "检测到失败的抓取任务；已抓数据已保存，可结束保存结果或重新开始抓取";
       if (data.round_context) deps.restoreLocationsFromContext(data.round_context);
+      return;
+    }
+    if (data.status === "failed" && kind === "recrawl") {
+      pausedRunId.value = "";
+      interruptedRunId.value = "";
+      recrawlBusy.value = false;
+      recrawlTaskId.value = data.task_id;
+      recrawlSnapshot.value = snapshot;
+      resultLoaded.value = true;
+      activeCategory.value = "uncertain";
+      activeStep.value = "results";
+      restoredTaskHint.value = "检测到失败的重抓任务；已保留错误信息，可重新开始重抓";
       return;
     }
     if (data.status === "paused") {
@@ -450,21 +544,30 @@ async function startScrape(options: OneClickLaunch = {}) {
 
 
 async function cancelScrape() {
-  if (!scrapeTaskId.value) return;
+  if (!scrapeTaskId.value || cancelBusy.value || finishSaveBusy.value || scrapeActionBusy.value) return;
   // 先停轮询，避免取消后还去拿旧状态
   if (pollTimer.value) { window.clearTimeout(pollTimer.value); pollTimer.value = undefined; }
   cancelBusy.value = true;
   try {
-    await apiRequest(`/api/task/cancel/${encodeURIComponent(scrapeTaskId.value)}`, {
+    const data = await apiRequest<CleanupActionResponse>(
+      `/api/task/cancel/${encodeURIComponent(scrapeTaskId.value)}`,
+      {
       method: "POST",
-    });
+      },
+    );
+    const cleanupError = cleanupFailureMessage(data, "cancel");
     // 后端会立刻关浏览器并标 cancelled；这里直接复位，不等下一次轮询
     scrapeBusy.value = false;
     autoScreenArmed.value = false;
     restoredTaskHint.value = "";
-    scrapeSnapshot.value = { status: "cancelled", progress: { message: "已停止抓取" }, logs: [], error: "" };
+    scrapeSnapshot.value = {
+      status: "cancelled",
+      progress: { message: cleanupError || "已停止抓取" },
+      logs: [],
+      error: cleanupError,
+    };
     interruptedRunId.value = "";
-    deps.notify("已停止抓取", "warning");
+    deps.notify(cleanupError || "已停止抓取", cleanupError ? "error" : "warning");
   } catch (error) {
     // 取消接口失败时不要卡死：恢复轮询让前端看真实状态
     deps.notify(errorMessage(error, "停止失败，请重试"), "error");
@@ -476,12 +579,54 @@ async function cancelScrape() {
 }
 
 
-async function continueScrape(targetAccount?: string) {
+async function pauseScrape() {
+  const runId = scrapeTaskId.value;
+  if (!runId || scrapeActionBusy.value || finishSaveBusy.value || cancelBusy.value) return;
+  scrapeActionBusy.value = "pause-scrape";
+  scrapeBusy.value = true;
+  scrapeSnapshot.value = {
+    ...(scrapeSnapshot.value || { logs: [] }),
+    status: "pausing",
+    progress: { ...((scrapeSnapshot.value || {}).progress || {}), message: "正在暂停…" },
+    error: "",
+  };
+  try {
+    await apiRequest(`/api/task/pause/${encodeURIComponent(runId)}`, { method: "POST" });
+    // 复用公共任务轮询/错误处理：paused 时由 pollTask 收口 busy、快照与提示。
+    await deps.pollTask(runId, "scrape");
+  } catch (error) {
+    // 先让公共轮询对账；明确终态会释放占用，状态未知则保留暂停保护。
+    await deps.pollTask(runId, "scrape").catch(() => undefined);
+    const status = String(scrapeSnapshot.value?.status || "");
+    const settled = status === "paused"
+      || status === "failed"
+      || status === "interrupted"
+      || status === "cancelled"
+      || isCompletedTaskStatus(status);
+    if (!settled) {
+      scrapeBusy.value = true;
+      scrapeSnapshot.value = {
+        ...(scrapeSnapshot.value || { logs: [] }),
+        status: "pausing",
+        progress: { ...((scrapeSnapshot.value || {}).progress || {}), message: "暂停状态未知，请刷新后确认…" },
+        error: errorMessage(error, "暂停失败，请重试"),
+      };
+      deps.notify(errorMessage(error, "暂停失败，请重试"), "error");
+    }
+  } finally {
+    scrapeActionBusy.value = "";
+  }
+}
+
+
+async function continueScrape() {
   if (historyMode.value) return;
-  if (!scrapeTaskId.value || scrapeBusy.value) return;
+  if (!scrapeTaskId.value || scrapeBusy.value || scrapeActionBusy.value
+      || finishSaveBusy.value || cancelBusy.value) return;
+  const runId = scrapeTaskId.value;
+  scrapeActionBusy.value = "continue-scrape";
   scrapeBusy.value = true;
   scrapeCompleted.value = false;
-  pausedRunId.value = ""; // 切片7：清掉 DB paused 标记，进入内存工作模式
   interruptedRunId.value = "";
   restoredTaskHint.value = "";
   // 016：续跑起步沿用上一快照的断点进度，禁止归零后再跳到真实位置
@@ -492,32 +637,145 @@ async function continueScrape(targetAccount?: string) {
     progress: resumeProgress,
     logs: scrapeSnapshot.value?.logs || [],
   };
+  let resumeAccepted = false;
   try {
     const data = await apiRequest<{ task_id: string; skipped: number; old_jobs: number }>(
       `/api/task/continue/${encodeURIComponent(scrapeTaskId.value)}`,
-      { method: "POST", json: targetAccount ? { target_account: targetAccount } : undefined },
+      { method: "POST" },
     );
+    resumeAccepted = true;
+    pausedRunId.value = ""; // 只有服务端真正接续成功才离开 paused 状态。
     scrapeTaskId.value = data.task_id;
     pollRetryCount.value = 0;
-    switchAccountId.value = "";
     await deps.pollTask(data.task_id, "scrape");
   } catch (error) {
     scrapeBusy.value = false;
-    scrapeSnapshot.value = { status: "failed", progress: {}, logs: [], error: errorMessage(error, "断点续抓启动失败") };
+    // A successful continue owns a new task id.  If only its first poll
+    // fails, do not reconcile against the old paused run.
+    if (resumeAccepted) {
+      scrapeSnapshot.value = {
+        status: "failed",
+        progress: {},
+        logs: [],
+        error: errorMessage(error, "断点续抓启动失败"),
+      };
+      return;
+    }
+    const payload = error instanceof ApiError ? error.payload : {};
+    const normalizeStatus = (value: unknown) => String(value || "").trim().toLowerCase();
+    const responseStatus = normalizeStatus(payload.status);
+    const terminalStatuses = new Set([
+      "completed", "completed_with_pending", "partial", "succeeded", "done",
+      "cancelled", "terminal", "finished",
+    ]);
+    const isFailedOrTerminal = (status: string) => (
+      status === "failed" || status === "interrupted" || terminalStatuses.has(status)
+    );
+    const responseErrorCode = normalizeStatus(payload.error_code || payload.error);
+    const explicitSystemFailure = responseErrorCode.endsWith("_failed")
+      || responseErrorCode.endsWith("_failure")
+      || ["internal_error", "system_error", "server_error"].includes(responseErrorCode);
+
+    let refreshed: TaskSnapshot | null = null;
+    try {
+      refreshed = await apiRequest<TaskSnapshot>(
+        `/api/task-state/${encodeURIComponent(runId)}`,
+      );
+    } catch {
+      // Unknown state must keep the paused protection below.
+    }
+    const refreshedStatus = normalizeStatus(refreshed?.status);
+    const responseStillPaused = responseStatus === "paused" || responseStatus === "blocked";
+    const refreshedStillPaused = refreshedStatus === "paused" || refreshedStatus === "blocked";
+    const responseFailedOrTerminal = isFailedOrTerminal(responseStatus);
+    const refreshedFailedOrTerminal = isFailedOrTerminal(refreshedStatus);
+
+    // An explicit response status wins over a contradictory/stale refresh;
+    // otherwise an authoritative task-state paused/blocked result is the
+    // guard that preserves a user-paused task.
+    if (responseStillPaused || (!responseFailedOrTerminal && !explicitSystemFailure && refreshedStillPaused)) {
+      const recovered = refreshed || scrapeSnapshot.value || {};
+      const sharedReason = String(
+          payload.error_reason
+            || payload.user_message
+            || payload.message
+          || errorMessage(error, "断点续抓暂不可用"),
+      );
+      pausedRunId.value = runId;
+      scrapeTaskId.value = runId;
+      scrapeSnapshot.value = {
+        ...recovered,
+        status: "paused",
+        error: refreshed?.error || sharedReason,
+        pause_info: refreshed?.pause_info || (
+          payload.error_code || payload.error_reason
+            ? {
+              error_code: String(payload.error_code || ""),
+              error_reason: sharedReason,
+            }
+            : undefined
+        ),
+      };
+      return;
+    }
+
+    if (responseFailedOrTerminal || explicitSystemFailure || refreshedFailedOrTerminal) {
+      pausedRunId.value = "";
+      interruptedRunId.value = "";
+      const failedSnapshot = refreshedFailedOrTerminal ? refreshed : null;
+      scrapeSnapshot.value = {
+        ...(failedSnapshot || {}),
+        status: "failed",
+        progress: failedSnapshot?.progress || {},
+        logs: failedSnapshot?.logs || [],
+        error: failedSnapshot?.error || String(
+          payload.error_reason
+            || payload.user_message
+            || payload.message
+            || errorMessage(error, "断点续抓启动失败"),
+        ),
+      };
+      return;
+    }
+
+    // Neither the response nor task-state proves a terminal failure.  Keep
+    // the active paused guard so a user-paused background task cannot be
+    // mistaken for a free slot after a network/diagnostic failure.
+    const recovered = refreshed || scrapeSnapshot.value || {};
+    const sharedReason = String(
+        payload.error_reason
+          || payload.user_message
+          || payload.message
+        || errorMessage(error, "断点续抓暂不可用"),
+    );
+    pausedRunId.value = runId;
+    scrapeTaskId.value = runId;
+    scrapeSnapshot.value = {
+      ...recovered,
+      status: "paused",
+      error: refreshed?.error || sharedReason,
+      pause_info: refreshed?.pause_info || (
+        payload.error_code || payload.error_reason
+          ? {
+            error_code: String(payload.error_code || ""),
+            error_reason: sharedReason,
+          }
+          : undefined
+      ),
+    };
+  } finally {
+    scrapeActionBusy.value = "";
   }
 }
 
 
-async function loadSwitchAccounts() {
-  try {
-    const data = await apiRequest<{ accounts?: Array<{ id: string; name: string }> }>("/api/browser-accounts");
-    const list = Array.isArray(data.accounts)
-      ? data.accounts.map((a) => ({ id: String(a.id), name: a.id === "a" ? "默认账号" : (a.name || a.id) }))
-      : [];
-    switchAccounts.value = list.filter((a) => a.id);
-  } catch {
-    switchAccounts.value = [];
+async function cancelActiveScrape() {
+  const runId = pausedRunId.value || scrapeTaskId.value;
+  if (scrapeSnapshot.value?.status === "paused" || pausedRunId.value) {
+    await cancelPausedTask(runId);
+    return;
   }
+  await cancelScrape();
 }
 
 
@@ -654,7 +912,7 @@ async function continueAiScreen(platform?: Platform) {
 
 
 async function finishPausedTask(runId: string) {
-  if (!runId) return;
+  if (!runId || finishSaveBusy.value || cancelBusy.value || scrapeActionBusy.value) return;
   // 先停轮询，避免旧状态在保存完成后覆盖新快照。
   if (pollTimer.value) { window.clearTimeout(pollTimer.value); pollTimer.value = undefined; }
   finishSaveBusy.value = true;
@@ -664,7 +922,8 @@ async function finishPausedTask(runId: string) {
       snapshot_run_id?: string;
       scrape_task_id?: string;
       platform?: Platform;
-    }>(`/api/task/finish/${encodeURIComponent(runId)}`, { method: "POST" });
+    } & CleanupActionResponse>(`/api/task/finish/${encodeURIComponent(runId)}`, { method: "POST" });
+    const cleanupError = cleanupFailureMessage(data, "finish");
     scrapeBusy.value = false;
     screenBusy.value = false;
     recrawlBusy.value = false;
@@ -680,7 +939,7 @@ async function finishPausedTask(runId: string) {
     const totalScraped = Number(data.result?.total_scraped ?? 0);
     const finished: TaskSnapshot = {
       status: "completed_with_pending", stage: "done",
-      progress: { message: "已结束并保存部分结果" }, logs: [], error: "",
+      progress: { message: cleanupError || "已结束并保存部分结果" }, logs: [], error: cleanupError,
       scraped_count: totalScraped,
       source_total: totalScraped,
       platform: data.platform,
@@ -715,7 +974,10 @@ async function finishPausedTask(runId: string) {
     resultLoaded.value = true;
     currentRoundStatus.value = "screened";
     // 不强制跳结果页：由"查看结果/继续 AI 筛选"入口决定下一步。
-    deps.notify("任务已结束，已完成结果已保存", "success");
+    deps.notify(
+      cleanupError || "任务已结束，已完成结果已保存",
+      cleanupError ? "error" : "success",
+    );
   } catch (error) {
     deps.notify(errorMessage(error, "结束任务失败"), "error");
   }
@@ -726,21 +988,42 @@ async function finishPausedTask(runId: string) {
 
 // 切片7：统一取消 paused 任务（FR-024）。
 async function cancelPausedTask(runId: string) {
-  if (!runId) return;
+  if (!runId || cancelBusy.value || finishSaveBusy.value || scrapeActionBusy.value) return;
   cancelBusy.value = true;
   try {
-    await apiRequest(`/api/task/cancel/${encodeURIComponent(runId)}`, {
+    const data = await apiRequest<CleanupActionResponse>(
+      `/api/task/cancel/${encodeURIComponent(runId)}`,
+      {
       method: "POST",
-    });
+      },
+    );
+    const cleanupError = cleanupFailureMessage(data, "cancel");
     scrapeBusy.value = false;
     screenBusy.value = false;
     restoredTaskHint.value = "";
     pausedRunId.value = "";
     interruptedRunId.value = "";
     autoScreenArmed.value = false;
-    if (scrapeSnapshot.value) scrapeSnapshot.value = { status: "cancelled", progress: { message: "已取消任务" }, logs: [], error: "" };
-    if (screenSnapshot.value) screenSnapshot.value = { status: "cancelled", progress: { message: "已取消任务" }, logs: [], error: "" };
-    deps.notify("已取消任务，已有结果保留", "warning");
+    if (scrapeSnapshot.value) {
+      scrapeSnapshot.value = {
+        status: "cancelled",
+        progress: { message: cleanupError || "已取消任务" },
+        logs: [],
+        error: cleanupError,
+      };
+    }
+    if (screenSnapshot.value) {
+      screenSnapshot.value = {
+        status: "cancelled",
+        progress: { message: cleanupError || "已取消任务" },
+        logs: [],
+        error: cleanupError,
+      };
+    }
+    deps.notify(
+      cleanupError || "已取消任务，已有结果保留",
+      cleanupError ? "error" : "warning",
+    );
   } catch (error) {
     deps.notify(errorMessage(error, "取消失败，请重试"), "error");
   }
@@ -849,21 +1132,24 @@ async function startScreenFromHistory() {
   }
 }
 
-return {
-  restoreRunningTask,
-  startScrape,
-  cancelScrape,
-  continueScrape,
-  loadSwitchAccounts,
-  flowStartAiScreen,
-  startAiScreen,
-  continueAiScreen,
-  finishPausedTask,
-  cancelPausedTask,
-  handleStartScrapeClick,
-  openOneClick,
-  openOneClickDialog,
-  confirmOneClick,
-  startScreenFromHistory,
-};
+  return {
+    scrapeAction,
+    scrapeCanFinish,
+    restoreRunningTask,
+    startScrape,
+    pauseScrape,
+    cancelScrape,
+    cancelActiveScrape,
+    continueScrape,
+    flowStartAiScreen,
+    startAiScreen,
+    continueAiScreen,
+    finishPausedTask,
+    cancelPausedTask,
+    handleStartScrapeClick,
+    openOneClick,
+    openOneClickDialog,
+    confirmOneClick,
+    startScreenFromHistory,
+  };
 }

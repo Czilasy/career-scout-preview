@@ -363,7 +363,7 @@ def register_settings_routes(app, ctx):
                 "ok": True,
                 "message": (
                     f"已打开「{account['name']}」的{platform_label}自动化浏览器，"
-                    "请登录后回到任务页点「继续」"
+                    "请登录后回到任务页查看状态"
                 ),
             })
         if lock_kind is not None:

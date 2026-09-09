@@ -14,6 +14,7 @@ from webui.store import (
 )
 
 from tests.healthy_pipeline.harness import _make_app, _authed_test_client, _wait_for_pipeline_task, _pause_run
+from webui.task_pause_support import request_stop
 
 
 def _record_mock_scrape_completion(call_kwargs, combo_key, jobs, *, finalize=False):
@@ -287,6 +288,24 @@ class Slice7And9ApiTests(unittest.TestCase):
         self.assertEqual(data["pause_info"]["error_code"], "captcha_required")
         self.assertIn("验证码", data["pause_info"]["error_reason"])
 
+    def test_task_state_source_error_uses_registry_message_over_diagnostic(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+
+        self.store.update_screening_run(self.run_id, status="running")
+        self.store.update_screening_run(
+            self.run_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited",
+            error_reason="智联平台限流，需要冷却",
+        )
+
+        data = self.client.get(f"/api/task-state/{self.run_id}").get_json()
+
+        self.assertEqual(
+            data["pause_info"]["error_reason"],
+            ERROR_USER_MESSAGES["source_rate_limited"],
+        )
+        self.assertEqual(data["error"], ERROR_USER_MESSAGES["source_rate_limited"])
+
     def test_task_state_api_failed_with_non_systemic_error_code(self):
         """B052：失败态非系统性错误码也必须下发 pause_info，供内联展示。"""
         self.store.update_screening_run(self.run_id, status="running")
@@ -301,6 +320,61 @@ class Slice7And9ApiTests(unittest.TestCase):
         data = resp.get_json()
         self.assertEqual(data["status"], "failed")
         self.assertEqual(data["pause_info"]["error_code"], "source_invalid_output")
+
+    def test_fetch_job_details_source_error_uses_registry_message_over_diagnostic(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.pipeline_exec_details import fetch_job_details
+        from webui.source import SourceOutcome
+
+        class DiagnosticSource:
+            platform = "zhilian"
+            browser_account = "a"
+            cdp_port = 9223
+
+            def fetch_details_batch(self, _jobs, **_kwargs):
+                return {
+                    "j1": SourceOutcome.failure(
+                        failed_code="source_login_required",
+                        failed_reason="智联登录态失效，需要重新登录",
+                    ),
+                }
+
+        settings = {
+            "detail_batch_size": 1,
+            "detail_interval": 0,
+            "detail_reset_every": 1,
+            "detail_batch_cooldown": 0,
+            "detail_tab_pool_size": 1,
+        }
+        with tempfile.TemporaryDirectory() as artifact_dir, \
+                mock.patch("webui.pipeline_exec.load_advanced_settings", return_value=settings), \
+                mock.patch("webui.account_round_robin.make_detail_robin", return_value=None):
+            result = fetch_job_details(
+                [{"job_id": "j1", "jd": ""}], DiagnosticSource(),
+                artifact_dir=artifact_dir,
+            )
+
+        self.assertEqual(
+            result["jobs"][0]["jd_failed_reason"],
+            ERROR_USER_MESSAGES["source_login_required"],
+        )
+
+    def test_latest_running_task_source_error_uses_registry_message_over_diagnostic(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+
+        self.store.update_screening_run(self.run_id, status="running")
+        self.store.update_screening_run(
+            self.run_id, status="paused", current_stage="scrape",
+            error_code="source_verification_required",
+            error_reason="智联触发验证码，需要人工验证",
+        )
+
+        data = self.client.get("/api/latest-running-task").get_json()
+
+        self.assertEqual(
+            data["pause_info"]["error_reason"],
+            ERROR_USER_MESSAGES["source_verification_required"],
+        )
 
     def test_task_state_counts_success_failure_and_unstarted_separately(self):
         """暂停计数满足 success + failure + unstarted = total（SC-006）。"""
@@ -467,8 +541,8 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
         finally:
             temp.cleanup()
 
-    def test_initial_scrape_missing_cdp_source_pauses_persisted_run(self):
-        """列表任务构造 CDP source 失败时也必须持久化为可继续暂停。"""
+    def test_initial_scrape_missing_cdp_source_finishes_failed(self):
+        """列表任务构造 CDP source 失败时必须错误结束且释放占用。"""
         app, temp = _make_app()
         try:
             client = _authed_test_client(app)
@@ -482,9 +556,9 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
                 task_id = response.get_json()["task_id"]
                 paused = _wait_for_pipeline_task(client, task_id)
 
-            self.assertEqual(paused["status"], "paused", paused)
+            self.assertEqual(paused["status"], "failed", paused)
             run = app.config["TASK_STORE"].get_screening_run(task_id)
-            self.assertEqual(run["status"], "paused")
+            self.assertEqual(run["status"], "failed")
             self.assertEqual(run["error_code"], "source_cdp_unavailable")
             self.assertEqual(run["current_stage"], "scrape")
         finally:
@@ -539,6 +613,69 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
                 executor.shutdown(wait=True, cancel_futures=True)
             temp.cleanup()
 
+    def test_corrupt_scrape_checkpoint_finishes_failed_without_worker_for_both_platforms(self):
+        """损坏抓取断点必须保留原始字节、错误结束且不启动 worker。"""
+        for platform in ("boss", "zhilian"):
+            app, temp = _make_app()
+            try:
+                client = _authed_test_client(app)
+                store = app.config["TASK_STORE"]
+                ctx = app.config["PIPELINE_CONTEXT"]
+                run_id = f"corrupt-scrape-checkpoint-{platform}"
+                script_params = {"keyword": "前端", "city": ["上海"], "pages": 1}
+                store.create_screening_run(
+                    run_id,
+                    source_count=1,
+                    execution_params={
+                        "platform": platform,
+                        "script_params": script_params,
+                        "browser_account": "a",
+                        "cdp_port": 9222 if platform == "boss" else 9223,
+                        "profile_key": f"{platform}:a",
+                    },
+                )
+                _pause_run(
+                    store, run_id, error_code="captcha_required",
+                    current_stage="scrape",
+                )
+                raw_checkpoint = '{"credential":"must-not-be-replaced"'
+                with store._connection() as conn:
+                    conn.execute(
+                        "INSERT INTO pipeline_checkpoints "
+                        "(run_id, stage, completed_keys_json, saved_at) "
+                        "VALUES (?, 'scrape', ?, 1)",
+                        (run_id, raw_checkpoint),
+                    )
+                app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
+                with mock.patch.object(ctx, "activate_run_browser") as activate, \
+                        mock.patch.object(ctx.executor, "submit") as submit:
+                    response = client.post(
+                        f"/api/execute-search/continue/{run_id}",
+                        headers={"X-Boss-Token": app.config["API_TOKEN"]},
+                    )
+
+                self.assertEqual(response.status_code, 409, response.get_json())
+                payload = response.get_json()
+                self.assertEqual(payload["error"], "checkpoint_read_failed")
+                self.assertEqual(payload["error_code"], "checkpoint_read_failed")
+                self.assertEqual(payload["status"], "failed")
+                failed_run = store.get_screening_run(run_id)
+                self.assertEqual(failed_run["status"], "failed")
+                self.assertEqual(failed_run["source_count"], 1)
+                with store._connection() as conn:
+                    row = conn.execute(
+                        "SELECT completed_keys_json FROM pipeline_checkpoints "
+                        "WHERE run_id = ? AND stage = 'scrape'", (run_id,),
+                    ).fetchone()
+                self.assertEqual(row["completed_keys_json"], raw_checkpoint)
+                activate.assert_not_called()
+                submit.assert_not_called()
+            finally:
+                executor = app.config.get("PIPELINE_EXECUTOR")
+                if executor is not None:
+                    executor.shutdown(wait=True, cancel_futures=True)
+                temp.cleanup()
+
     def test_resume_survives_stale_pause_cleanup_timer(self):
         """暂停任务 30 分钟清理定时器不得误删续跑的新内存任务。
 
@@ -576,6 +713,7 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
                 if on_combo_done is not None:
                     on_combo_done("kw|city1", [_job1], ["kw|city1"])
                 _record_mock_scrape_completion(_kwargs, "kw|city1", [_job1])
+                request_stop({}, _kwargs.get("stop_event"), "pause")
                 return {
                     "ok": False, "jobs": [], "total_scraped": 0, "total_matched": 0,
                     "combinations": 2, "completed_combos": ["kw|city1"],
@@ -723,7 +861,7 @@ class Slice6AiPauseTests(unittest.TestCase):
 
 
 class Slice7HardStopFirstComboTests(unittest.TestCase):
-    """A.1 首组合验证码：completed=[] 也必须 paused，不得标 failed（阻断项 1）。"""
+    """A.1 首组合系统性验证码错误：completed=[] 也必须错误结束。"""
 
     def setUp(self):
         self.app, self.temp = _make_app()
@@ -745,11 +883,11 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
     def _auth(self):
         return {"X-Boss-Token": self.token}
 
-    def test_first_combo_captcha_paused_not_failed(self):
-        """首组合即触发 captcha：completed_combos=[] 也必须 paused，不得 failed。
+    def test_first_combo_captcha_finishes_failed(self):
+        """首组合即触发 captcha：completed_combos=[] 也必须错误结束。
 
-        修复目标（B.1）：app.py 中 `if completed and _pause_code` 改为
-        `if result.get("hard_stop"):`，识别 hard_stop 信号而非 completed 非空。
+        hard-stop 信号即使发生在首组合，也必须走失败收敛路径，不能因
+        completed 为空而误判为可恢复暂停。
         """
         # mock run_search 返回首组合 captcha hard_stop，completed=[]
         def fake_run_search(*args, **kwargs):
@@ -775,24 +913,20 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
             task_id = resp.get_json()["task_id"]
             snapshot = _wait_for_pipeline_task(self.client, task_id)
 
-        self.assertEqual(snapshot["status"], "paused", snapshot)
-        self.assertIn("captcha", snapshot.get("error", "").lower())
+        self.assertEqual(snapshot["status"], "failed", snapshot)
+        self.assertIn("验证码", snapshot.get("error", ""))
 
-        # 查 DB 中是否有 paused run（不得 failed）
+        # 查 DB 中是否有 failed run
         with self.store._connection() as conn:
             rows = conn.execute(
                 "SELECT id, status, error_code FROM screening_runs "
                 "WHERE id = ?", (task_id,)).fetchall()
             runs = [dict(r) for r in rows]
 
-        # 必须有 paused run，不得 failed
-        paused_runs = [r for r in runs if r.get("status") == "paused"
+        failed_runs = [r for r in runs if r.get("status") == "failed"
                        and r.get("error_code") == "captcha_required"]
-        self.assertTrue(paused_runs,
-                        f"首组合 captcha completed=[] 时必须 paused，实际 runs={runs}")
-        failed_runs = [r for r in runs if r.get("status") == "failed"]
-        self.assertFalse(failed_runs,
-                         f"首组合 captcha 不得标 failed，实际 failed_runs={failed_runs}")
+        self.assertTrue(failed_runs,
+                        f"首组合 captcha completed=[] 时必须 failed，实际 runs={runs}")
 
     def test_first_combo_captcha_no_other_combos_run(self):
         """首组合 captcha 后，后续组合不得继续抓取。"""
@@ -825,6 +959,62 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
         self.assertTrue(result.get("hard_stop"), result)
         self.assertEqual(result.get("hard_stop_code"), "source_verification_required")
         self.assertEqual(len(source.fetch_calls), 1, source.fetch_calls)
+
+    def test_chrome_initialization_failure_is_canonical_source_failure(self):
+        """Chrome 初始化失败使用 source_cdp_unavailable 的中央用户文案。"""
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.pipeline_exec import run_search
+
+        class InitFailureSource:
+            platform = "boss"
+            cdp_port = 9222
+
+            def preflight(self):
+                raise AssertionError("Chrome 初始化失败时不应进入预检")
+
+        raw_diagnostic = "raw chrome bootstrap diagnostic"
+        with mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready",
+            return_value=(False, raw_diagnostic),
+        ):
+            result = run_search(
+                {"keyword": "前端", "city": ["上海"]},
+                InitFailureSource(), pages=1, sleeper=lambda _s: None,
+            )
+
+        self.assertTrue(result["hard_stop"], result)
+        self.assertEqual(result["hard_stop_code"], "source_cdp_unavailable")
+        self.assertEqual(
+            result["error"], ERROR_USER_MESSAGES["source_cdp_unavailable"]
+        )
+        self.assertNotIn(raw_diagnostic, result["error"])
+
+    def test_preflight_rate_limit_is_hard_stop_for_pause(self):
+        """预检明确返回平台限流时，公共抓取编排必须交给 paused 路径。"""
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        class RateLimitedPreflightSource:
+            platform = "boss"
+            cdp_port = 9222
+
+            def preflight(self):
+                return SourceOutcome.failure(
+                    failed_code="source_rate_limited",
+                    safe_log="platform_rate_limit",
+                )
+
+        with mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")):
+            result = run_search(
+                {"keyword": "前端", "city": ["上海"]},
+                RateLimitedPreflightSource(),
+                pages=1,
+                sleeper=lambda _seconds: None,
+            )
+
+        self.assertFalse(result.get("ok"), result)
+        self.assertTrue(result.get("hard_stop"), result)
+        self.assertEqual(result.get("hard_stop_code"), "source_rate_limited")
 
     def test_first_combo_generic_failure_does_not_hard_stop(self):
         """普通失败不得暂停，也不得展示风控/受限文案。"""
@@ -931,6 +1121,11 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
 
         self.assertTrue(result["hard_stop"], result)
         self.assertEqual(result["hard_stop_code"], "source_cdp_unavailable")
+        from webui.error_registry import ERROR_USER_MESSAGES
+        self.assertEqual(
+            result["error"], ERROR_USER_MESSAGES["source_cdp_unavailable"]
+        )
+        self.assertNotIn("launch failed", result["error"])
         self.assertEqual(source.calls, 1)
 
     def test_list_cdp_lost_restart_success_still_lost_pauses(self):
@@ -1176,6 +1371,7 @@ class Slice9ResumeAfterRestartConservationTests(unittest.TestCase):
                     callback("前端|上海", old_jobs, ["前端|上海"])
                 _record_mock_scrape_completion(
                     kwargs, "前端|上海", old_jobs)
+                request_stop({}, kwargs.get("stop_event"), "pause")
                 return {
                     "ok": False, "jobs": old_jobs, "total_scraped": 1,
                     "total_matched": 1, "combinations": 2,
@@ -1658,6 +1854,627 @@ class Slice13ComboDoneHardStopTests(unittest.TestCase):
                         f"on_combo_done 失败必须 hard_stop，实际 {result}")
         self.assertEqual(result.get("hard_stop_code"), "internal_error",
                          f"hard_stop_code 必须 internal_error，实际 {result.get('hard_stop_code')}")
+
+
+class ScrapePauseResumeContractTests(unittest.TestCase):
+    """BOSS/智联共用抓取暂停、取消和断点续跑契约。"""
+
+    @staticmethod
+    def _task(run_id, platform, *, status="running", stop_event=None):
+        return {
+            "kind": "scrape", "status": status, "progress": {}, "logs": [],
+            "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": stop_event or threading.Event(),
+            "platform": platform, "browser_account": "a",
+            "cdp_port": 9222 if platform == "boss" else 9223,
+            "profile_key": f"{platform}:a",
+            "script_params": {"keyword": ["前端", "后端", "测试"],
+                               "city": ["全国"], "pages": 2},
+            "run_id": run_id,
+        }
+
+    def test_pause_route_accepts_running_scrape_for_both_platforms(self):
+        """统一 pause API 对两个抓取平台都返回既有 pausing 契约。"""
+        for platform in ("boss", "zhilian"):
+            app, temp = _make_app()
+            try:
+                client = _authed_test_client(app)
+                store = app.config["TASK_STORE"]
+                run_id = f"scrape-pause-{platform}"
+                params = {
+                    "platform": platform,
+                    "script_params": {"keyword": "前端", "city": ["全国"], "pages": 2},
+                    "browser_account": "a",
+                    "cdp_port": 9222 if platform == "boss" else 9223,
+                    "profile_key": f"{platform}:a",
+                }
+                store.create_screening_run(run_id, source_count=1,
+                                           execution_params=params)
+                store.update_screening_run(run_id, status="running",
+                                            current_stage="scrape")
+                stop_event = threading.Event()
+                app.config["PIPELINE_TASKS"][run_id] = self._task(
+                    run_id, platform, stop_event=stop_event)
+
+                response = client.post(f"/api/task/pause/{run_id}")
+
+                self.assertEqual(response.status_code, 200, response.get_json())
+                self.assertEqual(response.get_json()["status"], "pausing")
+                task = app.config["PIPELINE_TASKS"][run_id]
+                self.assertEqual(task["stop_mode"], "pause")
+                self.assertTrue(stop_event.is_set())
+            finally:
+                executor = app.config.get("PIPELINE_EXECUTOR")
+                if executor is not None:
+                    executor.shutdown(wait=True, cancel_futures=True)
+                temp.cleanup()
+
+    def test_runner_distinguishes_pause_from_cancel_for_both_platforms(self):
+        """stop_event 的 pause 请求落 paused；普通 stop 仍落 cancelled。"""
+        from types import SimpleNamespace
+        from webui.runners.pipeline_task import run_pipeline_task
+
+        for platform in ("boss", "zhilian"):
+            for stop_mode, expected_task_status, expected_run_status in (
+                ("pause", "paused", "paused"),
+                ("cancel", "cancelled", "interrupted"),
+            ):
+                app, temp = _make_app()
+                try:
+                    store = app.config["TASK_STORE"]
+                    ctx = app.config["PIPELINE_CONTEXT"]
+                    run_id = f"scrape-{platform}-{stop_mode}"
+                    script_params = {
+                        "keyword": ["前端", "后端", "测试"],
+                        "city": ["全国"], "pages": 2,
+                    }
+                    store.create_screening_run(
+                        run_id, source_count=6,
+                        execution_params={
+                            "platform": platform,
+                            "script_params": script_params,
+                            "browser_account": "a",
+                            "cdp_port": 9222 if platform == "boss" else 9223,
+                            "profile_key": f"{platform}:a",
+                        },
+                    )
+                    store.update_screening_run(
+                        run_id, status="running", current_stage="scrape",
+                    )
+                    stop_event = threading.Event()
+                    if stop_mode == "pause":
+                        stop_event.stop_mode = "pause"
+                    stop_event.set()
+                    app.config["PIPELINE_TASKS"][run_id] = self._task(
+                        run_id, platform, stop_event=stop_event,
+                    )
+                    source = SimpleNamespace(platform=platform,
+                                             cdp_port=9222 if platform == "boss" else 9223)
+
+                    def fake_search(*_args, **_kwargs):
+                        return {
+                            "ok": True, "jobs": [], "total_scraped": 0,
+                            "total_matched": 0, "combinations": 6,
+                            "completed_combos": ["前端|全国"], "error": "",
+                            "integrity": {"conclusion": "succeeded"},
+                        }
+
+                    with mock.patch.object(ctx, "activate_task_browser"), \
+                            mock.patch.object(ctx, "make_cdp_source",
+                                               return_value=source), \
+                            mock.patch.object(ctx, "schedule_pipeline_task_cleanup"), \
+                            mock.patch.object(ctx, "clear_auto_screen"), \
+                            mock.patch("webui.pipeline_exec.run_search",
+                                       side_effect=fake_search):
+                        run_pipeline_task(ctx, run_id, script_params)
+
+                    self.assertEqual(
+                        app.config["PIPELINE_TASKS"][run_id]["status"],
+                        expected_task_status,
+                    )
+                    run = store.get_screening_run(run_id)
+                    self.assertEqual(run["status"], expected_run_status)
+                    if stop_mode == "pause":
+                        self.assertEqual(store.load_checkpoint(run_id, "scrape"),
+                                         {"前端|全国"})
+                        pauses = [event for event in store.list_task_events(run_id)
+                                  if event["type"] == "pause"]
+                        self.assertEqual(len(pauses), 1)
+                        self.assertEqual(pauses[0]["payload"]["code"],
+                                         "user_paused")
+                    else:
+                        self.assertEqual(store.load_checkpoint(run_id, "scrape"),
+                                         set())
+                finally:
+                    executor = app.config.get("PIPELINE_EXECUTOR")
+                    if executor is not None:
+                        executor.shutdown(wait=True, cancel_futures=True)
+                    temp.cleanup()
+
+    def test_real_pipeline_runner_and_search_persist_pause_checkpoint(self):
+        """真实 runner/search 在两个平台暂停后保留可恢复断点。"""
+        from types import SimpleNamespace
+
+        from webui.runners.pipeline_task import run_pipeline_task
+        from webui.source import SourceOutcome
+
+        for platform in ("boss", "zhilian"):
+            app, temp = _make_app()
+            try:
+                client = _authed_test_client(app)
+                token = app.config["API_TOKEN"]
+                ctx = app.config["PIPELINE_CONTEXT"]
+                store = app.config["TASK_STORE"]
+                run_id = f"real-pipeline-pause-{platform}"
+                store.create_screening_run(
+                    run_id,
+                    source_count=1,
+                    execution_params={"platform": platform},
+                )
+                stop_event = threading.Event()
+                task = self._task(run_id, platform, stop_event=stop_event)
+                app.config["PIPELINE_TASKS"][run_id] = task
+                fetch_entered = threading.Event()
+                release_fetch = threading.Event()
+                combo_key = "前端|上海"
+                job = {
+                    "platform_job_id": f"{platform}-job-1",
+                    "job_id": f"{platform}-job-1",
+                    "title": "测试岗位",
+                    "source_url": f"https://example.test/{platform}/job-1",
+                }
+
+                def fetch_list(plan_item, *, on_page_completed=None):
+                    event = {
+                        "combo_key": plan_item["combo_key"],
+                        "page": 1,
+                        "target_pages": 1,
+                        "resume_page": 2,
+                        "has_more": False,
+                        "jobs_count": 1,
+                        "returned_count": 1,
+                        "new_unique_count": 1,
+                        "last_completed_page": 1,
+                        "scope_complete": True,
+                        "source_exhausted": True,
+                        "jobs_snapshot": [job],
+                    }
+                    if on_page_completed is not None:
+                        on_page_completed(event)
+                    fetch_entered.set()
+                    if not release_fetch.wait(timeout=3):
+                        raise AssertionError("source fetch was not released")
+                    return SourceOutcome(
+                        ok=True,
+                        jobs=[job],
+                        input_hash=f"{platform}-input-hash",
+                        scope_complete=True,
+                        source_exhausted=True,
+                        stop_reason="target_reached",
+                        page_evidence=[event],
+                    )
+
+                source = SimpleNamespace(
+                    platform=platform,
+                    cdp_port=9222 if platform == "boss" else 9223,
+                    preflight=lambda: SourceOutcome.success(),
+                    fetch_list=fetch_list,
+                )
+                script_params = {
+                    "keyword": "前端", "city": ["上海"], "pages": 1,
+                }
+
+                with mock.patch.object(ctx, "activate_task_browser"), \
+                        mock.patch.object(ctx, "make_cdp_source", return_value=source), \
+                        mock.patch.object(ctx, "schedule_pipeline_task_cleanup"), \
+                        mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                                   return_value=(True, "")):
+                    worker = threading.Thread(
+                        target=run_pipeline_task,
+                        args=(ctx, run_id, script_params),
+                    )
+                    worker.start()
+                    self.assertTrue(fetch_entered.wait(timeout=3))
+                    response = client.post(
+                        f"/api/task/pause/{run_id}",
+                        headers={"X-Boss-Token": token},
+                    )
+                    self.assertEqual(response.status_code, 200, response.get_json())
+                    self.assertEqual(response.get_json()["status"], "pausing")
+                    release_fetch.set()
+                    worker.join(timeout=5)
+
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(app.config["PIPELINE_TASKS"][run_id]["status"], "paused")
+                run = store.get_screening_run(run_id)
+                self.assertEqual(run["status"], "paused")
+                self.assertEqual(store.load_checkpoint(run_id, "scrape"), {combo_key})
+                task_state_response = client.get(f"/api/task-state/{run_id}")
+                self.assertEqual(task_state_response.status_code, 200,
+                                 task_state_response.get_json())
+                task_state = task_state_response.get_json()
+                self.assertEqual(task_state["status"], "paused")
+                self.assertNotEqual(
+                    (task_state.get("integrity") or {}).get("conclusion"),
+                    "interrupted",
+                )
+                whitebox_run = store.get_whitebox_run("scrape", run_id)
+                self.assertIsNotNone(whitebox_run)
+                self.assertNotEqual(whitebox_run["lifecycle_status"], "terminal")
+                self.assertNotEqual(whitebox_run.get("conclusion"), "interrupted")
+                whitebox_events = store.list_whitebox_events(whitebox_run["id"])
+                self.assertTrue(any(
+                    event["event_type"] == "task_paused"
+                    and '"user_paused"' in event["payload_json"]
+                    for event in whitebox_events
+                ))
+            finally:
+                executor = app.config.get("PIPELINE_EXECUTOR")
+                if executor is not None:
+                    executor.shutdown(wait=True, cancel_futures=True)
+                temp.cleanup()
+
+    def test_continue_preserves_frozen_scope_and_checkpoint_for_both_platforms(self):
+        """统一 continue 使用原 run 的平台、配置、3 组合/2 页和 checkpoint。"""
+        from webui.execution_config import ExecutionConfigSnapshot, normalize_scope
+
+        config = ExecutionConfigSnapshot.create({
+            "inter_combo_delay": 7,
+            "detail_batch_size": 4,
+            "detail_interval": 1,
+            "detail_reset_every": 10,
+            "detail_batch_cooldown": 2,
+            "detail_tab_pool_size": 2,
+            "screen_batch_size": 3,
+            "screen_concurrency": 1,
+            "match_batch_size": 2,
+            "match_concurrency": 1,
+        })
+        for platform in ("boss", "zhilian"):
+            app, temp = _make_app()
+            try:
+                client = _authed_test_client(app)
+                store = app.config["TASK_STORE"]
+                ctx = app.config["PIPELINE_CONTEXT"]
+                run_id = f"scrape-continue-{platform}"
+                script_params = {
+                    "keyword": ["前端", "后端", "测试"],
+                    "city": ["全国"], "pages": 2,
+                }
+                scope = normalize_scope(
+                    keywords=script_params["keyword"], scope_kind="nationwide",
+                    cities=[], pages_per_combination=2, platform=platform,
+                )
+                store.create_screening_run(
+                    run_id, source_count=scope.combination_count,
+                    execution_params={
+                        "platform": platform, "script_params": script_params,
+                        "browser_account": "a",
+                        "cdp_port": 9222 if platform == "boss" else 9223,
+                        "profile_key": f"{platform}:a",
+                        "execution_config": config.to_dict(),
+                        "frozen_scope": scope.to_dict(),
+                    },
+                )
+                store.update_screening_run(
+                    run_id, status="running", current_stage="scrape",
+                )
+                store.save_checkpoint(run_id, "scrape", ["前端|全国"])
+                store.save_scrape_page_progress(run_id, "后端|全国", {
+                    "combo_key": "后端|全国", "page": 1, "target_pages": 2,
+                    "resume_page": 2, "has_more": True, "jobs_count": 1,
+                    "jobs_snapshot": [{"job_id": "saved-page-job"}],
+                })
+                store.update_screening_run(run_id, status="paused",
+                                            current_stage="scrape",
+                                            error_code="captcha_required")
+                app.config["PIPELINE_TASKS"][run_id] = self._task(
+                    run_id, platform, status="paused",
+                )
+                old_stop_event = app.config["PIPELINE_TASKS"][run_id]["stop_event"]
+                captured = {}
+
+                class _Future:
+                    def cancel(self):
+                        return True
+
+                def submit(fn):
+                    captured["fn"] = fn
+                    return _Future()
+
+                app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
+                with mock.patch.object(ctx, "activate_run_browser"), \
+                        mock.patch.object(ctx.executor, "submit", side_effect=submit), \
+                        mock.patch.object(ctx, "run_pipeline_task") as run_task:
+                    response = client.post(f"/api/task/continue/{run_id}")
+                    self.assertEqual(response.status_code, 200, response.get_json())
+                    captured["fn"]()
+
+                task = app.config["PIPELINE_TASKS"][run_id]
+                self.assertEqual(task["platform"], platform)
+                self.assertEqual(task["browser_account"], "a")
+                self.assertEqual(task["cdp_port"], 9222 if platform == "boss" else 9223)
+                self.assertEqual(task["profile_key"], f"{platform}:a")
+                self.assertEqual(task["skip_combos"], {"前端|全国"})
+                self.assertEqual(len(task["skip_combos"]), 1)
+                self.assertEqual(run_task.call_args.args[1], script_params)
+                resumed_config = run_task.call_args.args[2]
+                resumed_scope = run_task.call_args.args[3]
+                self.assertEqual(resumed_config.config_digest, config.config_digest)
+                self.assertEqual(resumed_scope.scope_digest, scope.scope_digest)
+                self.assertEqual(resumed_scope.combination_count, 3)
+                self.assertEqual(resumed_scope.pages_per_combination, 2)
+                self.assertEqual(store.get_screening_run(run_id)["status"], "running")
+                self.assertIsNot(task["stop_event"], old_stop_event)
+                self.assertFalse(task["stop_event"].is_set())
+                task_state = client.get(f"/api/task-state/{run_id}").get_json()
+                self.assertEqual(task_state["status"], "running")
+                self.assertEqual(task_state["progress"]["current"], 1)
+            finally:
+                executor = app.config.get("PIPELINE_EXECUTOR")
+                if executor is not None:
+                    executor.shutdown(wait=True, cancel_futures=True)
+                temp.cleanup()
+
+
+class ResumeSourceFailureMessageTests(unittest.TestCase):
+    """续跑阻断的 source_* 用户文案必须走中央注册表。"""
+
+    def test_persist_jd_job_failures_normalizes_only_source_reason(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+
+        app, temp = _make_app()
+        try:
+            store = app.config["TASK_STORE"]
+            ctx = app.config["PIPELINE_CONTEXT"]
+            run_id = "persist-jd-failures-message"
+            store.create_screening_run(run_id, source_count=2)
+            source_diagnostic = "raw chrome producer diagnostic"
+            detail_diagnostic = "single job detail timed out at platform"
+
+            ctx.persist_jd_job_failures(
+                run_id,
+                [
+                    {
+                        "job_id": "source-job",
+                        "jd_failed_code": "source_cdp_unavailable",
+                        "jd_failed_reason": source_diagnostic,
+                        "jd_failed_evidence": source_diagnostic,
+                    },
+                    {
+                        "job_id": "detail-job",
+                        "jd_failed_code": "detail_timeout",
+                        "jd_failed_reason": detail_diagnostic,
+                        "jd_failed_evidence": detail_diagnostic,
+                    },
+                ],
+                stage="jd_detail",
+                platform="zhilian",
+            )
+
+            source_pending = store.get_pending_result(run_id, "source-job")
+            detail_pending = store.get_pending_result(run_id, "detail-job")
+            self.assertEqual(
+                source_pending["ai_payload"]["reason"],
+                ERROR_USER_MESSAGES["source_cdp_unavailable"],
+            )
+            self.assertNotIn(
+                source_diagnostic, source_pending["ai_payload"]["reason"],
+            )
+            self.assertEqual(
+                detail_pending["ai_payload"]["reason"], detail_diagnostic,
+            )
+        finally:
+            executor = app.config.get("PIPELINE_EXECUTOR")
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+            temp.cleanup()
+
+    def test_cdp_probe_failure_uses_registry_message_on_continue_apis(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+
+        app, temp = _make_app()
+        try:
+            client = _authed_test_client(app)
+            store = app.config["TASK_STORE"]
+            canonical_reason = ERROR_USER_MESSAGES["source_cdp_unavailable"]
+            raw_diagnostic = "raw chrome probe diagnostic"
+
+            cases = (
+                (
+                    "task",
+                    "resume-cdp-task-message",
+                    "scrape",
+                    {
+                        "platform": "boss",
+                        "script_params": {
+                            "keyword": "前端", "city": ["上海"], "pages": 1,
+                        },
+                    },
+                    "/api/task/continue/{}",
+                ),
+                (
+                    "recrawl",
+                    "resume-cdp-recrawl-message",
+                    "recrawl_jd",
+                    {
+                        "platform": "boss",
+                        "source_run_id": "resume-cdp-source",
+                        "job_ids": ["job-1"],
+                        "profile_summary": "前端工程师",
+                    },
+                    "/api/recrawl/continue/{}",
+                ),
+            )
+            for kind, run_id, stage, extra_params, route_template in cases:
+                with self.subTest(kind=kind):
+                    params = {
+                        **extra_params,
+                        "browser_account": "a",
+                        "cdp_port": 9222,
+                        "profile_key": "boss:a",
+                    }
+                    store.create_screening_run(
+                        run_id, source_count=1, execution_params=params,
+                    )
+                    _pause_run(
+                        store, run_id, current_stage=stage,
+                        error_code="source_cdp_unavailable",
+                    )
+                    ctx = app.config["PIPELINE_CONTEXT"]
+                    with mock.patch(
+                        "webui.pipeline_exec.probe_chrome_ready",
+                        return_value=(False, raw_diagnostic),
+                    ), mock.patch.object(ctx, "activate_run_browser"), \
+                            mock.patch.object(ctx.executor, "submit") as submit, \
+                            mock.patch(
+                                "webui.task_continue_api.invalidate_login_cache_for_resume",
+                            ):
+                        response = client.post(
+                            route_template.format(run_id),
+                            headers={"X-Boss-Token": app.config["API_TOKEN"]},
+                        )
+
+                    self.assertEqual(response.status_code, 409, response.get_json())
+                    payload = response.get_json()
+                    self.assertEqual(payload["error"], "block_not_resolved")
+                    self.assertEqual(
+                        payload["error_code"], "source_cdp_unavailable",
+                    )
+                    self.assertEqual(payload["error_reason"], canonical_reason)
+                    self.assertNotIn(raw_diagnostic, payload["error_reason"])
+                    self.assertEqual(store.get_screening_run(run_id)["status"], "paused")
+                    submit.assert_not_called()
+        finally:
+            executor = app.config.get("PIPELINE_EXECUTOR")
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+            temp.cleanup()
+
+    def test_source_preflight_failure_uses_registry_message_on_continue(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.source import SourceOutcome
+
+        app, temp = _make_app()
+        try:
+            client = _authed_test_client(app)
+            store = app.config["TASK_STORE"]
+            ctx = app.config["PIPELINE_CONTEXT"]
+            run_id = "resume-source-preflight-message"
+            store.create_screening_run(
+                run_id,
+                source_count=1,
+                execution_params={
+                    "platform": "boss",
+                    "script_params": {
+                        "keyword": "前端", "city": ["上海"], "pages": 1,
+                    },
+                    "browser_account": "a",
+                    "cdp_port": 9222,
+                    "profile_key": "boss:a",
+                },
+            )
+            _pause_run(
+                store,
+                run_id,
+                current_stage="scrape",
+                error_code="source_request_limit_exceeded",
+            )
+            raw_diagnostic = "adapter request budget diagnostic"
+
+            class _Source:
+                def preflight(self):
+                    return SourceOutcome.failure(
+                        failed_code="source_request_limit_exceeded",
+                        failed_reason=raw_diagnostic,
+                    )
+
+            source = _Source()
+            with mock.patch.object(ctx, "source_class", return_value=source), \
+                    mock.patch.object(ctx, "activate_run_browser"), \
+                    mock.patch("webui.pipeline_exec.probe_chrome_ready",
+                               return_value=(True, "")), \
+                    mock.patch(
+                        "webui.task_continue_api.invalidate_login_cache_for_resume",
+                    ), mock.patch.object(ctx.executor, "submit") as submit:
+                response = client.post(f"/api/task/continue/{run_id}")
+
+            self.assertEqual(response.status_code, 409, response.get_json())
+            payload = response.get_json()
+            self.assertEqual(payload["error"], "block_not_resolved")
+            self.assertEqual(
+                payload["error_code"], "source_request_limit_exceeded",
+            )
+            self.assertEqual(
+                payload["error_reason"],
+                ERROR_USER_MESSAGES["source_request_limit_exceeded"],
+            )
+            self.assertNotIn(raw_diagnostic, payload["error_reason"])
+            submit.assert_not_called()
+        finally:
+            executor = app.config.get("PIPELINE_EXECUTOR")
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+            temp.cleanup()
+
+    def test_configured_source_checker_uses_registry_message_on_continue(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+
+        app, temp = _make_app()
+        try:
+            client = _authed_test_client(app)
+            store = app.config["TASK_STORE"]
+            run_id = "resume-source-checker-message"
+            store.create_screening_run(
+                run_id,
+                source_count=1,
+                execution_params={
+                    "platform": "boss",
+                    "script_params": {
+                        "keyword": "前端", "city": ["上海"], "pages": 1,
+                    },
+                    "browser_account": "a",
+                    "cdp_port": 9222,
+                    "profile_key": "boss:a",
+                },
+            )
+            _pause_run(
+                store,
+                run_id,
+                current_stage="scrape",
+                error_code="login_expired",
+            )
+            raw_diagnostic = "checker raw login diagnostic"
+            app.config["RESUME_BLOCK_CHECKER"] = (
+                lambda _run: (False, "login_expired", raw_diagnostic)
+            )
+
+            with mock.patch(
+                "webui.task_continue_api.invalidate_login_cache_for_resume",
+            ), mock.patch.object(
+                app.config["PIPELINE_EXECUTOR"], "submit",
+            ) as submit:
+                response = client.post(f"/api/task/continue/{run_id}")
+
+            self.assertEqual(response.status_code, 409, response.get_json())
+            payload = response.get_json()
+            self.assertEqual(payload["error"], "block_not_resolved")
+            self.assertEqual(payload["error_code"], "source_login_required")
+            self.assertEqual(
+                payload["error_reason"],
+                ERROR_USER_MESSAGES["source_login_required"],
+            )
+            self.assertNotIn(raw_diagnostic, payload["error_reason"])
+            self.assertEqual(
+                store.get_screening_run(run_id)["error_reason"],
+                ERROR_USER_MESSAGES["source_login_required"],
+            )
+            submit.assert_not_called()
+        finally:
+            executor = app.config.get("PIPELINE_EXECUTOR")
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+            temp.cleanup()
 
 
 if __name__ == "__main__":

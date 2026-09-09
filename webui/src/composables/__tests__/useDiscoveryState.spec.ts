@@ -4,6 +4,7 @@
 import { ref } from "vue";
 import {
   deriveLiveTaskStep,
+  hasLiveTaskState,
   liveTaskStep,
   resultCountsFromPipeline,
   useDiscoveryState,
@@ -28,12 +29,21 @@ describe("useDiscoveryState.liveTaskStep（035 真实进度页派生）", () => 
     expect(liveTaskStep(state)).toBe("search");
   });
 
-  it("① 抓取排队/暂停/失败/中断（均属未结束）→ search（02）", () => {
-    for (const status of ["queued", "paused", "failed", "interrupted"]) {
+  it("① 抓取排队/暂停 → search（02），错误/中断快照不再算活任务", () => {
+    for (const status of ["queued", "paused"]) {
       const state = makeState({
         scrapeSnapshot: ref({ status, progress: {}, logs: [] }),
       });
       expect(liveTaskStep(state)).toBe("search");
+    }
+
+    for (const status of ["failed", "interrupted"]) {
+      const state = makeState({
+        scrapeSnapshot: ref({ status, progress: {}, logs: [] }),
+      });
+      expect(liveTaskStep(state)).toBe("");
+      expect(state.pipelineBusy.value).toBe(false);
+      expect(hasLiveTaskState(state)).toBe(false);
     }
   });
 
@@ -51,9 +61,8 @@ describe("useDiscoveryState.liveTaskStep（035 真实进度页派生）", () => 
     }))).toBe("screen");
   });
 
-  it("② pausedRunId / interruptedRunId 存在（筛选侧未结束）→ screen（03）", () => {
+  it("② pausedRunId 存在（筛选侧未结束）→ screen（03）", () => {
     expect(liveTaskStep(makeState({ pausedRunId: ref("run-1") }))).toBe("screen");
-    expect(liveTaskStep(makeState({ interruptedRunId: ref("run-2") }))).toBe("screen");
   });
 
   it("③ 抓取+筛选同时活 → 以真实进度为准：抓取仍活 → search；抓取已终态+筛选活 → screen", () => {

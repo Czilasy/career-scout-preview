@@ -133,7 +133,6 @@ describe("useDiscoveryTasks.maybeAutoStartNewRound（026 B078）", () => {
     expect(deps.clearLatestResult).not.toHaveBeenCalled();
   });
 });
-
 // 035：未结束任务保护（B086）与后台跑完历史冒泡（B087）
 describe("useDiscoveryTasks.maybeAutoStartNewRound（035 未结束任务保护）", () => {
   beforeEach(() => {
@@ -168,14 +167,14 @@ describe("useDiscoveryTasks.maybeAutoStartNewRound（035 未结束任务保护�
     expect(deps.loadLatestResult).not.toHaveBeenCalled();
   });
 
-  it("T003c: 未结束任务存在（interruptedRunId）→ 恢复现场，不 reset、不取消", async () => {
+  it("T003c: 抓取中断标记不再阻塞新一轮探测", async () => {
     const state = makeState({ interruptedRunId: ref("run-2") });
     const deps = makeDeps();
     const tasks = useDiscoveryTasks(state, deps);
 
     await tasks.maybeAutoStartNewRound();
 
-    expect(deps.fetchMergedLatestResult).not.toHaveBeenCalled();
+    expect(deps.fetchMergedLatestResult).toHaveBeenCalled();
     expect(deps.clearLatestResult).not.toHaveBeenCalled();
     expect(deps.loadLatestResult).not.toHaveBeenCalled();
   });
@@ -226,6 +225,66 @@ describe("useDiscoveryTasks.pollTask（035 后台跑完历史冒泡）", () => {
   });
 });
 
+describe("useDiscoveryTasks.pollTask 错误态不阻塞新任务", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset();
+  });
+
+  it.each(["failed", "interrupted"] as const)(
+    "抓取 %s 保留错误快照但清除旧恢复标记",
+    async (status) => {
+      const taskId = `scrape-${status}`;
+      const state = makeState({
+        scrapeTaskId: ref(taskId),
+        pausedRunId: ref("stale-paused"),
+        interruptedRunId: ref("stale-interrupted"),
+      });
+      apiRequestMock.mockResolvedValue({
+        status,
+        progress: { message: "抓取失败" },
+        logs: [],
+        error: "抓取失败",
+      });
+      const tasks = useDiscoveryTasks(state, makeDeps());
+
+      await tasks.pollTask(taskId, "scrape");
+
+      expect(state.scrapeSnapshot.value?.status).toBe(status);
+      expect(state.pausedRunId.value).toBe("");
+      expect(state.interruptedRunId.value).toBe("");
+      expect(state.pipelineBusy.value).toBe(false);
+    },
+  );
+
+  it.each(["failed", "interrupted"] as const)(
+    "AI 筛选 %s 保留错误快照但清除旧恢复标记",
+    async (status) => {
+      const taskId = `screen-${status}`;
+      const state = makeState({
+        screenTaskId: ref(taskId),
+        screenBusy: ref(true),
+        pausedRunId: ref("stale-paused"),
+        interruptedRunId: ref("stale-interrupted"),
+      });
+      apiRequestMock.mockResolvedValue({
+        status,
+        progress: { message: "AI 筛选失败" },
+        logs: [],
+        error: "AI 筛选失败",
+      });
+      const tasks = useDiscoveryTasks(state, makeDeps());
+
+      await tasks.pollTask(taskId, "screen");
+
+      expect(state.screenSnapshot.value?.status).toBe(status);
+      expect(state.screenBusy.value).toBe(false);
+      expect(state.pausedRunId.value).toBe("");
+      expect(state.interruptedRunId.value).toBe("");
+      expect(state.pipelineBusy.value).toBe(false);
+    },
+  );
+});
+
 describe("useDiscoveryTasks.pollRecrawl（033 V2 完整性优先）", () => {
   beforeEach(() => {
     apiRequestMock.mockReset();
@@ -254,6 +313,34 @@ describe("useDiscoveryTasks.pollRecrawl（033 V2 完整性优先）", () => {
     expect(state.activeStep.value).toBe("screen");
     expect(deps.notify).toHaveBeenCalledWith("证据不足", "warning");
   });
+
+  it.each(["failed", "interrupted"] as const)(
+    "重抓 %s 保留错误快照但清除旧恢复标记",
+    async (status) => {
+      const state = makeState({
+        recrawlBusy: ref(true),
+        recrawlTaskId: ref(`recrawl-${status}`),
+        pausedRunId: ref("stale-paused"),
+        interruptedRunId: ref("stale-interrupted"),
+      });
+      const deps = makeDeps();
+      const tasks = useDiscoveryTasks(state, deps);
+      apiRequestMock.mockResolvedValue({
+        status,
+        progress: { message: "重抓失败" },
+        logs: [],
+        error: "重抓失败",
+      });
+
+      await tasks.pollRecrawl(`recrawl-${status}`);
+
+      expect(state.recrawlSnapshot.value?.status).toBe(status);
+      expect(state.recrawlBusy.value).toBe(false);
+      expect(state.pausedRunId.value).toBe("");
+      expect(state.interruptedRunId.value).toBe("");
+      expect(state.pipelineBusy.value).toBe(false);
+    },
+  );
 });
 
 // 035 US2（真机问题②，FR-011）：入口 5（启动/刷新自动开新一轮）的

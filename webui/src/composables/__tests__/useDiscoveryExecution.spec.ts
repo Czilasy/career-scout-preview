@@ -1,10 +1,10 @@
 // 026 B078：restoreRunningTask 以"是否进过 04 页"为唯一闸门。
 // - 已进 04 页（resultsPageSeen=true）＝上次流程已结束 → 即使后端残留
 //   interrupted run 也不恢复 02/03 页、不弹"服务重启被中断"提示（FR-002/FR-003）。
-// - 未进 04 页 → 走既有 interrupted 恢复续跑（FR-004，B068 行为不变）。
+// - AI failed/interrupted 只展示终态事实，不把错误快照当作占用中的恢复任务。
 import { ref } from "vue";
 import { flushPromises } from "@vue/test-utils";
-import { apiRequest } from "../../api";
+import { ApiError, apiRequest } from "../../api";
 import type { FrozenSearchScope } from "../../types";
 import { useDiscoveryExecution } from "../useDiscoveryExecution";
 import { useDiscoveryState } from "../useDiscoveryState";
@@ -13,6 +13,16 @@ import type { ExecutionNeeds } from "../discoveryDeps";
 
 vi.mock("../../api", () => ({
   apiRequest: vi.fn(),
+  ApiError: class MockApiError extends Error {
+    status: number;
+    payload: Record<string, unknown>;
+
+    constructor(status: number, payload: Record<string, unknown>) {
+      super(String(payload.message || payload.error || "请求失败"));
+      this.status = status;
+      this.payload = payload;
+    }
+  },
   errorMessage: (error: unknown, fallback: string) => fallback,
 }));
 vi.mock("../../composables/useTheme", () => ({
@@ -98,19 +108,43 @@ describe("useDiscoveryExecution.restoreRunningTask（026 B078）", () => {
     expect(state.restoredTaskHint.value).toBe("");
   });
 
-  it("T002: 未进 04 页 + interrupted → 走既有恢复（设 interruptedRunId、进 03 页、弹提示）", async () => {
-    apiRequestMock.mockResolvedValue(interruptedScreenResponse);
-    const state = makeState({ resultsPageSeen: ref(false) });
-    const deps = makeDeps();
-    const execution = useDiscoveryExecution(state, deps);
+  it.each(["failed", "interrupted"] as const)(
+    "未进 04 页 + AI 筛选 %s → 只保留终态快照，不占用任务槽",
+    async (status) => {
+      apiRequestMock.mockResolvedValue({
+        ...interruptedScreenResponse,
+        task_id: `screen-${status}`,
+        status,
+        error: status === "failed" ? "AI 服务失败" : "服务重启导致 AI 筛选中断",
+      });
+      const state = makeState({
+        activeStep: ref("screen"),
+        resultsPageSeen: ref(false),
+        screenBusy: ref(true),
+        screenTaskId: ref("stale-screen"),
+        interruptedRunId: ref("stale-interrupted"),
+      });
+      const deps = makeDeps();
+      const execution = useDiscoveryExecution(state, deps);
 
-    await execution.restoreRunningTask();
+      await execution.restoreRunningTask();
 
-    expect(state.interruptedRunId.value).toBe("screen-t1");
-    expect(state.screenTaskId.value).toBe("screen-t1");
-    expect(deps.enterScreenStep).toHaveBeenCalled();
-    expect(state.restoredTaskHint.value).toContain("服务重启被中断");
-  });
+      expect(state.screenSnapshot.value?.status).toBe(status);
+      expect(state.screenSnapshot.value?.error).toBeTruthy();
+      expect(state.screenBusy.value).toBe(false);
+      expect(state.screenTaskId.value).toBe(`screen-${status}`);
+      expect(state.interruptedRunId.value).toBe("");
+      expect(state.pausedRunId.value).toBe("");
+      // 该标记表示错误恢复页已成功接回，不能让挂载后的自动新一轮检查
+      // 把错误事实清回空白页；真正的任务占用由 busy/paused 标记决定。
+      expect(state.activeTaskRestored.value).toBe(true);
+      expect(state.pipelineBusy.value).toBe(false);
+      expect(state.scopeLocked.value).toBe(false);
+      expect(deps.pollTask).not.toHaveBeenCalled();
+      expect(deps.roundFlow.restoreRoundContext).not.toHaveBeenCalled();
+      expect(deps.enterScreenStep).not.toHaveBeenCalled();
+    },
+  );
 
   it("paused 分支同样受「已结束」闸门约束：已进 04 页则不恢复暂停任务", async () => {
     apiRequestMock.mockResolvedValue({
@@ -182,6 +216,34 @@ describe("useDiscoveryExecution.restoreRunningTask（026 B078）", () => {
     expect(state.activeTaskRestored.value).toBe(false);
     expect(state.activeStep.value).toBe("upload");
     expect(deps.loadLatestResult).not.toHaveBeenCalled();
+  });
+
+  it("恢复重抓 interrupted 只保留错误快照，不占用公共任务槽", async () => {
+    apiRequestMock.mockResolvedValue({
+      has_task: true,
+      task_id: "recrawl-interrupted",
+      kind: "recrawl",
+      status: "interrupted",
+      platform: "boss",
+      progress: { current: 2 },
+      logs: [],
+      error: "服务重启导致重抓中断",
+    });
+    const state = makeState({
+      pausedRunId: ref("stale-paused"),
+      interruptedRunId: ref("stale-interrupted"),
+      recrawlBusy: ref(true),
+    });
+    const deps = makeDeps();
+    const execution = useDiscoveryExecution(state, deps);
+
+    await execution.restoreRunningTask();
+
+    expect(state.recrawlSnapshot.value?.status).toBe("interrupted");
+    expect(state.recrawlBusy.value).toBe(false);
+    expect(state.pausedRunId.value).toBe("");
+    expect(state.interruptedRunId.value).toBe("");
+    expect(state.pipelineBusy.value).toBe(false);
   });
 });
 
@@ -344,4 +406,191 @@ describe("单独抓取入口的画像边界", () => {
       "/api/execute-search", expect.objectContaining({ method: "POST" }),
     );
   });
+});
+
+describe("抓取任务恢复边界", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset();
+  });
+
+  it("继续抓取只提交统一任务 ID，不携带请求 body", async () => {
+    const state = makeState({
+      scrapeTaskId: ref("paused-scrape"),
+      pausedRunId: ref("paused-scrape"),
+      scrapeSnapshot: ref({ status: "paused", progress: {}, logs: [] }),
+    });
+    apiRequestMock.mockResolvedValue({ task_id: "resumed-scrape" });
+    const execution = useDiscoveryExecution(state, makeDeps());
+
+    await execution.continueScrape();
+
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/api/task/continue/paused-scrape",
+      { method: "POST" },
+    );
+  });
+
+  it("暂停请求失败且状态未知时仍保持抓取任务占用", async () => {
+    const state = makeState({
+      scrapeTaskId: ref("scrape-pausing"),
+      scrapeSnapshot: ref({ status: "running", progress: {}, logs: [] }),
+    });
+    const deps = makeDeps({
+      pollTask: vi.fn(async () => {}),
+    });
+    apiRequestMock.mockRejectedValueOnce(new Error("暂停请求失败"));
+    const execution = useDiscoveryExecution(state, deps);
+
+    await execution.pauseScrape();
+
+    expect(state.scrapeBusy.value).toBe(true);
+    expect(state.scrapeSnapshot.value?.status).toBe("pausing");
+    expect(state.pipelineBusy.value).toBe(true);
+    expect(state.scrapeActionBusy.value).toBe("");
+  });
+
+  it("续跑收到明确失败响应时清除本地恢复标记并解除新任务锁", async () => {
+    const state = makeState({
+      scrapeTaskId: ref("paused-scrape"),
+      pausedRunId: ref("paused-scrape"),
+      interruptedRunId: ref("stale-interrupted"),
+      scrapeSnapshot: ref({ status: "paused", progress: { current: 2 }, logs: [] }),
+    });
+    apiRequestMock
+      .mockRejectedValueOnce(new ApiError(409, {
+        error: "checkpoint_read_failed",
+        error_code: "checkpoint_read_failed",
+        error_reason: "暂停断点读取失败，任务已结束，请重试",
+        status: "failed",
+      }))
+      .mockResolvedValueOnce({
+        status: "failed",
+        progress: { current: 2 },
+        logs: ["断点读取失败"],
+        error: "暂停断点读取失败，任务已结束，请重试",
+      });
+    const execution = useDiscoveryExecution(state, makeDeps());
+
+    await execution.continueScrape();
+
+    expect(state.scrapeBusy.value).toBe(false);
+    expect(state.scrapeSnapshot.value?.status).toBe("failed");
+    expect(state.pausedRunId.value).toBe("");
+    expect(state.interruptedRunId.value).toBe("");
+    expect(state.pipelineBusy.value).toBe(false);
+  });
+
+  it.each(["failed", "interrupted"] as const)(
+    "恢复抓取 %s 只保留错误快照并清除旧恢复标记",
+    async (status) => {
+      const state = makeState({
+        pausedRunId: ref("stale-paused"),
+        interruptedRunId: ref("stale-interrupted"),
+      });
+      apiRequestMock.mockResolvedValue({
+        has_task: true,
+        task_id: `scrape-${status}`,
+        kind: "scrape",
+        status,
+        platform: "boss",
+        progress: { message: "列表抓取失败" },
+        logs: ["抓取日志"],
+        error: "列表抓取失败",
+      });
+      const execution = useDiscoveryExecution(state, makeDeps());
+
+      await execution.restoreRunningTask();
+
+      expect(state.scrapeSnapshot.value?.status).toBe(status);
+      expect(state.pausedRunId.value).toBe("");
+      expect(state.interruptedRunId.value).toBe("");
+      expect(state.pipelineBusy.value).toBe(false);
+    },
+  );
+});
+
+describe("浏览器清理失败的公共动作反馈", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset();
+  });
+
+  it("抓取取消收到 HTTP 200 cleanup failure 时不显示纯成功", async () => {
+    apiRequestMock.mockResolvedValue({
+      ok: false,
+      error: "browser_cleanup_failed",
+      cleanup_error: "browser_cleanup_failed",
+      cleanup: { ok: false, error_code: "source_cdp_unavailable" },
+    });
+    const state = makeState({
+      scrapeTaskId: ref("boss-scrape-cleanup-failed"),
+      scrapeBusy: ref(true),
+    });
+    const deps = makeDeps();
+    const execution = useDiscoveryExecution(state, deps);
+
+    await execution.cancelScrape();
+
+    expect(state.scrapeSnapshot.value?.error).toContain("清理失败");
+    expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining("清理失败"), "error");
+    expect(deps.notify).not.toHaveBeenCalledWith("已停止抓取", "warning");
+  });
+
+  it.each(["boss", "zhilian"] as const)(
+    "%s 结束保存保留结果事实并显式提示浏览器清理失败",
+    async (platform) => {
+      apiRequestMock.mockResolvedValue({
+        ok: true,
+        cleanup_error: "browser_cleanup_failed",
+        cleanup: { ok: false, error_code: "source_cdp_unavailable" },
+        platform,
+        status: "completed_with_pending",
+        result: { total_scraped: 1, jobs: [] },
+      });
+      const state = makeState({
+        screenTaskId: ref(`${platform}-screen-cleanup-failed`),
+        screenSnapshot: ref({ status: "paused", platform }),
+      });
+      const deps = makeDeps();
+      const execution = useDiscoveryExecution(state, deps);
+
+      await execution.finishPausedTask(state.screenTaskId.value);
+
+      expect(state.finishedPartial.value).toBe(true);
+      expect(state.screenSnapshot.value?.status).toBe("completed_with_pending");
+      expect(state.screenSnapshot.value?.error).toContain("结果已保存，但浏览器清理失败");
+      expect(deps.notify).toHaveBeenCalledWith(
+        "结果已保存，但浏览器清理失败",
+        "error",
+      );
+      expect(deps.notify).not.toHaveBeenCalledWith(
+        "任务已结束，已完成结果已保存",
+        "success",
+      );
+    },
+  );
+
+  it.each(["boss", "zhilian"] as const)(
+    "%s 暂停任务取消使用同一清理失败反馈",
+    async (platform) => {
+      apiRequestMock.mockResolvedValue({
+        ok: false,
+        error: "browser_cleanup_failed",
+        cleanup: { ok: false, error_code: "source_cdp_unavailable" },
+        platform,
+      });
+      const state = makeState({
+        screenTaskId: ref(`${platform}-paused-cleanup-failed`),
+        screenSnapshot: ref({ status: "paused", platform }),
+      });
+      const deps = makeDeps();
+      const execution = useDiscoveryExecution(state, deps);
+
+      await execution.cancelPausedTask(state.screenTaskId.value);
+
+      expect(state.screenSnapshot.value?.status).toBe("cancelled");
+      expect(state.screenSnapshot.value?.error).toContain("清理失败");
+      expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining("清理失败"), "error");
+      expect(deps.notify).not.toHaveBeenCalledWith("已取消任务，已有结果保留", "warning");
+    },
+  );
 });

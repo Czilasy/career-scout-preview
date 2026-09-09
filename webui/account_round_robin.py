@@ -17,11 +17,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import inspect
 from typing import Any, Callable
 
+from webui import platform_input_adapter
 from webui.logging_setup import get_logger
 from webui.account_round_robin_observability import RoundRobinWhitebox
+from webui.account_round_robin_sources import (
+    clone_source,
+    switch_browser_account as _switch_browser_account,
+)
 
 _logger = get_logger(__name__)
 
@@ -285,125 +289,15 @@ def clear_account_rate_limited(account_id: str, *, accounts_path: object = None)
 
 
 # ---------------------------------------------------------------------------
-# IO 编排：浏览器 profile 切换 + source 克隆
-# ---------------------------------------------------------------------------
-
-def _switch_browser_account(account_id: str, platform: str, cdp_port: object) -> bool:
-    """绑定全局 profile 到目标账号并确保 Chrome 就绪（同端口换 profile）。
-
-    复用既有 ``set_active_cdp_data_dir`` + 门面 ``ensure_chrome_ready``：
-    后者检测到端口 Chrome 的 user-data-dir 与新 profile 不符时自动关旧开新。
-    返回是否就绪。
-    """
-    from webui.pipeline_exec_accounts import (
-        resolve_browser_account, set_active_cdp_data_dir,
-    )
-    from webui import pipeline_exec as _facade
-    profile = resolve_browser_account(account_id) or ""
-    if not profile:
-        return False
-    if str(platform or "boss") == "zhilian":
-        from webui.platforms import derive_zhilian_profile_dir
-        profile = derive_zhilian_profile_dir(profile)
-    set_active_cdp_data_dir(profile)
-    port = int(cdp_port) if cdp_port else None
-    ok, _err = _facade.ensure_chrome_ready(port, minimize_after_launch=True)
-    return bool(ok)
-
-def clone_source(source: Any, account_id: str, *, run_id: str = "") -> Any:
-    """克隆 source 用于另一个账号（同平台/同端口，新 browser_account）。
-
-    BOSS/智联两平台构造参数差异由平台分支吸收；测试替身无 ``platform``
-    形态时回到该分支兜底。克隆携带原 source 的 cancel_event（已由编排层
-    包 ImmediateOnlyCancelEvent，切换后同语义）。
-    """
-    platform = str(getattr(source, "platform", "boss") or "boss")
-    cancel_event = getattr(source, "cancel_event", None)
-    if platform == "zhilian":
-        from webui.source import ZhilianCdpSource
-        return ZhilianCdpSource(
-            browser_account=str(account_id),
-            cdp_port=int(getattr(source, "cdp_port", 9223) or 9223),
-            profile_key=f"zhilian:{account_id}",
-            breaker=None,
-            preflight_runner=getattr(source, "_preflight_runner", None),
-            list_runner=getattr(source, "_list_runner", None),
-            detail_runner=getattr(source, "_detail_runner", None),
-            batch_detail_runner=getattr(source, "_batch_detail_runner", None),
-            run_id=str(run_id or getattr(source, "run_id", "") or ""),
-            cancel_event=cancel_event,
-        )
-    cls = type(source)
-    kwargs: dict[str, Any] = {
-        "browser_account": str(account_id),
-        "run_id": str(run_id or getattr(source, "run_id", "") or ""),
-        "cancel_event": cancel_event,
-    }
-    cdp_port = getattr(source, "cdp_port", None)
-    if cdp_port is not None:
-        kwargs["cdp_port"] = int(cdp_port)
-    try:
-        parameters = inspect.signature(cls).parameters
-    except (TypeError, ValueError):
-        parameters = {}
-    aliases = {
-        "executor": "_executor",
-        "runner": "_runner",
-    }
-    for name, parameter in parameters.items():
-        if name in {"self", "browser_account", "run_id", "cancel_event", "cdp_port"}:
-            continue
-        if parameter.kind not in (parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY):
-            continue
-        attr = aliases.get(name, name)
-        if not hasattr(source, attr):
-            continue
-        if name == "runner" and getattr(source, "_use_default_runner", False):
-            continue
-        value = getattr(source, attr)
-        if name == "breaker":
-            value = None
-        if name == "executor" and value is not None:
-            from webui.process_executor import ScraperExecutor
-            value = ScraperExecutor(
-                max_output_bytes=getattr(value, "max_output_bytes", 1_000_000),
-                poll_seconds=getattr(value, "poll_seconds", 0.05),
-            )
-        if name == "env" and isinstance(value, dict) and run_id:
-            value = {
-                **value,
-                "CAREER_SCOUT_CORRELATION_ID": str(run_id),
-                "CAREER_SCOUT_TASK_ID": str(run_id),
-            }
-        if value is not None:
-            kwargs[name] = value
-    return cls(**kwargs)
-
-# ---------------------------------------------------------------------------
 # R1：列表轮询分摊编排
 # ---------------------------------------------------------------------------
 
 def _recompute_input_hash(plan_item: dict, subrange_target: int) -> str:
-    """子范围 fetch_list 的 input_hash 重算（target_pages 随子范围变）。
-
-    BOSS：``_combo_hash(keyword, city, pages, source_filters)``；
-    智联：``_zhilian_input_hash({platform, keyword, city, target_pages, route_city_code})``。
-    """
-    platform = str(plan_item.get("platform") or "boss")
-    keyword = str(plan_item.get("keyword") or "")
-    if platform == "zhilian":
-        from webui.source import _zhilian_input_hash
-        return _zhilian_input_hash({
-            "platform": "zhilian",
-            "keyword": keyword,
-            "city": plan_item.get("city") or {},
-            "target_pages": int(subrange_target),
-            "route_city_code": str(plan_item.get("route_city_code") or ""),
-        })
-    from webui.pipeline_exec_artifacts import _combo_hash
-    return _combo_hash(keyword, str(plan_item.get("city") or ""),
-                      int(subrange_target),
-                      plan_item.get("source_filters") or {})
+    """通过公开平台能力重算子范围 fetch_list 的 input_hash。"""
+    adapter = platform_input_adapter.resolve_platform_input_adapter(
+        plan_item.get("platform"),
+    )
+    return adapter.compute_input_hash(plan_item, int(subrange_target))
 
 class ListRobin:
     """R1 列表轮询分摊编排：把一个 combo 按配额拆成子范围跨账号抓。
@@ -439,10 +333,21 @@ class ListRobin:
     def _source_for(self, account_id: str, template: Any) -> Any:
         """取该账号的 source：每次跨账号使用前重新绑定 profile。"""
         src = self._sources.get(account_id)
+        candidate = src or clone_source(template, account_id, run_id=self._run_id)
+        preflight = getattr(candidate, "preflight_after_profile_switch", None)
         if self._active_account != account_id:
             from_account = str(self._active_account or "")
             reason = str(self._pending_switch_reason or "quota")
-            if not _switch_browser_account(account_id, self._platform, self._cdp_port):
+            if callable(preflight):
+                switched = _switch_browser_account(
+                    account_id, self._platform, self._cdp_port,
+                    preflight=preflight,
+                )
+            else:
+                switched = _switch_browser_account(
+                    account_id, self._platform, self._cdp_port,
+                )
+            if not switched:
                 self._whitebox.switch(
                     from_account=from_account, to_account=account_id,
                     reason=reason, result="failed",
@@ -456,7 +361,7 @@ class ListRobin:
             self._pending_switch_reason = None
         if src is not None:
             return src
-        src = clone_source(template, account_id, run_id=self._run_id)
+        src = candidate
         self._sources[account_id] = src
         return src
 
@@ -602,10 +507,22 @@ class DetailRobin:
         if not account_id:
             return None
         src = self._sources.get(account_id)
+        template = next(iter(self._sources.values()))
+        candidate = src or clone_source(template, account_id, run_id=self._run_id)
+        preflight = getattr(candidate, "preflight_after_profile_switch", None)
         if self._active_account != account_id:
             from_account = str(self._active_account or "")
             reason = str(self._pending_switch_reason or "quota")
-            if not _switch_browser_account(account_id, self._platform, self._cdp_port):
+            if callable(preflight):
+                switched = _switch_browser_account(
+                    account_id, self._platform, self._cdp_port,
+                    preflight=preflight,
+                )
+            else:
+                switched = _switch_browser_account(
+                    account_id, self._platform, self._cdp_port,
+                )
+            if not switched:
                 self._whitebox.switch(
                     from_account=from_account, to_account=account_id,
                     reason=reason, result="failed",
@@ -619,9 +536,7 @@ class DetailRobin:
             self._pending_switch_reason = None
         if src is not None:
             return src
-        # 取一个模板（任一已缓存 source）用于克隆同参数
-        template = next(iter(self._sources.values()))
-        src = clone_source(template, account_id, run_id=self._run_id)
+        src = candidate
         self._sources[account_id] = src
         return src
 

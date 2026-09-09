@@ -158,6 +158,44 @@ describe("useScreenRoundFlow", () => {
     }
   });
 
+  it("pauseScreen keeps the task occupied when the status check fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const { refs, api } = makeDeps();
+      const flow = useScreenRoundFlow({ refs, api });
+      apiRequestMock
+        .mockResolvedValueOnce({ ok: true, run_id: "screen-1", status: "pausing" })
+        .mockRejectedValueOnce(new Error("状态查询失败"));
+
+      const promise = flow.pauseScreen();
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+      await promise;
+
+      expect(refs.screenBusy.value).toBe(true);
+      expect(refs.pausingScreen.value).toBe(true);
+      expect(refs.screenSnapshot.value?.status).toBe("pausing");
+      expect(flow.busyAction.value).toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("pauseScreen releases the lock when a failed terminal state is confirmed", async () => {
+    const { refs, api } = makeDeps();
+    const flow = useScreenRoundFlow({ refs, api });
+    apiRequestMock
+      .mockRejectedValueOnce(new Error("暂停请求失败"))
+      .mockResolvedValueOnce({ status: "failed", error: "AI 任务已失败" });
+
+    await flow.pauseScreen();
+
+    expect(refs.screenBusy.value).toBe(false);
+    expect(refs.pausingScreen.value).toBe(false);
+    expect(refs.screenSnapshot.value?.status).toBe("failed");
+    expect(api.notify).toHaveBeenCalledWith("AI 任务已失败", "error");
+  });
+
   it("continueScreen restores context and calls the continue action", async () => {
     const { refs, api } = makeDeps();
     const flow = useScreenRoundFlow({ refs, api });
@@ -328,6 +366,26 @@ describe("useScreenRoundFlow", () => {
     expect(api.resetWorkflow).toHaveBeenCalled();
   });
 
+  it.each([
+    ["failed", true],
+    ["paused", false],
+  ] as const)("confirmNewRound handles a %s screen snapshot", async (status, shouldReset) => {
+    const { refs, api } = makeDeps();
+    refs.screenBusy.value = false;
+    refs.pausedRunId.value = "";
+    refs.interruptedRunId.value = "";
+    refs.screenSnapshot.value = { status };
+    const flow = useScreenRoundFlow({ refs, api });
+
+    await flow.confirmNewRound();
+
+    if (shouldReset) {
+      expect(api.resetWorkflow).toHaveBeenCalled();
+    } else {
+      expect(api.resetWorkflow).not.toHaveBeenCalled();
+    }
+  });
+
   it("starts a new round from the results page despite a stale resumable context", async () => {
     const { refs, api } = makeDeps();
     refs.activeStep.value = "results";
@@ -480,7 +538,6 @@ describe("useScreenRoundFlow", () => {
     expect(refs.activeStep.value).toBe("screen");
   });
 });
-
 describe("pauseScreen 批中弹窗分支（025 B076）", () => {
   function jdBatchSnapshot(batch: unknown) {
     return {
@@ -622,5 +679,34 @@ describe("pauseScreen 批中弹窗分支（025 B076）", () => {
     refs.screenSnapshot.value = { status: "paused", progress: { stage: "fetch_jd", jd_batch: { current: 2, total: 4 } } };
     await flushPromises();
     expect(flow.pauseDialogOpen.value).toBe(false);
+  });
+});
+
+describe("pauseRecrawl 的未知状态保护", () => {
+  it("暂停请求失败时保留重抓占用，避免误开新任务", async () => {
+    const { refs, api } = makeDeps();
+    const flow = useScreenRoundFlow({ refs, api });
+    apiRequestMock.mockRejectedValueOnce(new Error("暂停请求失败"));
+
+    await flow.pauseRecrawl();
+
+    expect(refs.recrawlBusy.value).toBe(true);
+    expect(refs.recrawlSnapshot.value?.status).toBe("running");
+    expect(flow.busyAction.value).toBe("");
+    expect(api.notify).toHaveBeenCalledWith("暂停重抓失败，请重试", "error");
+  });
+
+  it("确认重抓已经失败时释放占用并保留失败快照", async () => {
+    const { refs, api } = makeDeps();
+    const flow = useScreenRoundFlow({ refs, api });
+    apiRequestMock
+      .mockRejectedValueOnce(new Error("暂停请求失败"))
+      .mockResolvedValueOnce({ status: "failed", error: "重抓任务已失败" });
+
+    await flow.pauseRecrawl();
+
+    expect(refs.recrawlBusy.value).toBe(false);
+    expect(refs.recrawlSnapshot.value?.status).toBe("failed");
+    expect(api.notify).toHaveBeenCalledWith("重抓任务已失败", "error");
   });
 });

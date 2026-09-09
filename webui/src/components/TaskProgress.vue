@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { CircleCheck, CircleX, LoaderCircle, Octagon, PauseCircle } from "@lucide/vue";
 import type { IntegritySnapshot, Platform } from "../types";
+import { ERROR_MESSAGES } from "../errorCodes";
 
 interface PauseInfo {
   error_code?: string;
@@ -393,9 +394,10 @@ const failureLine = computed(() => {
   const status = props.snapshot?.status;
   if (status === "paused") {
     const pi = props.snapshot?.pause_info;
+    const code = pi?.error_code || "";
     return {
-      reason: pi?.error_reason || props.snapshot?.error || "任务已暂停，请处理后点继续",
-      code: pi?.error_code || "",
+      reason: pi?.error_reason || props.snapshot?.error || ERROR_MESSAGES[code] || "任务已暂停，请处理后点继续",
+      code,
     };
   }
   if (["failed", "unverifiable", "interrupted"].includes(integrityConclusion.value)) {
@@ -410,9 +412,10 @@ const failureLine = computed(() => {
   }
   if (status === "failed") {
     const pi = props.snapshot?.pause_info;
+    const code = pi?.error_code || "";
     return {
-      reason: props.snapshot?.error || message.value || "执行失败",
-      code: pi?.error_code || "",
+      reason: pi?.error_reason || props.snapshot?.error || ERROR_MESSAGES[code] || message.value || "执行失败",
+      code,
     };
   }
   return { reason: "", code: "" };
@@ -447,6 +450,11 @@ const scrapeCountState = computed(() => {
     return { completed, running, unstarted: Math.max(0, comboTotal - completed - running) };
   }
   if (stage.value === "combo_failed") {
+    return { completed: comboCurrent, running: 0, unstarted: Math.max(0, comboTotal - comboCurrent) };
+  }
+  // 暂停快照中的 current/total 是后端已经完成的组合数，直接展示断点，
+  // 不把未知或暂停阶段误当成“尚未开始”。
+  if (props.snapshot?.status === "paused") {
     return { completed: comboCurrent, running: 0, unstarted: Math.max(0, comboTotal - comboCurrent) };
   }
   return { completed: 0, running: 0, unstarted: comboTotal };

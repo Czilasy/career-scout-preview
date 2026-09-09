@@ -75,6 +75,35 @@ class ErrorRegistryTests(unittest.TestCase):
         self.assertEqual(resolve_code("source_result_write_failed"),
                          "source_result_write_failed")
 
+    def test_source_unreachable_remains_a_systemic_block(self):
+        """BOSS 公共抓取脚本不可用语义仍是系统性阻断。"""
+        from webui.error_registry import REGISTRY
+
+        entry = REGISTRY["source_unreachable"]
+        self.assertTrue(entry["blocking"])
+        self.assertEqual(entry["impact"], "systemic")
+        self.assertEqual(entry["user_message"], "抓取脚本不可用")
+        self.assertIn("source_unreachable", SYSTEMIC_BLOCK_CODES)
+        self.assertNotIn("source_unreachable", INDEPENDENT_FAILURE_CODES)
+
+    def test_preflight_source_failures_use_registry_messages(self):
+        from types import SimpleNamespace
+
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.pipeline_exec_status import classify_preflight_failure
+
+        for code in (
+            "source_login_required",
+            "source_rate_limited",
+            "source_cdp_unavailable",
+        ):
+            with self.subTest(code=code):
+                result = classify_preflight_failure(SimpleNamespace(
+                    failed_code=code,
+                    failed_reason=f"平台诊断：{code}",
+                ))
+                self.assertEqual(result["error"], ERROR_USER_MESSAGES[code])
+
     def test_legacy_taxonomy_codes_resolve_to_canonical(self):
         from webui.error_registry import ALIAS_TO_CODE
         self.assertEqual(resolve_code("captcha_required"),

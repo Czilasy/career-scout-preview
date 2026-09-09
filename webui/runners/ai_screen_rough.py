@@ -86,7 +86,8 @@ def run_rough_stage(ctx, task_id, raw_jobs, criteria, endpoint, api_key,
                                     raise_on_systemic=True,
                                     on_batch_done=_rough_batch_done,
                                     execution_config=execution_config,
-                                    correlation_id=task_id)
+                                    correlation_id=task_id,
+                                    platform=frozen_platform)
         from webui.store_helpers import _now
         from webui.whitebox import WhiteboxService
         _wb = WhiteboxService(ctx.store)

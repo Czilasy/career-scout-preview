@@ -38,10 +38,8 @@ const selectedCount = computed(() => props.modelValue.length);
 const selectedDistrictCodes = computed(() => new Set(
   props.modelValue.map((location) => location.district_code),
 ));
-const selectedDistrictsWithChildren = computed(() =>
-  districts.value.filter(
-    (district) => selectedDistrictCodes.value.has(district.code) && (district.children || []).length,
-  ),
+const selectedDistricts = computed(() =>
+  districts.value.filter((district) => selectedDistrictCodes.value.has(district.code)),
 );
 
 function isDistrictSelected(district: LocationCatalogEntry): boolean {
@@ -178,10 +176,10 @@ watch(open, (value) => {
   }
 });
 
-// B072：面板内容异步加载/商圈块出现后高度变化，需要重新定位
+// B072：面板内容异步加载/地点子层块出现后高度变化，需要重新定位
 // （否则按加载前的小高度判断翻转，可能贴顶或与按钮脱节）
 watch(
-  () => [loading.value, districts.value.length, selectedDistrictsWithChildren.value.map((d) => d.code)],
+  () => [loading.value, districts.value.length, selectedDistricts.value.map((d) => d.code)],
   () => {
     if (open.value) void nextTick(positionPanel);
   },
@@ -312,30 +310,39 @@ function removeCity(): void {
               <span>{{ district.name }}</span>
             </button>
           </div>
-          <template v-if="platform === 'boss'">
+          <div
+            v-for="district in selectedDistricts"
+            :key="district.code"
+            class="location-business-block"
+          >
+            <div class="location-panel-section-title">{{ district.name }} · 商圈/镇（可选）</div>
             <div
-              v-for="district in selectedDistrictsWithChildren"
-              :key="district.code"
-              class="location-business-block"
+              v-if="(district.children || []).length"
+              class="location-business-grid"
             >
-              <div class="location-panel-section-title">{{ district.name }} · 商圈/镇（可选）</div>
-              <div class="location-business-grid">
-                <button
-                  v-for="business in district.children || []"
-                  :key="business.code"
-                  type="button"
-                  class="location-choice compact"
-                  :class="{ selected: isBusinessSelected(district, business) }"
-                  :aria-pressed="isBusinessSelected(district, business)"
-                  :data-testid="`location-business-${district.code}-${business.code}`"
-                  @click="toggleBusiness(district, business)"
-                >
-                  <Check v-if="isBusinessSelected(district, business)" :size="13" class="location-choice-check" aria-hidden="true" />
-                  <span>{{ business.name }}</span>
-                </button>
-              </div>
+              <button
+                v-for="business in district.children || []"
+                :key="business.code"
+                type="button"
+                class="location-choice compact"
+                :class="{ selected: isBusinessSelected(district, business) }"
+                :aria-pressed="isBusinessSelected(district, business)"
+                :data-testid="`location-business-${district.code}-${business.code}`"
+                @click="toggleBusiness(district, business)"
+              >
+                <Check v-if="isBusinessSelected(district, business)" :size="13" class="location-choice-check" aria-hidden="true" />
+                <span>{{ business.name }}</span>
+              </button>
             </div>
-          </template>
+            <div
+              v-else
+              class="location-panel-state location-business-empty"
+              :data-testid="`location-business-empty-${district.code}`"
+            >
+              <MapPin :size="16" aria-hidden="true" />
+              <span>暂无商圈/镇数据，按区/县搜索</span>
+            </div>
+          </div>
         </template>
       </div>
 

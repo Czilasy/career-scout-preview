@@ -3,7 +3,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type Ref } from "vue";
 import {
   Bookmark, Check, Download, FileText, Filter, History, LoaderCircle, Play,
-  RotateCcw, Search, SlidersHorizontal, Sparkles, Square, UploadCloud, X,
+  RotateCcw, Search, SlidersHorizontal, Sparkles, UploadCloud, X,
 } from "@lucide/vue";
 import CollapsibleCard from "../components/CollapsibleCard.vue";
 import ExecutionModeSelector from "../components/ExecutionModeSelector.vue";
@@ -153,12 +153,11 @@ const {
   resumeAnalysis,
   appliedResumePlatforms,
   scrapeTaskId,
+  scrapeActionBusy,
   scrapeBusy,
   scrapeSnapshot,
   screenBusy,
   pausingScreen,
-  switchAccounts,
-  switchAccountId,
   screenSnapshot,
   screenTaskId,
   recrawlBusy,
@@ -335,10 +334,12 @@ const {
   advancedRange,
   clampAdvanced,
   restoreRunningTask,
+  scrapeAction,
+  scrapeCanFinish,
   startScrape,
-  cancelScrape,
+  pauseScrape,
+  cancelActiveScrape,
   continueScrape,
-  loadSwitchAccounts,
   flowStartAiScreen,
   startAiScreen,
   continueAiScreen,
@@ -491,11 +492,6 @@ watch(profileSummary, () => {
   if (roundFlow.suppressProfileWatch) return;
   profileConfirmed.value = false;
 });
-
-watch(
-  () => scrapeSnapshot.value?.status === "paused" && Boolean(scrapeTaskId.value),
-  (visible) => { if (visible) void loadSwitchAccounts(); },
-);
 
 watch(activeCategory, (next, prev) => {
   if (prev === "uncertain" && next !== "uncertain") recrawlPlatformGuide.value = null;
@@ -869,54 +865,25 @@ onMounted(() => {
             <Play :size="20" aria-hidden="true" />开始筛选并 AI 优化
           </button>
           <div class="one-click-secondary-actions">
-          <button class="button primary" type="button" data-testid="start-scrape" :disabled="draftPlatformDisabled || pipelineBusy" @click="handleStartScrapeClick">
-            <Search v-if="!scrapeBusy && !cancelBusy" :size="18" aria-hidden="true" />
-            <LoaderCircle v-else-if="cancelBusy" class="spin" :size="18" aria-hidden="true" />
-            <Square v-else :size="18" aria-hidden="true" />
-            {{ cancelBusy ? "正在停止…" : scrapeBusy ? "停止抓取" : "单独抓取" }}
+          <button v-if="scrapeAction.kind === 'none'" class="button primary" type="button" data-testid="start-scrape" :disabled="draftPlatformDisabled || pipelineBusy" @click="handleStartScrapeClick">
+            <Search :size="18" aria-hidden="true" />
+            单独抓取
           </button>
-          <label v-if="scrapeSnapshot && scrapeSnapshot.status === 'paused' && scrapeTaskId"
-                 class="resume-account-picker" data-testid="scrape-continue-account-picker"
-                 style="display:inline-flex;align-items:center;gap:6px">
-            <span>继续账号</span>
-            <select v-model="switchAccountId" data-testid="scrape-continue-account"
-                    :disabled="scrapeBusy || switchAccounts.length <= 1"
-                    style="min-width:120px">
-              <option value="">使用原账号</option>
-              <option v-for="acc in switchAccounts" :key="acc.id" :value="acc.id">{{ acc.name }}</option>
-            </select>
-          </label>
-          <button v-if="scrapeSnapshot && scrapeSnapshot.status === 'paused' && scrapeTaskId"
-                  class="button secondary" type="button" data-testid="continue-scrape"
-                  :disabled="scrapeBusy || finishSaveBusy || cancelBusy" @click="continueScrape(switchAccountId || undefined)">
-            <LoaderCircle v-if="scrapeBusy" class="spin" :size="15" aria-hidden="true" />
-            {{ scrapeBusy ? "正在继续…" : "从断点继续" }}
-          </button>
-          <button v-if="scrapeSnapshot && scrapeSnapshot.status === 'paused' && pausedRunId"
-                  class="button danger" type="button" data-testid="cancel-paused-scrape"
-                  :disabled="cancelBusy || finishSaveBusy"
-                  @click="cancelPausedTask(pausedRunId)">
-            <LoaderCircle v-if="cancelBusy" class="spin" :size="15" aria-hidden="true" />
-            {{ cancelBusy ? "取消中…" : "取消任务" }}
-          </button>
-          <button v-if="scrapeSnapshot && scrapeSnapshot.status === 'paused' && (pausedRunId || scrapeTaskId)"
-                  class="button danger" type="button" data-testid="finish-paused-scrape"
-                  :disabled="finishSaveBusy || cancelBusy"
-                  @click="finishPausedTask(pausedRunId || scrapeTaskId)">
-            <LoaderCircle v-if="finishSaveBusy" class="spin" :size="15" aria-hidden="true" />
-            {{ finishSaveBusy ? "正在保存…" : "结束并保存结果" }}
-          </button>
-          <button v-if="scrapeSnapshot && (scrapeSnapshot.status === 'failed' || scrapeSnapshot.status === 'running') && scrapeTaskId"
-                  class="button danger" type="button" data-testid="finish-active-scrape"
-                  :disabled="finishSaveBusy || cancelBusy"
-                  @click="finishPausedTask(scrapeTaskId)">
-            <LoaderCircle v-if="finishSaveBusy" class="spin" :size="15" aria-hidden="true" />
-            {{ finishSaveBusy ? "正在保存…" : "结束并保存结果" }}
-          </button>
-          <button v-if="interruptedRunId" class="button danger" type="button" data-testid="finish-interrupted-scrape" :disabled="finishSaveBusy || cancelBusy" @click="finishPausedTask(interruptedRunId)">
-            <LoaderCircle v-if="finishSaveBusy" class="spin" :size="15" aria-hidden="true" />
-            {{ finishSaveBusy ? "正在保存…" : "结束并保存结果" }}
-          </button>
+          <ScreenRoundActions
+            v-if="scrapeAction.kind !== 'none' || scrapeCanFinish"
+            :action="scrapeAction"
+            :busy="Boolean(scrapeActionBusy)"
+            :busy-action="scrapeActionBusy"
+            :busy-label="scrapeActionBusy === 'pause-scrape' ? '正在暂停…' : scrapeActionBusy === 'continue-scrape' ? '正在继续…' : ''"
+            :finish-busy="finishSaveBusy"
+            :show-finish-save="scrapeCanFinish || scrapeAction.kind !== 'none'"
+            :show-cancel="scrapeAction.kind !== 'none'"
+            :cancel-busy="cancelBusy"
+            @pause-scrape="pauseScrape()"
+            @continue-scrape="continueScrape()"
+            @finish-save="finishPausedTask(pausedRunId || scrapeTaskId)"
+            @cancel="cancelActiveScrape()"
+          />
           <button v-if="scrapeCompleted" class="button secondary" type="button" data-testid="continue-to-screen" @click="enterScreenStep()">
             进行确认AI筛选条件
           </button>
@@ -986,7 +953,7 @@ onMounted(() => {
         <ContinuePlatformGuide v-if="!historyMode && roundFlow.continueGuide" :guide="roundFlow.continueGuide" @choose="roundFlow.chooseContinuePlatform" @cancel="roundFlow.cancelContinueGuide" />
 
         <TaskProgress :snapshot="screenSnapshot" kind="screen" :task-id="screenTaskId" />
-        <ScreenRecrawlProgress v-if="recrawlSnapshot || recrawlBusy" :snapshot="recrawlSnapshot" :task-id="recrawlTaskId" :action="roundFlow.recrawlAction" :busy="Boolean(roundFlow.busyAction)" :busy-action="roundFlow.busyAction" :busy-label="roundFlow.busyAction === 'pause-recrawl' ? '正在暂停重抓…' : ''" :show-finish-save="roundFlow.recrawlAction.kind === 'pause-recrawl' || (roundFlow.recrawlAction.kind === 'continue-recrawl' && roundFlow.recrawlStatus !== 'paused')" @pause-recrawl="roundFlow.pauseRecrawl()" @continue-recrawl="roundFlow.continueRecrawl()" @finish-save="roundFlow.finishRecrawl()" />
+        <ScreenRecrawlProgress v-if="recrawlSnapshot || recrawlBusy" :snapshot="recrawlSnapshot" :task-id="recrawlTaskId" :action="roundFlow.recrawlAction" :busy="Boolean(roundFlow.busyAction)" :busy-action="roundFlow.busyAction" :busy-label="roundFlow.busyAction === 'pause-recrawl' ? '正在暂停重抓…' : ''" :show-finish-save="roundFlow.recrawlAction.kind === 'pause-recrawl' || roundFlow.recrawlAction.kind === 'continue-recrawl'" @pause-recrawl="roundFlow.pauseRecrawl()" @continue-recrawl="roundFlow.continueRecrawl()" @finish-save="roundFlow.finishRecrawl()" />
       </section>
 
       <section

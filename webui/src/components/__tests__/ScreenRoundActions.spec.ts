@@ -102,6 +102,27 @@ describe("ScreenRoundActions 按钮矩阵", () => {
     expect(wrapper.get('[data-testid="continue-ai-screen"]').text()).not.toContain("正在继续…");
   });
 
+  it.each([
+    { label: "主动作", busy: true, busyAction: "pause" },
+    { label: "结束保存", finishBusy: true },
+    { label: "终止", cancelBusy: true },
+  ])("$label进行时禁用全部共享动作", ({ busy, busyAction, finishBusy, cancelBusy }) => {
+    const wrapper = mount(ScreenRoundActions, {
+      props: {
+        action: action("pause"),
+        busy,
+        busyAction,
+        finishBusy,
+        cancelBusy,
+        showFinishSave: true,
+        showCancel: true,
+      },
+    });
+
+    expect(wrapper.findAll("button")).toHaveLength(3);
+    expect(wrapper.findAll("button").every((button) => button.attributes("disabled") !== undefined)).toBe(true);
+  });
+
   it("shows busy label and disables the primary button during pause", async () => {
     const wrapper = mount(ScreenRoundActions, {
       props: {
@@ -125,6 +146,22 @@ describe("ScreenRoundActions 按钮矩阵", () => {
     expect(wrapper.get('[data-testid="pause-recrawl"]').text()).toContain("暂停重抓");
     expect(wrapper.get('[data-testid="finish-save-results"]').text()).toContain("结束并保存结果");
     expect(wrapper.find('[data-testid="view-screen-results"]').exists()).toBe(false);
+  });
+
+  it.each([
+    { label: "screen pause", kind: "pause" as const, ids: ["pause-ai-screen", "finish-save-results"] },
+    { label: "screen continue", kind: "continue" as const, ids: ["continue-ai-screen", "finish-save-results"] },
+    { label: "recrawl pause", kind: "pause-recrawl" as const, ids: ["finish-save-results", "pause-recrawl"] },
+    { label: "recrawl continue", kind: "continue-recrawl" as const, ids: ["finish-save-results", "continue-recrawl"] },
+  ])("maps the shared $label action to its buttons", ({ kind, ids }) => {
+    const wrapper = mount(ScreenRoundActions, {
+      props: { action: action(kind), showFinishSave: true },
+    });
+    expect(
+      ACTION_IDS.filter((id) => wrapper.find(`[data-testid="${id}"]`).exists()),
+    ).toEqual(ids);
+    expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
+    wrapper.unmount();
   });
 
   it("emits the matching action event on click", async () => {

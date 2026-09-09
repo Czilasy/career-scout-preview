@@ -30,6 +30,11 @@ from webui.ai_filters import (
     _build_criteria_description,
     _job_criteria_hard_mismatch,
     job_hard_mismatch,
+    _resolve_platform,
+    _detail_fields,
+    _screen_fields,
+    _screen_hard_fields_text,
+    _screen_input_note,
 )
 from webui import recruiter_activity
 from webui.logging_setup import get_logger
@@ -45,7 +50,7 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 execution_config=None,
                 measurement_callback=None, emit_kept_terminal=True,
                 measurement_input_count=None, retry_limits=None,
-                correlation_id: str = ""):
+                correlation_id: str = "", platform=None):
     """Stage A 粗筛：AI 逐条核对岗位列表字段，移除"明显"不符合的。
     ``jobs``: 脚本抓回的岗位列表（仅列表字段，无 JD）。
     ``criteria``: {"profile_summary": str, "city": [...], "degree": [...], ...}。
@@ -66,6 +71,9 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
     "verdicts": {job_id: {"verdict","reason"}}}。
     """
     from webui import ai as _facade
+    resolved_platform = _resolve_platform(
+        platform, jobs[0] if jobs else None
+    )
     if batch_size is None:
         if execution_config is not None:
             batch_size = int(execution_config.screen_batch_size)
@@ -103,7 +111,9 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
     ]
     hard_dropped = []
     for _idx, job in enumerate(jobs_to_process):
-        _field, _reason = _job_criteria_hard_mismatch(job, criteria)
+        _field, _reason = _job_criteria_hard_mismatch(
+            job, criteria, platform=resolved_platform
+        )
         if not _field:
             continue
         _job_id = str(job.get("job_id", ""))
@@ -131,7 +141,8 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         ]
     if not jobs:
         return {"kept": kept, "dropped": dropped, "verdicts": verdicts, **_ai_integrity_meta(fallback_state)}
-    criteria_desc = _build_criteria_description(criteria)
+    criteria_desc = _build_criteria_description(criteria, resolved_platform)
+    hard_fields_text = _screen_hard_fields_text(resolved_platform)
     system_prompt = (
         "你是求职初筛助手。只按候选人已确认的筛选字段，剔除【明显】不符的岗位。\n"
         f"{criteria_desc}\n\n"
@@ -142,11 +153,11 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         "- 城市不判断（抓取阶段已保证城市）\n"
         "- 薪资：筛选区间为硬规则，岗位薪资与已选区间无重叠（高于或低于）即排除；'元/天'的实习计价综合判断\n"
         "- 经验：已选经验为硬约束，岗位标签明确经验下界高于已选范围（如已选1-3年而岗位3-5年）即剔除；未标经验保留\n"
-        "- 已选择的筛选字段是硬约束：岗位标签明确列出的经验/学历/薪资/规模/融资/行业与已选条件冲突时，必须剔除；未选择或岗位未标明的字段不剔除\n"
+        f"- 已选择的筛选字段是硬约束：岗位标签明确列出的{hard_fields_text}与已选条件冲突时，必须剔除；未选择或岗位未标明的字段不剔除\n"
         "- 岗位名称或类别（如客服、讲师、销售、内容制作、运营等）不得单独作为剔除理由\n"
         "- 求职画像放宽：候选人画像中明确表达放宽的维度（如\"东莞、深圳都可以\"\"不限\"\"接受兼职\"等）以画像表述为准放宽对应判断\n"
         "- 只排除【明显】不符合的；拿不准一律保留（宁可多留，不可错杀）\n\n"
-        "输入格式：每行一个岗位，``序号. 标题 | 薪资 | 城市 | 学历 | 规模``。\n"
+        f"输入格式：每行一个岗位，``序号. 标题 | 薪资 | 城市 | 学历 | 规模``{_screen_input_note(resolved_platform)}。\n"
         "输出格式：只列出【要剔除】的岗位序号与理由，未列出的默认保留。严格输出JSON：\n"
         '{"dropped":[{"i":3,"reason":"经验5-10年>候选1-3年"},...]}\n'
         "i 为岗位序号。\n"
@@ -174,8 +185,7 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 job.get("title", ""),
                 job.get("salary", ""),
                 job.get("location", ""),
-                job.get("job_labels", "") or "",  # 学历/经验标签
-                job.get("company_scale", "") or "",
+                *_screen_fields(job, resolved_platform),
             ]
             lines.append(f"{idx}. " + " | ".join(str(p) for p in parts if p))
         user_content = "\n".join(lines)
@@ -302,7 +312,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
               on_batch_done=None,
               measurement_callback=None, measurement_input_count=None,
               missing_result_retry_budget=0, retry_limits=None,
-              correlation_id: str = ""):
+              correlation_id: str = "", platform=None):
     """Stage B 精筛：AI 逐条对比岗位 JD 与候选人画像，判 match/not_match。
     ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
     ``profile_summary``: 求职画像（用户可编辑，优先级低于已选六类字段，只能放宽未选择维度）。
@@ -332,6 +342,9 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
     防止端点整体劣化时拆半递归放大请求、长期空转。
     """
     from webui import ai as _facade
+    resolved_platform = _resolve_platform(
+        platform, jobs_with_jd[0] if jobs_with_jd else None
+    )
     if batch_size is None:
         if execution_config is not None:
             batch_size = int(execution_config.match_batch_size)
@@ -410,7 +423,9 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         return {"verdicts": verdicts, **_ai_integrity_meta(fallback_state)}
     _hard_kept = []
     for _idx, _job in enumerate(jobs_with_jd):
-        _field, _reason = job_hard_mismatch(_job, criteria, include_recruiter=True)
+        _field, _reason = job_hard_mismatch(
+            _job, criteria, include_recruiter=True, platform=resolved_platform
+        )
         if _field:
             verdicts[str(_job.get("job_id", ""))] = {
                 "verdict": "not_match", "reason": _reason,
@@ -426,7 +441,8 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
     criteria_desc = ""
     if criteria:
         criteria_desc = _build_criteria_description(
-            {k: v for k, v in criteria.items() if k != "profile_summary"}
+            {k: v for k, v in criteria.items() if k != "profile_summary"},
+            resolved_platform,
         )
     criteria_desc = criteria_desc or "（无明确标准，宽松判断）"
     facts_desc = build_profile_facts_description(profile_facts)
@@ -435,6 +451,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         profile_summary=summary,
         facts_desc=facts_desc,
         features_prompt_text=build_features_prompt_text(),
+        hard_fields_text=_screen_hard_fields_text(resolved_platform),
     )
     def _match_one_batch(batch, _invalid_retried=False):
         """单批精筛，返回 {jid: verdict}。
@@ -443,8 +460,9 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         整批因网络/超时/限流失败时，本批每项直接标 uncertain 并发终态，
         不再末尾补一轮；用户可在结果页对 uncertain 岗位重抓。
         """
-        batch_desc = [
-            {
+        batch_desc = []
+        for idx, job in enumerate(batch):
+            item = {
                 "i": idx,
                 "title": job.get("title", ""),
                 "salary": job.get("salary", ""),
@@ -452,8 +470,8 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 "tags": job.get("tags") or job.get("job_labels") or job.get("tags_list") or "",
                 "jd": str(job.get("jd", ""))[:1500],
             }
-            for idx, job in enumerate(batch)
-        ]
+            item.update(_detail_fields(job, resolved_platform))
+            batch_desc.append(item)
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(batch_desc, ensure_ascii=False)},

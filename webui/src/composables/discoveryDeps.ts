@@ -88,11 +88,13 @@ export interface SearchDeps {
 
 export interface ExecutionDeps {
   startScrape: (options?: OneClickLaunch) => Promise<void>;
+  pauseScrape: () => Promise<void>;
   openOneClickDialog: () => void;
   restoreRunningTask: () => Promise<void>;
   finishPausedTask: (runId: string) => Promise<void>;
   continueAiScreen: (platform?: Platform) => Promise<void>;
   cancelScrape: () => Promise<void>;
+  cancelActiveScrape: () => Promise<void>;
   startAiScreen: (options?: AiScreenLaunch) => Promise<void>;
 }
 
@@ -254,7 +256,6 @@ export function wireDiscoveryDeps(
   );
   return target;
 }
-
 /**
  * 回填 roundFlow：它依赖五域产物（api 段传入 execution/tasks/results/workflow
  * 的函数），必须晚于五域构造；就地写入同一容器，composable 调用时解析。

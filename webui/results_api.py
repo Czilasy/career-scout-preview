@@ -15,6 +15,7 @@ import time
 from flask import jsonify, request
 
 from webui.constants import LOG_TAIL_LINES, _MSG_TASK_NOT_FOUND
+from webui.pipeline_exec_status import user_visible_failure_reason
 from webui.result_rounds import save_scraped_only_round
 from webui.task_status import _public_status_for_integrity, _public_task_status
 from webui.task_runners import _iso_epoch_ms
@@ -255,6 +256,25 @@ def register_results_routes(app, ctx):
             # T405: 按 combo 最新 attempt 汇总 source outcomes
             source_summary, source_outcomes = _build_source_summary_and_outcomes(task_id)
             integrity = _integrity_for_run(ctx.store, task_id)
+            task_result = task.get("result")
+            result_payload = task_result if isinstance(task_result, dict) else {}
+            error_code = (
+                task.get("error_code")
+                or (db_run or {}).get("error_code")
+                or result_payload.get("error_code")
+                or result_payload.get("hard_stop_code")
+            )
+            diagnostic = (
+                task.get("error")
+                or result_payload.get("error")
+                or (db_run or {}).get("error_reason")
+                or ""
+            )
+            visible_error = user_visible_failure_reason(
+                error_code,
+                diagnostic,
+                task.get("platform") or (db_run or {}).get("platform") or "",
+            )
             raw_status = str(task.get("status") or "")
             public_status = (_public_status_for_integrity(
                 integrity, raw_status, (db_run or {}).get("interruption_kind"),
@@ -266,7 +286,7 @@ def register_results_routes(app, ctx):
                 "status": public_status,
                 "progress": task["progress"],
                 "logs": list(task["logs"][-LOG_TAIL_LINES:]),
-                "error": task["error"],
+                "error": visible_error,
                 "started_at": task.get("started_at"),
                 "finished_at": task.get("finished_at"),
                 "config_digest": task.get("config_digest"),

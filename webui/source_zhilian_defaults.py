@@ -3,10 +3,12 @@
 调用 scripts/zhilian/ 域模块（search 的 preflight/fetch_list、detail 的
 fetch_detail/scrape_details_batch）真实函数的默认 runner，以及智联
 failed_code → 用户可读原因的映射。测试通过向 ZhilianCdpSource 注入替身
-绕开真实 CDP；本模块不依赖 webui 其他模块。
+绕开真实 CDP；用户可见失败文案统一来自中央错误注册表。
 """
 
 from __future__ import annotations
+
+from webui.error_registry import ERROR_USER_MESSAGES, resolve_code
 
 
 # ---------------------------------------------------------------------------
@@ -102,18 +104,6 @@ def _default_zhilian_batch_detail_runner(
 
 
 def _zhilian_failed_reason(failed_code: str) -> str:
-    """智联 failed_code → 用户可读原因（脱敏，不含页面正文/profile 路径）。"""
-    reasons = {
-        "source_cdp_unavailable": "CDP 端口不可用或 Chrome 未启动",
-        "source_login_required": "智联登录态失效，需要重新登录",
-        "source_verification_required": "触发 EdgeOne/验证码，需要人工验证",
-        "source_rate_limited": "触发智联限流，需要冷却",
-        "source_blocked": "智联平台封禁或阻断",
-        "source_unreachable": "无法连接智联平台",
-        "source_timeout": "智联请求超时",
-        "source_not_found": "岗位详情无法取得（可能已下架）",
-        "source_invalid_output": "输入校验失败或页面解析异常",
-        "source_input_drift": "input_hash 不匹配，计划项已漂移",
-        "source_unknown_error": "未知错误",
-    }
-    return reasons.get(failed_code, "未知错误")
+    """把 source failed_code 委托给中央注册表生成用户可见文案。"""
+    resolved = resolve_code(failed_code) if failed_code else ""
+    return ERROR_USER_MESSAGES.get(resolved, "未知错误")

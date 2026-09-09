@@ -339,9 +339,11 @@ describe("DiscoveryView history mode", () => {
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-035-us3" } });
     await flushPromises();
 
-    // 正常运行基线：02 任务页恰好 2 个操作按钮（停止抓取、结束并保存结果）
-    expect(wrapper.get('[data-testid="start-scrape"]').text()).toContain("停止抓取");
-    expect(wrapper.find('[data-testid="finish-active-scrape"]').exists()).toBe(true);
+    // 正常运行基线：02 任务页使用共享的可见动作按钮。
+    expect(wrapper.find('[data-testid="start-scrape"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="pause-scrape"]').text()).toContain("暂停");
+    expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="cancel-scrape"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="view-scraped-only"]').exists()).toBe(false);
 
@@ -356,9 +358,11 @@ describe("DiscoveryView history mode", () => {
     await wrapper.get('[data-testid="back-to-latest"]').trigger("click");
     await flushPromises();
 
-    // 回到 02 任务页：按钮集合与正常运行完全一致（恰好 2 个，无多余入口）
-    expect(wrapper.get('[data-testid="start-scrape"]').text()).toContain("停止抓取");
-    expect(wrapper.find('[data-testid="finish-active-scrape"]').exists()).toBe(true);
+    // 回到 02 任务页：仍使用同一组可见动作按钮。
+    expect(wrapper.find('[data-testid="start-scrape"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="pause-scrape"]').text()).toContain("暂停");
+    expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="cancel-scrape"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="view-scraped-only"]').exists()).toBe(false);
 
@@ -402,7 +406,8 @@ describe("DiscoveryView history mode", () => {
     await flushPromises();
 
     // 02 任务页：抓取运行中 →「直接查看结果」因无活任务守卫不渲染（FR-013 纵深防御）
-    expect(wrapper.get('[data-testid="start-scrape"]').text()).toContain("停止抓取");
+    expect(wrapper.find('[data-testid="start-scrape"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="pause-scrape"]').text()).toContain("暂停");
     expect(wrapper.find('[data-testid="view-scraped-only"]').exists()).toBe(false);
     // 不发生半截保存请求
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/api/scrape-only-snapshot"))).toBe(false);

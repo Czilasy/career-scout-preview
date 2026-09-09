@@ -377,6 +377,35 @@ class StoreScrapeRunsMixin:
         except (json.JSONDecodeError, TypeError):
             return set()
 
+    def load_checkpoint_strict(self, run_id, stage):
+        """读取暂停所需的断点；空值合法，损坏内容必须显式失败。
+
+        普通 ``load_checkpoint`` 为兼容历史调用保留了“损坏即空集合”的
+        行为。暂停需要保护最后一个可恢复断点，因此使用这个严格入口：
+        缺少行或空字符串返回空集合，JSON 解码/形状错误抛出 ``ValueError``，
+        数据库读取错误原样向上传递给调用方的运维错误处理。
+        """
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT completed_keys_json FROM pipeline_checkpoints "
+                "WHERE run_id = ? AND stage = ?",
+                (str(run_id), str(stage)),
+            ).fetchone()
+        raw_payload = None if row is None else row["completed_keys_json"]
+        if raw_payload is None or (
+                isinstance(raw_payload, str) and not raw_payload.strip()):
+            return set()
+        try:
+            payload = json.loads(raw_payload)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError("checkpoint payload is invalid JSON") from exc
+        if not isinstance(payload, list):
+            raise ValueError("checkpoint payload must be a JSON list")
+        try:
+            return set(payload)
+        except TypeError as exc:
+            raise ValueError("checkpoint payload contains an invalid key") from exc
+
     def list_checkpoints(self, run_id):
         with self._connection() as conn:
             rows = conn.execute(

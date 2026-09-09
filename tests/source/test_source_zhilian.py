@@ -2,6 +2,9 @@
 import json
 import unittest
 from unittest import mock
+
+from scripts.zhilian import cdp as zhilian_cdp
+from scripts.zhilian import search as zhilian_search
 from webui.source import (
     BossCdpSource,
     FakeJobSource,
@@ -16,6 +19,112 @@ from webui.source import (
 from webui.source import ZhilianCdpSource
 
 from tests.source.harness import _LoginCacheIsolated
+
+
+class ZhilianSourceMessageRegistryTests(unittest.TestCase):
+    def test_canonical_source_messages_match_central_registry(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.pipeline_exec_status import failed_code_label
+        from webui.source_zhilian_defaults import _zhilian_failed_reason
+
+        required_codes = (
+            "source_login_required",
+            "source_rate_limited",
+            "source_verification_required",
+            "source_cdp_unavailable",
+        )
+        source_codes = required_codes + tuple(
+            code for code in sorted(ERROR_USER_MESSAGES)
+            if code.startswith("source_") and code not in required_codes
+        )
+        for code in source_codes:
+            with self.subTest(code=code):
+                expected = ERROR_USER_MESSAGES[code]
+                self.assertEqual(_zhilian_failed_reason(code), expected)
+                self.assertEqual(failed_code_label(code, "zhilian"), expected)
+
+
+class ZhilianRuntimeAdapterBoundaryTests(unittest.TestCase):
+    """本轮新增的 signal/切号适配逻辑通过独立边界暴露。"""
+
+    def test_detail_signal_mapping_and_profile_switch_hook_are_public(self):
+        from webui.source_zhilian_runtime_adapter import (
+            build_zhilian_detail_signal_map,
+            normalize_zhilian_detail_signal,
+            run_zhilian_preflight_after_profile_switch,
+        )
+
+        mapping = build_zhilian_detail_signal_map(
+            {"blocked": "source_blocked", "unreachable": "source_unreachable"},
+        )
+        self.assertEqual(mapping["cdp_unavailable"], "source_cdp_unavailable")
+        self.assertEqual(
+            normalize_zhilian_detail_signal("cdp_unavailable", mapping),
+            "source_cdp_unavailable",
+        )
+        self.assertEqual(
+            normalize_zhilian_detail_signal(
+                "unknown_signal", mapping, fallback="source_status_unclear",
+            ),
+            "source_status_unclear",
+        )
+
+        marker = object()
+        self.assertIs(
+            run_zhilian_preflight_after_profile_switch(lambda: marker),
+            marker,
+        )
+
+
+class ZhilianPageReadinessTests(unittest.TestCase):
+    """切号和预检必须绑定到真实智联页面，不能接受普通 tab。"""
+
+    def test_find_page_rejects_about_blank_when_no_zhilian_page_exists(self):
+        with mock.patch.object(
+            zhilian_cdp,
+            "_http_json",
+            return_value=[{
+                "type": "page",
+                "url": "about:blank",
+                "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1",
+            }],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "zhilian_page"):
+                zhilian_cdp._find_page(9223, create=False)
+
+    def test_preflight_rejects_non_zhilian_location_even_when_dom_looks_loaded(self):
+        ws = mock.Mock()
+        with mock.patch.object(
+            zhilian_search,
+            "_http_json",
+            return_value={"Browser": "Chrome/140"},
+        ), mock.patch.object(zhilian_search, "_connect", return_value=ws), \
+                mock.patch.object(zhilian_search, "_navigate"), \
+                mock.patch.object(zhilian_search, "_wait_expression", return_value=True), \
+                mock.patch.object(
+                    zhilian_search,
+                    "_evaluate",
+                    side_effect=["已登录用户", "about:blank"],
+                ):
+            signal = zhilian_search.preflight(9223)
+        self.assertEqual(signal, "unreachable")
+
+    def test_account_switch_uses_adapter_preflight_callback(self):
+        from webui import account_round_robin as robin_mod
+        # 先加载兼容门面，避免下面对实现模块的 patch 让门面永久缓存
+        # MagicMock 别名；该测试结束后只应恢复本次 patch。
+        from webui import pipeline_exec as _pipeline_exec
+
+        with mock.patch(
+            "webui.pipeline_exec_accounts.resolve_browser_account",
+            return_value="C:\\profiles\\account-a",
+        ), mock.patch("webui.pipeline_exec_accounts.set_active_cdp_data_dir"), \
+                mock.patch("webui.platforms.derive_zhilian_profile_dir", return_value="C:\\profiles\\zhilian-a"), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")):
+            ready = robin_mod._switch_browser_account(
+                "a", "zhilian", 9223, preflight=lambda: False,
+            )
+        self.assertFalse(ready)
 
 
 # ===========================================================================
@@ -849,26 +958,50 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
         self.assertEqual(results["j0"].failed_code, "source_blocked")
         self.assertEqual(len(batch_calls), 0)
 
-    def test_batch_parallel_degraded_skipped_maps_blocked(self):
-        """degrade 停工后未处理项（skipped）映射 source_blocked。"""
+    def test_batch_parallel_degraded_skipped_preserves_platform_signal(self):
+        """degrade 停工后的 skipped 保留明确的平台错误语义。"""
         def batch_runner(list_data, **kw):
             jobs = list_data.get("jobs", [])
             per_item = [("ok", {"jd": "jd"})] + [("skipped", {})] * (len(jobs) - 1)
-            return per_item, "rate_limited"
+            return per_item, self.signal
 
-        source = ZhilianCdpSource(
-            browser_account="a", cdp_port=9223,
-            batch_detail_runner=batch_runner,
-        )
         jobs = [
             {"platform": "zhilian", "platform_job_id": f"j{i}",
              "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
             for i in range(3)
         ]
+        for signal, expected in (
+            ("login_required", "source_login_required"),
+            ("verification", "source_verification_required"),
+            ("rate_limited", "source_rate_limited"),
+            ("blocked", "source_blocked"),
+        ):
+            self.signal = signal
+            source = ZhilianCdpSource(
+                browser_account="a", cdp_port=9223,
+                batch_detail_runner=batch_runner,
+            )
+            results = source.fetch_details_batch(jobs, tab_pool_size=2)
+            self.assertTrue(results["j0"].ok, signal)
+            self.assertEqual(results["j1"].failed_code, expected, signal)
+            self.assertEqual(results["j2"].failed_code, expected, signal)
+
+    def test_batch_parallel_cancelled_skipped_is_not_platform_blocked(self):
+        """没有平台级 signal 的 skipped 不得伪装成 IP 风控。"""
+        def batch_runner(list_data, **kw):
+            jobs = list_data.get("jobs", [])
+            return [("skipped", {}) for _ in jobs], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [{
+            "platform": "zhilian", "platform_job_id": "j0",
+            "canonical_url": "https://www.zhaopin.com/jobdetail/j0.htm",
+        }]
         results = source.fetch_details_batch(jobs, tab_pool_size=2)
-        self.assertTrue(results["j0"].ok)
-        self.assertEqual(results["j1"].failed_code, "source_blocked")
-        self.assertEqual(results["j2"].failed_code, "source_blocked")
+        self.assertEqual(results["j0"].failed_code, "source_status_unclear")
 
     def test_batch_parallel_cdp_unavailable_maps_cdp_error(self):
         """建池失败（cdp_unavailable 降级）映射 source_cdp_unavailable。"""
@@ -885,8 +1018,8 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
         results = source.fetch_details_batch(jobs, tab_pool_size=2)
         self.assertEqual(results["j0"].failed_code, "source_cdp_unavailable")
 
-    def test_batch_parallel_runner_exception_maps_unknown_error(self):
-        """runner 抛异常：整批 source_unknown_error（与串行异常语义一致）。"""
+    def test_batch_parallel_runner_exception_maps_unreachable(self):
+        """runner 抛临时异常：整批 source_unreachable，不污染账号限流状态。"""
         def batch_runner(list_data, **kw):
             raise RuntimeError("boom")
 
@@ -900,8 +1033,8 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
             for i in range(2)
         ]
         results = source.fetch_details_batch(jobs, tab_pool_size=2)
-        self.assertEqual(results["j0"].failed_code, "source_unknown_error")
-        self.assertEqual(results["j1"].failed_code, "source_unknown_error")
+        self.assertEqual(results["j0"].failed_code, "source_unreachable")
+        self.assertEqual(results["j1"].failed_code, "source_unreachable")
 
     def test_batch_parallel_item_done_replayed_in_input_order(self):
         """并行分支按输入顺序回放 on_item_done（对齐 BOSS 批返回语义）。"""

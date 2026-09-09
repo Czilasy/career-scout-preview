@@ -2,6 +2,7 @@ import pathlib
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 from webui.app import create_app
 from webui.resume_identity import (
@@ -88,6 +89,121 @@ class ResumeIdentityTests(unittest.TestCase):
             finally:
                 cache.reset_login_state_path()
 
+    def test_activation_failure_uses_registry_source_message(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.resume_identity import activate_frozen_identity_candidate
+
+        def fail_activation(_run):
+            raise RuntimeError("raw browser diagnostic")
+
+        result = activate_frozen_identity_candidate(
+            fail_activation,
+            {"platform": "zhilian", "execution_params": {}},
+            {
+                "platform": "zhilian", "browser_account": "a",
+                "cdp_port": 9223, "profile_key": "zhilian:a",
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "source_cdp_unavailable")
+        self.assertEqual(
+            result["message"],
+            ERROR_USER_MESSAGES["source_cdp_unavailable"],
+        )
+        self.assertNotIn("raw browser diagnostic", repr(result))
+
+    def test_cleanup_audit_write_failure_is_logged_and_not_silent(self):
+        from webui.frozen_browser_identity import cleanup_frozen_task_browser
+        from webui import task_continue_api
+
+        class AuditStore:
+            def get_screening_run(self, run_id):
+                return {"id": run_id, "platform": "boss", "execution_params": {}}
+
+            def append_task_event(self, run_id, event_type, payload):
+                raise RuntimeError("audit sink unavailable")
+
+        source = pathlib.Path(task_continue_api.__file__).read_text(encoding="utf-8")
+        self.assertNotRegex(source, r"except Exception:\s*pass")
+        self.assertIn("browser cleanup audit event write failed", source)
+        with self.assertLogs(
+                "career_scout.webui.frozen_browser_identity", level="WARNING") as logs:
+            result = cleanup_frozen_task_browser(
+                AuditStore(), "audit-run", None,
+                accounts_path=None,
+                activate=lambda _profile: None,
+                close=lambda: False,
+            )
+        self.assertFalse(result.ok)
+        self.assertTrue(any("RuntimeError" in line for line in logs.output))
+
+    def test_account_switch_audit_write_failure_logs_type_without_payload(self):
+        from webui.resume_identity import record_account_switch_event
+
+        class AuditStore:
+            def append_task_event(self, run_id, event_type, payload):
+                raise RuntimeError("secret-token-must-not-be-logged")
+
+        with self.assertLogs(
+                "career_scout.webui.resume_identity", level="WARNING") as logs:
+            written = record_account_switch_event(
+                AuditStore(), "audit-switch-run", from_account="a",
+                to_account="b", accounts={}, phase="resume", reason="auto",
+            )
+
+        self.assertFalse(written)
+        self.assertTrue(any("RuntimeError" in line for line in logs.output))
+        self.assertTrue(any("audit-switch-run" in line for line in logs.output))
+        self.assertFalse(any("secret-token" in line for line in logs.output))
+
+    def test_child_identity_resolution_warning_preserves_original_identity(self):
+        from webui.resume_identity import resolve_child_frozen_identity
+
+        class ParentStore:
+            def get_run_checkpoint_identity(self, run_id):
+                return None
+
+            def get_screening_run(self, run_id):
+                return {
+                    "id": run_id,
+                    "platform": "boss",
+                    "execution_params": {
+                        "platform": "boss",
+                        "browser_account": "account-secret",
+                        "cdp_port": None,
+                        "profile_key": "account-secret",
+                    },
+                }
+
+        with mock.patch(
+                "webui.pipeline_exec_accounts.resolve_browser_account",
+                return_value="profile-path-secret"), mock.patch(
+                "webui.platforms.resolve_login_space",
+                side_effect=RuntimeError("credential-secret")), self.assertLogs(
+                    "career_scout.webui.resume_identity", level="WARNING") as logs:
+            identity = resolve_child_frozen_identity(
+                ParentStore(), "source-child-run",
+                fallback_account="fallback-secret",
+                accounts_path="accounts-path-secret",
+            )
+
+        self.assertEqual(identity, {
+            "platform": "boss",
+            "browser_account": "account-secret",
+            "cdp_port": None,
+            "profile_key": "account-secret",
+            "filter_schema_version": None,
+        })
+        self.assertTrue(any("source-child-run" in line for line in logs.output))
+        self.assertTrue(any("operation=child_login_space_resolve" in line
+                            for line in logs.output))
+        self.assertTrue(any("RuntimeError" in line for line in logs.output))
+        for secret in (
+                "account-secret", "profile-path-secret", "credential-secret",
+                "accounts-path-secret", "fallback-secret"):
+            self.assertFalse(any(secret in line for line in logs.output))
+
 
 class ResumeContinueApiTests(unittest.TestCase):
     def setUp(self):
@@ -126,6 +242,7 @@ class ResumeContinueApiTests(unittest.TestCase):
             "execution_config": {},
         }
         if not with_identity:
+            params.pop("browser_account", None)
             params.pop("cdp_port", None)
             params.pop("profile_key", None)
         self.store.create_screening_run(
@@ -139,13 +256,271 @@ class ResumeContinueApiTests(unittest.TestCase):
         )
         self.store.save_ai_settings("http://example.invalid", "test-ref", status="ready")
 
+    def test_scrape_continue_corrupt_checkpoint_finishes_failed_without_worker(self):
+        """统一继续入口在严格断点读取失败时返回 409 并结束为 failed。"""
+        for platform in ("boss", "zhilian"):
+            with self.subTest(platform=platform):
+                run_id = f"corrupt-unified-scrape-{platform}"
+                self.store.create_screening_run(
+                    run_id,
+                    source_count=1,
+                    execution_params={
+                        "platform": platform,
+                        "script_params": {"keyword": "前端", "city": ["上海"], "pages": 1},
+                        "browser_account": "a",
+                        "cdp_port": 9222 if platform == "boss" else 9223,
+                        "profile_key": f"{platform}:a",
+                    },
+                )
+                self.store.update_screening_run(
+                    run_id, status="running", current_stage="scrape",
+                )
+                self.store.update_screening_run(
+                    run_id, status="paused", current_stage="scrape",
+                    error_code="captcha_required", error_reason="触发验证码",
+                )
+                raw_checkpoint = '{"credential":"must-not-be-replaced"'
+                with self.store._connection() as conn:
+                    conn.execute(
+                        "INSERT INTO pipeline_checkpoints "
+                        "(run_id, stage, completed_keys_json, saved_at) "
+                        "VALUES (?, 'scrape', ?, 1)",
+                        (run_id, raw_checkpoint),
+                    )
+                context = self.app.config["PIPELINE_CONTEXT"]
+                context.tasks[run_id] = {
+                    "kind": "scrape", "status": "paused", "result": None,
+                }
+                executor = self.app.config["PIPELINE_EXECUTOR"]
+                with mock.patch.object(context, "activate_run_browser") as activate, \
+                        mock.patch.object(executor, "submit") as submit, \
+                        mock.patch("webui.task_continue_api.commit_continue_identity") as commit, \
+                        mock.patch("webui.task_continue_api.invalidate_login_cache_for_resume") as invalidate:
+                    response = self.client.post(f"/api/task/continue/{run_id}")
+
+                self.assertEqual(response.status_code, 409, response.get_json())
+                payload = response.get_json()
+                self.assertEqual(payload["error"], "checkpoint_read_failed")
+                self.assertEqual(payload["status"], "failed")
+                failed_run = self.store.get_screening_run(run_id)
+                self.assertEqual(failed_run["status"], "failed")
+                self.assertEqual(failed_run["source_count"], 1)
+                activate.assert_not_called()
+                commit.assert_not_called()
+                invalidate.assert_not_called()
+                with self.store._connection() as conn:
+                    row = conn.execute(
+                        "SELECT completed_keys_json FROM pipeline_checkpoints "
+                        "WHERE run_id = ? AND stage = 'scrape'", (run_id,),
+                    ).fetchone()
+                self.assertEqual(row["completed_keys_json"], raw_checkpoint)
+                submit.assert_not_called()
+
+    def test_ai_kind_with_scrape_stage_keeps_ai_continue_order(self):
+        """AI hard-stop rows using the scrape stage must not take scrape resume."""
+        run_id = "ai-kind-scrape-stage"
+        self._seed_zhilian_paused(run_id)
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape",
+        )
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited", error_reason="源账号限流",
+        )
+        raw_checkpoint = '{"credential":"ai-run-must-not-be-read"'
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO pipeline_checkpoints "
+                "(run_id, stage, completed_keys_json, saved_at) "
+                "VALUES (?, 'scrape', ?, 1)",
+                (run_id, raw_checkpoint),
+            )
+        context = self.app.config["PIPELINE_CONTEXT"]
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "ai_screen", "status": "paused", "result": None,
+        }
+        with mock.patch.object(context, "activate_run_browser"), \
+                mock.patch.object(executor, "submit", return_value=mock.Mock()), \
+                mock.patch.object(
+                    context, "continue_execute_search",
+                    side_effect=AssertionError(
+                        "AI continue must not dispatch scrape worker",
+                    ),
+                ) as continue_scrape:
+            response = self.client.post(f"/api/task/continue/{run_id}")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertNotEqual(
+            response.get_json().get("error"), "checkpoint_read_failed",
+        )
+        continue_scrape.assert_not_called()
+        with self.store._connection() as conn:
+            row = conn.execute(
+                "SELECT completed_keys_json FROM pipeline_checkpoints "
+                "WHERE run_id = ? AND stage = 'scrape'", (run_id,),
+            ).fetchone()
+        self.assertEqual(row["completed_keys_json"], raw_checkpoint)
+
+    def test_ai_scrape_stage_after_restart_keeps_ai_continue_order(self):
+        """Persisted AI hard-stop rows remain AI after the live task is gone."""
+        run_id = "ai-restart-scrape-stage"
+        self._seed_zhilian_paused(run_id)
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape",
+        )
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited", error_reason="源账号限流",
+        )
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO pipeline_checkpoints "
+                "(run_id, stage, completed_keys_json, saved_at) "
+                "VALUES (?, 'scrape', ?, 1)",
+                (run_id, '{"credential":"restart-ai-must-not-be-read"'),
+            )
+        context = self.app.config["PIPELINE_CONTEXT"]
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        context.tasks.pop(run_id, None)
+        with mock.patch.object(context, "activate_run_browser"), \
+                mock.patch.object(executor, "submit", return_value=mock.Mock()), \
+                mock.patch.object(
+                    context, "continue_execute_search",
+                    side_effect=AssertionError(
+                        "AI continue must not dispatch scrape worker",
+                    ),
+                ) as continue_scrape:
+            response = self.client.post(f"/api/task/continue/{run_id}")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertNotEqual(
+            response.get_json().get("error"), "checkpoint_read_failed",
+        )
+        continue_scrape.assert_not_called()
+
+    def test_source_factory_none_uses_registry_reason_in_whitebox_primary_reason(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.runners.pipeline_task import run_pipeline_task
+        from webui.whitebox import WhiteboxService
+
+        run_id = "source-factory-none"
+        script_params = {"keyword": "前端", "city": ["上海"], "pages": 1}
+        self.store.create_screening_run(
+            run_id,
+            source_count=1,
+            execution_params={
+                "platform": "zhilian",
+                "script_params": script_params,
+                "browser_account": "a",
+                "cdp_port": 9223,
+                "profile_key": "zhilian:a",
+            },
+        )
+        context = self.app.config["PIPELINE_CONTEXT"]
+        task = context.register_pipeline_task(run_id, "scrape")
+        task.update({
+            "platform": "zhilian", "browser_account": "a",
+            "cdp_port": 9223, "profile_key": "zhilian:a",
+        })
+
+        with mock.patch.object(context, "activate_task_browser"), \
+                mock.patch.object(context, "make_cdp_source", return_value=None), \
+                mock.patch.object(context, "schedule_pipeline_task_cleanup"), \
+                mock.patch.object(context, "clear_auto_screen"):
+            run_pipeline_task(context, run_id, script_params)
+
+        expected = ERROR_USER_MESSAGES["source_cdp_unavailable"]
+        run = self.store.get_screening_run(run_id)
+        self.assertEqual(run["error_code"], "source_cdp_unavailable")
+        self.assertEqual(run["error_reason"], expected)
+        self.assertEqual(task["error"], expected)
+        integrity = WhiteboxService(self.store).report("scrape", run_id)["integrity"]
+        self.assertEqual(integrity["primary_code"], "source_cdp_unavailable")
+        self.assertEqual(integrity["primary_reason"], expected)
+
+    def test_direct_search_continue_activation_failure_uses_registry_reason(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.frozen_browser_identity import FrozenBrowserBindingError
+
+        run_id = "direct-search-continue-activation-failure"
+        self.store.create_screening_run(
+            run_id,
+            source_count=1,
+            execution_params={
+                "platform": "zhilian",
+                "script_params": {"keyword": "前端", "city": ["上海"], "pages": 1},
+                "browser_account": "a",
+                "cdp_port": 9223,
+                "profile_key": "zhilian:a",
+            },
+        )
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape",
+        )
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="scrape",
+            error_code="cdp_unavailable",
+        )
+        context = self.app.config["PIPELINE_CONTEXT"]
+        expected = ERROR_USER_MESSAGES["source_cdp_unavailable"]
+        with mock.patch.object(
+                context, "activate_run_browser",
+                side_effect=FrozenBrowserBindingError("raw bind diagnostic"),
+        ), mock.patch.object(context, "schedule_pipeline_task_cleanup"), \
+                mock.patch.object(context, "clear_auto_screen"):
+            response = self.client.post(
+                f"/api/execute-search/continue/{run_id}")
+
+        self.assertEqual(response.status_code, 409, response.get_json())
+        payload = response.get_json()
+        self.assertEqual(payload["error"], "source_cdp_unavailable")
+        self.assertEqual(payload["error_code"], "source_cdp_unavailable")
+        self.assertEqual(payload["error_reason"], expected)
+        self.assertEqual(payload["message"], expected)
+        self.assertNotIn("raw bind diagnostic", str(payload))
+
+    def test_execute_search_activation_failure_uses_registry_reason(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.frozen_browser_identity import FrozenBrowserBindingError
+
+        context = self.app.config["PIPELINE_CONTEXT"]
+        expected = ERROR_USER_MESSAGES["source_cdp_unavailable"]
+        with mock.patch.object(
+                context, "activate_run_browser",
+                side_effect=FrozenBrowserBindingError("raw start diagnostic"),
+        ), mock.patch.object(context, "schedule_pipeline_task_cleanup"), \
+                mock.patch.object(context, "clear_auto_screen"):
+            response = self.client.post(
+                "/api/execute-search",
+                json={
+                    "platform": "zhilian",
+                    "script_params": {
+                        "keyword": "前端", "city": ["上海"], "pages": 1,
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 503, response.get_json())
+        payload = response.get_json()
+        self.assertEqual(payload["error"], "source_cdp_unavailable")
+        self.assertEqual(payload["error_code"], "source_cdp_unavailable")
+        self.assertEqual(payload["error_reason"], expected)
+        self.assertNotIn("raw start diagnostic", str(payload))
+
     def test_missing_zhilian_identity_blocks_and_keeps_paused(self):
         self._seed_zhilian_paused(with_identity=False)
-        response = self.client.post("/api/task/continue/zhilian-paused")
+        context = self.app.config["PIPELINE_CONTEXT"]
+        with mock.patch.object(
+            context, "account_for_run",
+            side_effect=AssertionError("智联缺身份不得解析全局账号"),
+        ), mock.patch.object(context, "activate_run_browser") as activate:
+            response = self.client.post("/api/task/continue/zhilian-paused")
         self.assertEqual(response.status_code, 409)
         payload = response.get_json()
         self.assertEqual(payload["error"], "missing_frozen_identity")
         self.assertEqual(self.store.get_screening_run("zhilian-paused")["status"], "paused")
+        activate.assert_not_called()
 
     def test_complete_zhilian_identity_is_written_back_and_used(self):
         self._seed_zhilian_paused()
@@ -163,6 +538,150 @@ class ResumeContinueApiTests(unittest.TestCase):
         self.assertEqual(claimed["platform"], "zhilian")
         self.assertEqual(claimed["cdp_port"], 9223)
         self.assertEqual(claimed["profile_key"], "zhilian:a")
+
+    def test_continue_binding_failure_does_not_persist_target_identity(self):
+        """继续激活失败时目标账号不应污染 paused run，且可重试。"""
+        from webui.frozen_browser_identity import FrozenBrowserBindingError
+        from webui.error_registry import ERROR_USER_MESSAGES
+
+        self._seed_zhilian_paused()
+        context = self.app.config["PIPELINE_CONTEXT"]
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(
+            context, "activate_run_browser",
+            side_effect=FrozenBrowserBindingError("profile bind failed"),
+        ), mock.patch.object(executor, "submit"):
+            failed = self.client.post(
+                "/api/task/continue/zhilian-paused",
+                json={"target_account": "b"},
+            )
+        self.assertEqual(failed.status_code, 409, failed.get_json())
+        self.assertEqual(failed.get_json()["error"], "source_cdp_unavailable")
+        self.assertEqual(
+            failed.get_json()["error_reason"],
+            ERROR_USER_MESSAGES["source_cdp_unavailable"],
+        )
+        self.assertEqual(
+            failed.get_json()["message"],
+            ERROR_USER_MESSAGES["source_cdp_unavailable"],
+        )
+        self.assertNotIn("profile bind failed", str(failed.get_json()))
+        run = self.store.get_screening_run("zhilian-paused")
+        self.assertEqual(run["status"], "paused")
+        self.assertEqual(run["execution_params"]["browser_account"], "a")
+
+        with mock.patch.object(context, "activate_run_browser"), \
+                mock.patch.object(executor, "submit") as submit:
+            retried = self.client.post(
+                "/api/task/continue/zhilian-paused",
+                json={"target_account": "b"},
+            )
+        self.assertEqual(retried.status_code, 200, retried.get_json())
+        self.assertEqual(
+            self.store.get_screening_run("zhilian-paused")["execution_params"]["browser_account"],
+            "b",
+        )
+        submit.assert_called_once()
+
+    def test_default_resume_block_activation_failure_is_not_a_500(self):
+        """默认阻断检查不得再次隐式激活并在提交后污染身份。"""
+        from webui.frozen_browser_identity import FrozenBrowserBindingError
+
+        self._seed_zhilian_paused()
+        self.app.config.pop("RESUME_BLOCK_CHECKER", None)
+        context = self.app.config["PIPELINE_CONTEXT"]
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(
+            context, "activate_run_browser",
+            side_effect=FrozenBrowserBindingError("profile bind failed"),
+        ), mock.patch.object(executor, "submit") as submit:
+            failed = self.client.post(
+                "/api/task/continue/zhilian-paused",
+                json={"target_account": "b"},
+            )
+        self.assertEqual(failed.status_code, 409, failed.get_json())
+        self.assertNotEqual(failed.status_code, 500)
+        self.assertEqual(failed.get_json()["error"], "source_cdp_unavailable")
+        self.assertEqual(
+            self.store.get_screening_run("zhilian-paused")["status"], "paused")
+        self.assertEqual(
+            self.store.get_screening_run("zhilian-paused")["execution_params"]["browser_account"],
+            "a",
+        )
+        submit.assert_not_called()
+
+        self.app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
+        with mock.patch.object(context, "activate_run_browser"), \
+                mock.patch.object(executor, "submit") as retry_submit:
+            retried = self.client.post(
+                "/api/task/continue/zhilian-paused",
+                json={"target_account": "b"},
+            )
+        self.assertEqual(retried.status_code, 200, retried.get_json())
+        self.assertEqual(
+            self.store.get_screening_run("zhilian-paused")["execution_params"]["browser_account"],
+            "b",
+        )
+        retry_submit.assert_called_once()
+
+    def test_default_resume_checker_probes_after_one_explicit_activation(self):
+        """默认续跑顺序是一次显式激活，再做不启动浏览器的阻断检查。"""
+        from webui import pipeline_exec
+
+        self._seed_zhilian_paused()
+        self.app.config.pop("RESUME_BLOCK_CHECKER", None)
+        context = self.app.config["PIPELINE_CONTEXT"]
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        source = SimpleNamespace(
+            preflight=mock.Mock(return_value=SimpleNamespace(ok=True)),
+        )
+        with mock.patch.object(context, "activate_run_browser") as activate, \
+                mock.patch("webui.source.ZhilianCdpSource", return_value=source), \
+                mock.patch.object(pipeline_exec, "probe_chrome_ready", return_value=(True, "")), \
+                mock.patch.object(
+                    pipeline_exec, "ensure_chrome_ready",
+                    side_effect=AssertionError("resume checker must not launch Chrome"),
+                ), mock.patch.object(executor, "submit") as submit:
+            response = self.client.post("/api/task/continue/zhilian-paused")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        activate.assert_called_once()
+        source.preflight.assert_called_once()
+        submit.assert_called_once()
+
+    def test_default_checker_target_and_auto_switch_activation_failures_are_retryable(self):
+        """目标账号和自动换号激活失败都保持暂停且不写入新身份。"""
+        from webui.frozen_browser_identity import FrozenBrowserBindingError
+
+        for target_account, auto_switch in (("b", False), ("", True)):
+            with self.subTest(auto_switch=auto_switch):
+                run_id = f"zhilian-activation-failure-{'auto' if auto_switch else 'target'}"
+                self._seed_zhilian_paused(run_id)
+                params = self.store.get_screening_run(run_id)["execution_params"]
+                params["active_account_at_freeze"] = "a"
+                self.store.update_screening_execution_params(run_id, params)
+                self.app.config.pop("RESUME_BLOCK_CHECKER", None)
+                context = self.app.config["PIPELINE_CONTEXT"]
+                executor = self.app.config["PIPELINE_EXECUTOR"]
+                with mock.patch.object(
+                    context, "activate_run_browser",
+                    side_effect=FrozenBrowserBindingError("profile bind failed"),
+                ) as activate, mock.patch.object(
+                    context, "load_legacy_advanced_settings",
+                    return_value={"browser_account": "b"},
+                ), mock.patch.object(executor, "submit") as submit:
+                    body = {"target_account": target_account} if target_account else {}
+                    response = self.client.post(
+                        f"/api/task/continue/{run_id}", json=body)
+
+                self.assertEqual(response.status_code, 409, response.get_json())
+                self.assertNotEqual(response.status_code, 500)
+                self.assertEqual(response.get_json()["error"], "source_cdp_unavailable")
+                current = self.store.get_screening_run(run_id)
+                self.assertEqual(current["status"], "paused")
+                self.assertEqual(current["execution_params"]["browser_account"], "a")
+                activate.assert_called_once()
+                submit.assert_not_called()
 
     def test_cached_login_does_not_bypass_real_probe_and_cache_is_invalidated(self):
         from scripts import login_state_cache as cache

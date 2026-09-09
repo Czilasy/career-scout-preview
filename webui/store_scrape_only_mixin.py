@@ -87,7 +87,7 @@ class ScrapeOnlyStoreMixin:
                     json.dumps(execution_json, ensure_ascii=False),
                     str(profile_summary or ""),
                     len(jobs),
-                    len(jobs),
+                    0,
                     0,
                     profile_facts_json,
                 ),

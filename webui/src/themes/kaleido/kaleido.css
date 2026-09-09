@@ -523,11 +523,6 @@
   animation: kaleido-edge-flow 2.6s linear infinite;
   box-shadow: 0 0 10px rgba(126, 255, 178, 0.45);
 }
-[data-theme="kaleido"] .task-progress .task-platform {
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--k-text-hi);
-}
 [data-theme="kaleido"] .task-progress .task-combo-issue {
   border-radius: 0;
   background: rgba(255, 255, 255, 0.04);

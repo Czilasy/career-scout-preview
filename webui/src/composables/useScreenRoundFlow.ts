@@ -60,7 +60,6 @@ export interface ScreenRoundFlowDeps {
     notify: (message: string, tone?: Notice["tone"]) => void;
   };
 }
-
 const TERMINAL_POLL_STATUSES = new Set([
   "paused", "failed", "cancelled", "interrupted", "completed", "completed_with_pending",
 ]);
@@ -79,6 +78,16 @@ function snapshotWithProgress(
     progress: { ...((current || {}).progress || {}), message },
     error: "",
   };
+}
+
+async function readTaskState(runId: string): Promise<TaskSnapshot | null> {
+  try {
+    return await apiRequest<TaskSnapshot>(
+      `/api/task-state/${encodeURIComponent(runId)}`,
+    );
+  } catch {
+    return null;
+  }
 }
 
 export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
@@ -320,9 +329,37 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
         }
       }
     } catch (error) {
-      deps.refs.screenBusy.value = false;
-      deps.refs.pausingScreen.value = false;
-      deps.api.notify(errorMessage(error, "暂停失败，请重试"), "error");
+      // 暂停请求或状态查询失败时，任务真实状态未知，不能把它误当作空闲。
+      // 再读一次权威状态：已收口才释放；读不到则保留占用，刷新后可继续对账。
+      const latest = await readTaskState(runId);
+      const latestStatus = String(latest?.status || "");
+      if (latest && TERMINAL_POLL_STATUSES.has(latestStatus)) {
+        deps.refs.screenSnapshot.value = latest;
+        deps.refs.pausingScreen.value = false;
+        deps.refs.screenBusy.value = false;
+        if (latestStatus === "paused") {
+          deps.refs.pausedRunId.value = runId;
+          await deps.api.loadLatestResult().catch(() => undefined);
+          deps.api.notify("任务已暂停，结果已保留", "success");
+        } else {
+          if (deps.refs.pausedRunId.value === runId) deps.refs.pausedRunId.value = "";
+          deps.api.notify(
+            latest.error || errorMessage(error, "暂停失败，请重试"),
+            latestStatus === "failed" ? "error" : "warning",
+          );
+        }
+      } else {
+        deps.refs.screenBusy.value = true;
+        deps.refs.pausingScreen.value = true;
+        deps.refs.screenSnapshot.value = {
+          ...snapshotWithProgress(
+            deps.refs.screenSnapshot.value,
+            "暂停状态未知，请刷新后确认…",
+          ),
+          status: "pausing",
+        };
+        deps.api.notify(errorMessage(error, "暂停失败，请重试"), "error");
+      }
     } finally {
       busyAction.value = "";
     }
@@ -437,19 +474,60 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     );
     try {
       await apiRequest(`/api/task/pause/${encodeURIComponent(runId)}`, { method: "POST" });
+      let terminalStatus = "";
+      let terminalSnapshot: TaskSnapshot | null = null;
       for (let i = 0; i < 15; i += 1) {
         await delay(300);
         const data = await apiRequest<TaskSnapshot>(
           `/api/task-state/${encodeURIComponent(runId)}`,
         );
         deps.refs.recrawlSnapshot.value = data;
-        if (TERMINAL_POLL_STATUSES.has(String(data.status))) break;
+        if (TERMINAL_POLL_STATUSES.has(String(data.status))) {
+          terminalStatus = String(data.status);
+          terminalSnapshot = data;
+          break;
+        }
       }
-      deps.refs.recrawlBusy.value = false;
-      deps.api.notify("重抓已暂停，结果已保留", "success");
+      if (terminalStatus === "paused") {
+        deps.refs.recrawlBusy.value = false;
+        deps.refs.pausedRunId.value = runId;
+        deps.api.notify("重抓已暂停，结果已保留", "success");
+      } else if (terminalStatus) {
+        deps.refs.recrawlBusy.value = false;
+        if (deps.refs.pausedRunId.value === runId) deps.refs.pausedRunId.value = "";
+        deps.api.notify(
+          terminalSnapshot?.error || "重抓任务已结束",
+          terminalStatus === "failed" ? "error" : "warning",
+        );
+      } else {
+        // 短轮询耗尽但没有终态：继续占用，避免把仍在运行的重抓放空。
+        deps.refs.recrawlBusy.value = true;
+        deps.api.notify("正在等待重抓暂停结果，请稍后查看", "warning");
+      }
     } catch (error) {
-      deps.refs.recrawlBusy.value = false;
-      deps.api.notify(errorMessage(error, "暂停重抓失败，请重试"), "error");
+      const latest = await readTaskState(runId);
+      const latestStatus = String(latest?.status || "");
+      if (latest && TERMINAL_POLL_STATUSES.has(latestStatus)) {
+        deps.refs.recrawlSnapshot.value = latest;
+        deps.refs.recrawlBusy.value = false;
+        if (latestStatus === "paused") {
+          deps.refs.pausedRunId.value = runId;
+          deps.api.notify("重抓已暂停，结果已保留", "success");
+        } else {
+          if (deps.refs.pausedRunId.value === runId) deps.refs.pausedRunId.value = "";
+          deps.api.notify(
+            latest.error || errorMessage(error, "暂停重抓失败，请重试"),
+            latestStatus === "failed" ? "error" : "warning",
+          );
+        }
+      } else {
+        deps.refs.recrawlBusy.value = true;
+        deps.refs.recrawlSnapshot.value = snapshotWithProgress(
+          deps.refs.recrawlSnapshot.value,
+          "暂停状态未知，请刷新后确认…",
+        );
+        deps.api.notify(errorMessage(error, "暂停重抓失败，请重试"), "error");
+      }
     } finally {
       busyAction.value = "";
     }
@@ -506,7 +584,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       || deps.refs.interruptedRunId.value
       || deps.refs.screenBusy.value
       || (!deps.refs.finishedPartial.value
-        && ["paused", "failed", "interrupted"].includes(snapshotStatus))
+        && ["paused"].includes(snapshotStatus))
       || anyResumableTarget.value
       || Boolean(roundContext.value?.resumable),
     );

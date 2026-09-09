@@ -39,7 +39,7 @@ class BossCdpSource(_BossCdpDetailMixin):
     """
     platform: str = 'boss'
 
-    def __init__(self, *, python_executable: str | None=None, cwd: Path | None=None, scraper_path: Path | None=None, env: dict | None=None, timeout_seconds: int=600, runner: Callable[..., subprocess.Popen] | None=None, executor: ScraperExecutor | None=None, cancel_event=None, artifact_root: Path | str | None=None, max_artifact_bytes: int=20000000, cdp_port: int=boss.DEFAULT_CDP_PORT, breaker: SourceCircuitBreaker | None=None, browser_account: str | None=None, in_process: bool=False, run_id: str=''):
+    def __init__(self, *, python_executable: str | None=None, cwd: Path | None=None, scraper_path: Path | None=None, env: dict | None=None, timeout_seconds: int=600, runner: Callable[..., subprocess.Popen] | None=None, executor: ScraperExecutor | None=None, cancel_event=None, artifact_root: Path | str | None=None, max_artifact_bytes: int=20000000, cdp_port: int=boss.DEFAULT_CDP_PORT, breaker: SourceCircuitBreaker | None=None, browser_account: str | None=None, profile_key: str | None=None, in_process: bool=False, run_id: str=''):
         self.python_executable = python_executable or sys.executable or 'python'
         self.cwd = Path(cwd) if cwd else PROJECT_ROOT
         self.scraper_path = Path(scraper_path) if scraper_path else SCRAPER
@@ -52,6 +52,7 @@ class BossCdpSource(_BossCdpDetailMixin):
         self.cdp_port = int(cdp_port)
         self.breaker = breaker or SourceCircuitBreaker()
         self.browser_account = str(browser_account).strip() if browser_account else None
+        self.profile_key = str(profile_key).strip() if profile_key else None
         self.run_id = str(run_id or '').strip()
         if self.run_id:
             for key in ('CAREER_SCOUT_CORRELATION_ID', 'CAREER_SCOUT_TASK_ID'):

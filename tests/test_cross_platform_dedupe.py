@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from unittest import mock
 
 from webui.app import create_app
@@ -251,6 +252,21 @@ def _make_app():
     return app, temp
 
 
+def _enable_zhilian_for_test():
+    """在需要验证已启用平台语义的测试中显式打开智联 fixture。"""
+    from webui.platforms import get_platform, register_platform
+
+    current = get_platform("zhilian")
+    schema = replace(current.filter_schema, enabled_for_new_tasks=True)
+    register_platform(replace(
+        current,
+        filter_schema=schema,
+        enabled_for_new_tasks=True,
+        availability_reason="",
+    ))
+    return current
+
+
 def _wait_for_pipeline_task(client, task_id, timeout=8.0):
     deadline = time.monotonic() + timeout
     last = None
@@ -288,6 +304,7 @@ class CrossPlatformDedupeIntegrationTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.temp = _make_app()
+        self._original_zhilian_registry = _enable_zhilian_for_test()
         self.client = self.app.test_client()
         self.client.environ_base["HTTP_X_BOSS_TOKEN"] = self.app.config["API_TOKEN"]
         self.headers = {"X-Boss-Token": self.app.config["API_TOKEN"]}
@@ -297,6 +314,8 @@ class CrossPlatformDedupeIntegrationTests(unittest.TestCase):
         executor = self.app.config.get("PIPELINE_EXECUTOR")
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
+        from webui.platforms import register_platform
+        register_platform(self._original_zhilian_registry)
         self.temp.cleanup()
 
     # -- 构造 --------------------------------------------------------------
@@ -471,6 +490,109 @@ class CrossPlatformDedupeIntegrationTests(unittest.TestCase):
             task_id = response.get_json()["task_id"]
             finished = _wait_for_pipeline_task(self.client, task_id)
         return finished, seen, task_id
+
+    def test_zhilian_ai_child_inherits_complete_parent_frozen_identity(self):
+        """AI 子任务激活前必须继承父抓取 run 的完整登录空间身份。"""
+        self._install_zhilian_source(
+            "zl-identity-src", [_zl_job("zl-identity-job")],
+        )
+        context = self.app.config["PIPELINE_CONTEXT"]
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(context, "activate_run_browser") as activate, \
+                mock.patch.object(executor, "submit"):
+            response = self.client.post(
+                "/api/ai-screen",
+                json={
+                    "screening_fields": {"keyword": "后端"},
+                    "profile_summary": "后端工程师",
+                    "scrape_task_id": "zl-identity-src",
+                },
+                headers=self.headers,
+            )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        task_id = response.get_json()["task_id"]
+        child = self.store.get_screening_run(task_id)
+        child_params = child["execution_params"]
+        self.assertEqual(child_params["platform"], "zhilian")
+        self.assertEqual(child_params["browser_account"], "a")
+        self.assertEqual(child_params["cdp_port"], 9223)
+        self.assertEqual(child_params["profile_key"], "zhilian:a")
+        activated = activate.call_args.args[0]
+        self.assertEqual(activated["platform"], "zhilian")
+        self.assertEqual(activated["browser_account"], "a")
+        self.assertEqual(activated["cdp_port"], 9223)
+        self.assertEqual(activated["profile_key"], "zhilian:a")
+
+    def test_zhilian_memory_source_without_db_parent_stays_blocked(self):
+        """内存来源快照的平台身份不得被缺省 BOSS 覆盖。"""
+        source_id = "zl-memory-only"
+        job = _zl_job("zl-memory-job")
+        self.app.config["PIPELINE_TASKS"][source_id] = {
+            "kind": "scrape", "status": "done", "platform": "zhilian",
+            "progress": {}, "logs": [], "error": "", "stop_event": threading.Event(),
+            "result": {
+                "ok": True, "jobs": [job], "dropped": [],
+                "integrity": {"conclusion": "succeeded", "evidence_complete": True},
+            },
+        }
+        context = self.app.config["PIPELINE_CONTEXT"]
+        with mock.patch.object(context, "account_for_run", side_effect=AssertionError(
+                "智联内存来源缺身份不得回退 BOSS 全局账号")), \
+                mock.patch.object(context, "activate_run_browser") as activate:
+            response = self.client.post(
+                "/api/ai-screen",
+                json={
+                    "screening_fields": {"keyword": "后端"},
+                    "profile_summary": "后端工程师",
+                    "scrape_task_id": source_id,
+                },
+                headers=self.headers,
+            )
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertEqual(response.get_json()["error"], "missing_frozen_identity")
+        activate.assert_not_called()
+        self.assertFalse(any(
+            item.get("kind") == "ai_screen"
+            and item.get("status") in {"queued", "running"}
+            for item in self.app.config["PIPELINE_TASKS"].values()
+        ))
+
+    def test_ai_screen_binding_failure_releases_claim_and_allows_retry(self):
+        """AI 激活失败不能留下 running 子任务或阻断下一次重试。"""
+        from webui.frozen_browser_identity import FrozenBrowserBindingError
+
+        source_id = "zl-activate-failure"
+        self._install_zhilian_source(source_id, [_zl_job("zl-activate-job")])
+        context = self.app.config["PIPELINE_CONTEXT"]
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(
+            context, "activate_run_browser",
+            side_effect=FrozenBrowserBindingError("profile bind failed"),
+        ), mock.patch.object(executor, "submit"):
+            failed = self.client.post(
+                "/api/ai-screen",
+                json={"screening_fields": {"keyword": "后端"},
+                      "profile_summary": "后端工程师", "scrape_task_id": source_id},
+                headers=self.headers,
+            )
+        self.assertEqual(failed.status_code, 409, failed.get_json())
+        self.assertEqual(failed.get_json()["error"], "source_cdp_unavailable")
+        self.assertFalse(any(
+            item.get("kind") == "ai_screen"
+            and item.get("status") in {"queued", "running"}
+            for item in self.app.config["PIPELINE_TASKS"].values()
+        ))
+
+        with mock.patch.object(context, "activate_run_browser"), \
+                mock.patch.object(executor, "submit") as submit:
+            retried = self.client.post(
+                "/api/ai-screen",
+                json={"screening_fields": {"keyword": "后端"},
+                      "profile_summary": "后端工程师", "scrape_task_id": source_id},
+                headers=self.headers,
+            )
+        self.assertEqual(retried.status_code, 200, retried.get_json())
+        submit.assert_called_once()
 
     def _continue_paused(self, run_id, seen):
         """续跑一个 paused 筛选 run；返回最终快照。"""

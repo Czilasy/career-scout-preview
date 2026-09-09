@@ -90,7 +90,7 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         self.assertEqual(data["error_code"], "platform_validation_failed")
 
     def test_preview_disabled_platform_returns_503(self):
-        """智联 enabled_for_new_tasks=False → 503 platform_disabled。"""
+        """显式禁用智联时仍返回 503 platform_disabled。"""
         from unittest import mock
         from webui.platforms import get_platform_or_none
         def _disabled(platform_raw):
@@ -204,7 +204,7 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
     # -- execute-search: disabled platform -------------------------------
 
     def test_execute_search_disabled_platform_returns_503(self):
-        """智联禁用 → execute-search 返回 503 platform_disabled，不创建 run。"""
+        """显式禁用智联时返回 503 platform_disabled，不创建 run。"""
         from webui.platforms import get_platform_or_none
         def _disabled(platform_raw):
             if platform_raw == "zhilian":
@@ -290,6 +290,37 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         self.assertTrue(params["task_input_digest"])
         self.assertEqual(params["browser_account"], body.get("browser_account") or params["browser_account"])
 
+    def test_execute_search_zhilian_start_entry_is_reachable(self):
+        """智联启用时可从公共 scope/start 入口创建冻结平台任务。"""
+        preview_response = self.client.post("/api/search-scope/preview", json={
+            "platform": "zhilian",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        })
+        self.assertEqual(preview_response.status_code, 200,
+                         preview_response.get_data(as_text=True))
+        preview = preview_response.get_json()["scope"]
+        self.assertEqual(preview["platform"], "zhilian")
+        with mock.patch.object(self.app.config["PIPELINE_EXECUTOR"], "submit"):
+            response = self.client.post("/api/execute-search", json={
+                "platform": "zhilian",
+                "script_params": {
+                    "keyword": "Python",
+                    "city": ["上海"],
+                    "pages": 1,
+                },
+                "scope_digest": preview["scope_digest"],
+            })
+        self.assertEqual(response.status_code, 200,
+                         response.get_data(as_text=True))
+        body = response.get_json()
+        self.assertEqual(body["platform"], "zhilian")
+        run = self.app.config["TASK_STORE"].get_screening_run(body["task_id"])
+        self.assertEqual(run["platform"], "zhilian")
+        self.assertEqual(run["execution_params"]["platform"], "zhilian")
+
     def test_execute_search_scope_request_mismatch_returns_409(self):
         """script_params 的关键词/城市/页数与 scope 不一致 → 409 scope_request_mismatch。"""
         preview = self.client.post("/api/search-scope/preview", json={
@@ -374,6 +405,10 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
             "cdp_port 必须从冻结 runtime 显式传入，不能省略让 adapter 用默认端口",
         )
         self.assertEqual(kwargs["cdp_port"], 9222)
+        self.assertEqual(
+            kwargs["profile_key"], "boss:a",
+            "profile_key 必须从执行任务冻结身份显式传入 BOSS source",
+        )
         # run_search 收到的 source 是 mock 返回的对象（验证 source 被传递）
         mock_search.assert_called_once()
         self.assertIsNotNone(mock_search.call_args.args[1])
@@ -460,6 +495,10 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         }).get_json()["scope"]
 
         fake_source = mock.MagicMock()
+        fake_source.platform = "boss"
+        fake_source.browser_account = "a"
+        fake_source.cdp_port = 9222
+        fake_source.profile_key = "boss:a"
         fake_source.preflight.return_value = SourceOutcome.success(
             safe_log="source_ready")
         fake_source.fetch_list.return_value = SourceOutcome.success(
@@ -521,6 +560,10 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         }).get_json()["scope"]
 
         fake_source = mock.MagicMock()
+        fake_source.platform = "boss"
+        fake_source.browser_account = "a"
+        fake_source.cdp_port = 9222
+        fake_source.profile_key = "boss:a"
         fake_source.preflight.return_value = SourceOutcome.success(
             safe_log="source_ready")
         fake_source.fetch_list.return_value = SourceOutcome.success(
@@ -575,6 +618,10 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         }).get_json()["scope"]
 
         fake_source = mock.MagicMock()
+        fake_source.platform = "boss"
+        fake_source.browser_account = "a"
+        fake_source.cdp_port = 9222
+        fake_source.profile_key = "boss:a"
         fake_source.preflight.return_value = SourceOutcome.success(
             safe_log="source_ready")
         fake_source.fetch_list.return_value = SourceOutcome.success(
@@ -1039,6 +1086,53 @@ class PlatformAwareTaskStateTests(unittest.TestCase):
         self.assertIn("source_summary", data)
         self.assertIn("source_outcomes", data)
 
+    def test_search_progress_uses_registry_message_for_source_error(self):
+        """search-progress 对 source code 使用中央用户文案。"""
+        from webui.error_registry import ERROR_USER_MESSAGES
+
+        run_id = "test_sp_source_error"
+        raw_diagnostic = "raw chrome bootstrap diagnostic"
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "failed", "progress": {}, "logs": [],
+            "result": {
+                "ok": False, "hard_stop": True,
+                "hard_stop_code": "source_cdp_unavailable",
+                "error": raw_diagnostic,
+            },
+            "error": raw_diagnostic, "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+            "platform": "boss", "task_input_digest": "source-error-digest",
+        }
+
+        resp = self.client.get(f"/api/search-progress/{run_id}")
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(
+            data["error"], ERROR_USER_MESSAGES["source_cdp_unavailable"]
+        )
+        self.assertNotIn(raw_diagnostic, data["error"])
+
+    def test_search_progress_preserves_non_source_task_diagnostic(self):
+        """search-progress 不把普通内部诊断替换成 source 文案。"""
+        run_id = "test_sp_internal_error"
+        raw_diagnostic = "internal persistence diagnostic"
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "failed", "progress": {}, "logs": [],
+            "result": {
+                "ok": False, "error_code": "internal_error",
+                "error": raw_diagnostic,
+            },
+            "error": raw_diagnostic, "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+            "platform": "boss", "task_input_digest": "internal-error-digest",
+        }
+
+        resp = self.client.get(f"/api/search-progress/{run_id}")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["error"], raw_diagnostic)
+
 
 class PlatformAwareCancelTests(unittest.TestCase):
     """T415: 取消的平台感知。"""
@@ -1472,6 +1566,45 @@ class CrossPlatformBrowserConservationTests(unittest.TestCase):
             self.assertNotEqual(port_arg, 9223,
                                 "cancel boss run 不得用智联端口 9223 关闭浏览器")
 
+    @mock.patch("webui.pipeline_exec.set_active_cdp_data_dir")
+    @mock.patch("webui.pipeline_exec.close_debug_chrome", return_value=True)
+    def test_cancel_zhilian_run_closes_its_frozen_port(
+            self, mock_close, _mock_activate):
+        run_id = self._seed_running_run("cancel-zhilian-frozen", platform="zhilian")
+        self.store.update_screening_execution_params(run_id, {
+            "platform": "zhilian", "browser_account": "a",
+            "cdp_port": 9223, "profile_key": "zhilian:a",
+        })
+        response = self.client.post(f"/api/task/cancel/{run_id}")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        mock_close.assert_called_once_with(9223)
+
+    @mock.patch("webui.pipeline_exec.set_active_cdp_data_dir")
+    @mock.patch("webui.pipeline_exec.close_debug_chrome", return_value=True)
+    def test_cancel_legacy_boss_account_profile_uses_boss_port(
+            self, mock_close, _mock_activate):
+        run_id = self._seed_running_run("cancel-boss-legacy", platform="boss")
+        self.store.update_screening_execution_params(run_id, {
+            "platform": "boss", "browser_account": "a", "profile_key": "a",
+        })
+        response = self.client.post(f"/api/task/cancel/{run_id}")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        mock_close.assert_called_once_with(9222)
+
+    @mock.patch(
+        "webui.pipeline_exec.close_debug_chrome",
+        side_effect=RuntimeError("close failed"),
+    )
+    def test_cancel_browser_cleanup_failure_is_observable(self, _mock_close):
+        run_id = self._seed_running_run("cancel-cleanup-failure", platform="boss")
+        response = self.client.post(f"/api/task/cancel/{run_id}")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "browser_cleanup_failed")
+        self.assertFalse(payload["cleanup"]["ok"])
+        self.assertEqual(self.store.get_screening_run(run_id)["status"], "interrupted")
+
 
 class PlatformAwareResetResultTests(unittest.TestCase):
     """T418: 结果重置平台感知。"""
@@ -1619,8 +1752,7 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         platforms = {p["key"]: p for p in data.get("platforms", [])}
         self.assertIn("boss", platforms)
         self.assertIn("zhilian", platforms)
-        # 智联 fixture 未核验，禁用新任务；BOSS 已启用
-        # 智联真实元数据核验后启用；BOSS 已启用
+        # 智联与 BOSS 一样可进入公共新建任务流程
         self.assertTrue(platforms["zhilian"]["enabled_for_new_tasks"])
         self.assertTrue(platforms["boss"]["enabled_for_new_tasks"])
         # 不返回 profile 路径/路径摘要（T207 安全要求）
@@ -1808,14 +1940,14 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
             self.assertNotIn(forbidden, data)
 
     def test_filter_labels_with_platform_zhilian_returns_company_nature(self):
-        """/api/filter-labels?platform=zhilian 返回 company_nature，不含 stage；options 未核验为空。"""
+        """/api/filter-labels?platform=zhilian 返回 company_nature，不含 stage。"""
         resp = self.client.get("/api/filter-labels?platform=zhilian")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertTrue(data.get("ok"))
         self.assertEqual(data["platform"], "zhilian")
         self.assertEqual(data["schema_version"], 3)
-        # 智联真实元数据核验后启用
+        # 智联字段 schema 与新建任务门禁均来自注册表
         self.assertTrue(data["enabled_for_new_tasks"])
         field_keys = [f["key"] for f in data["fields"]]
         # 字段顺序：salary/experience/degree/industry/scale/company_nature/
@@ -1825,7 +1957,7 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
             "recruiter_activity",
         ])
         self.assertNotIn("stage", field_keys)
-        # 智联 options 已由真实元数据核验，全部非空；第 7 类单选（028）
+        # 静态 options 完整；新建门禁与 options 完整性是两件事
         for f in data["fields"]:
             self.assertGreater(len(f["options"]), 0, f"字段 {f['key']} options 应已核验")
             if f["key"] == "recruiter_activity":

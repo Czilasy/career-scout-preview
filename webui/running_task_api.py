@@ -15,6 +15,8 @@ from flask import jsonify
 from webui.constants import LOG_TAIL_LINES
 from webui.task_status import _pipeline_kind_for_stage, _public_status_for_integrity
 from webui.task_runners import _iso_epoch_ms
+from webui.task_pause_support import is_user_paused_run
+from webui.pipeline_exec_status import user_visible_failure_reason
 from webui.whitebox import WhiteboxService
 
 
@@ -67,7 +69,6 @@ def register_running_task_routes(app, ctx):
         3. DB 中最近 interrupted 筛选（服务重启打断的工作线程）
         4. 无任务
         """
-        from webui.pipeline_exec import failed_code_label
         with ctx.lock:
             for task_id, task in reversed(list(ctx.tasks.items())):
                 try:
@@ -138,15 +139,13 @@ def register_running_task_routes(app, ctx):
             prow = None
         if prow is not None:
             paused_run = ctx.store.get_screening_run(prow["id"]) or {}
+            user_paused = is_user_paused_run(paused_run)
             execution_params = paused_run.get("execution_params") or {}
-            paused_error_reason = (
-                prow["error_reason"]
-                or failed_code_label(
-                    prow["error_code"], str(paused_run.get("platform") or "")
-                )
-                or prow["error_code"]
-                or "任务已暂停"
-            )
+            paused_error_reason = user_visible_failure_reason(
+                prow["error_code"],
+                prow["error_reason"],
+                str(paused_run.get("platform") or ""),
+            ) or prow["error_code"] or "任务已暂停"
             paused_kind = _pipeline_kind_for_stage(prow["current_stage"] or "")
             paused_source_task_id = (
                 str(execution_params.get("scrape_task_id") or "") or prow["id"]
@@ -157,7 +156,10 @@ def register_running_task_routes(app, ctx):
                 "has_task": True,
                 "task_id": prow["id"],
                 "kind": paused_kind,
-                "status": "paused",
+                # Older workers persisted source/AI failures as ``paused``.
+                # Only an explicit user pause may keep the global recovery
+                # slot occupied after a refresh.
+                "status": "paused" if user_paused else "failed",
                 "stage": prow["current_stage"],
                 "progress": {
                     "processed": prow["processed_count"],
@@ -169,7 +171,7 @@ def register_running_task_routes(app, ctx):
                     "message": paused_error_reason,
                 },
                 "logs": [],
-                "error": "",
+                "error": "" if user_paused else paused_error_reason,
                 "pause_info": {
                     "error_code": prow["error_code"],
                     "error_reason": paused_error_reason,
@@ -225,7 +227,7 @@ def register_running_task_routes(app, ctx):
             if interrupted_kind == "scrape":
                 interrupted_message = "上次抓取因服务重启被中断；已抓数据已保存"
             elif interrupted_kind == "recrawl":
-                interrupted_message = "上次补抓因服务重启被中断；可结束保存已有结果"
+                interrupted_message = "上次补抓因服务重启被中断；已保存的结果仍可查看或继续处理"
             else:
                 interrupted_message = "上次 AI 筛选因服务重启被中断"
             return jsonify({
@@ -441,14 +443,11 @@ def register_running_task_routes(app, ctx):
             if failed_scraped_count <= 0:
                 continue
             failed_params = failed_run.get("execution_params") or {}
-            failed_error_reason = (
-                failed_run.get("error_reason")
-                or failed_code_label(
-                    failed_run.get("error_code"), str(failed_run.get("platform") or "")
-                )
-                or failed_run.get("error_code")
-                or "抓取失败"
-            )
+            failed_error_reason = user_visible_failure_reason(
+                failed_run.get("error_code"),
+                failed_run.get("error_reason"),
+                str(failed_run.get("platform") or ""),
+            ) or failed_run.get("error_code") or "抓取失败"
             failed_integrity = _integrity_for("scrape", failed_run["id"])
             return jsonify({
                 "ok": True,

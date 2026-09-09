@@ -41,6 +41,7 @@ class ScrapeEvidence:
         if self.service is not None:
             try:
                 self.ref = self.service.begin("scrape", self.owner_id, self.plan)
+                self.service.set_lifecycle(self.ref, "running")
                 self.attempts = {
                     str(unit.get("unit_key") or ""): int(unit.get("attempt_no") or 1)
                     for unit in self.store.list_whitebox_units(self.ref.id)
@@ -284,6 +285,31 @@ class ScrapeEvidence:
             idem=f"incomplete:{key}:{attempt}:{code}",
             attempt=attempt,
         )
+
+    def pause(self, payload: dict) -> dict:
+        """Record a recoverable pause without finalizing the whitebox run."""
+        payload = dict(payload or {})
+        payload.setdefault("stop_reason", "user_paused")
+        payload.setdefault("completed_units", sum(
+            1 for unit in self.units.values()
+            if str(unit.get("status") or "") in {"succeeded", "empty"}
+        ))
+        if self.service is not None and self.ref is not None:
+            self._record(
+                "task_paused",
+                "scrape",
+                payload,
+                required=False,
+                idem=f"task-paused:{self.owner_id}",
+            )
+            self.service.set_lifecycle(self.ref, "paused")
+            payload["integrity"] = self.service.report(
+                "scrape", self.owner_id,
+            ).get("integrity")
+        else:
+            payload["integrity"] = None
+        payload["ok"] = False
+        return payload
 
     def finish(self, payload: dict, *, lifecycle_end: str | None = None) -> dict:
         try:

@@ -291,7 +291,12 @@ class BrowserAccountApiTests(unittest.TestCase):
             execution_params={"browser_account": account, "platform": platform},
         )
         self.store.update_screening_run(run_id, status="running")
-        self.store.update_screening_run(run_id, status="paused")
+        self.store.update_screening_run(
+            run_id,
+            status="paused",
+            error_code="user_paused",
+            error_reason="用户已暂停",
+        )
         return run_id
 
     @mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, ""))
@@ -334,6 +339,8 @@ class BrowserAccountApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.get_json())
         self.assertTrue(resp.get_json()["ok"])
         self.assertIn("登录", resp.get_json()["message"])
+        self.assertIn("回到任务页查看状态", resp.get_json()["message"])
+        self.assertNotIn("点「继续」", resp.get_json()["message"])
 
     def test_list_exposes_paused_account_lock(self):
         self._seed_paused_run(account="b")
@@ -976,6 +983,184 @@ class ContractCompliancePatchTests(unittest.TestCase):
         self.assertTrue(data["jd"])
         # _make_cdp_source 走 boss 分支（_BossCdpSource 被调用）
         self.assertTrue(fake_source.fetch_detail.called)
+
+    def test_job_detail_zhilian_passes_common_adapter_input(self):
+        """即时详情入口给智联 source 传递公共平台身份字段。"""
+        from webui.source import SourceOutcome
+
+        source_run_id = "zhilian-detail-source-run"
+        self.store.create_screening_run(
+            source_run_id,
+            execution_params={
+                "platform": "zhilian",
+                "browser_account": "a",
+                "cdp_port": 9223,
+                "profile_key": "zhilian:a",
+            },
+        )
+        captured = {}
+
+        def fetch_detail(job, **_kwargs):
+            captured.update(job)
+            required = {
+                "platform", "platform_job_id", "canonical_url",
+                "source_url", "job_link", "job_id",
+            }
+            if not required.issubset(job):
+                return SourceOutcome.failure(
+                    failed_code="source_invalid_output",
+                    failed_reason="公共详情输入字段不完整",
+                )
+            return SourceOutcome.success(
+                detail={"jd": "负责平台服务开发。"},
+                safe_log="detail ok",
+            )
+
+        fake_source = mock.MagicMock()
+        fake_source.fetch_detail.side_effect = fetch_detail
+        context = self.app.config["PIPELINE_CONTEXT"]
+        with mock.patch.object(context, "activate_run_browser"), \
+                mock.patch.object(context, "make_cdp_source",
+                                  return_value=fake_source), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                           return_value=(True, "")):
+            resp = self.client.post("/api/job-detail", json={
+                "job_id": "internal-job-id",
+                "platform_job_id": "zhilian-platform-id",
+                "source_run_id": source_run_id,
+                "source_url": (
+                    "https://www.zhaopin.com/jobdetail/"
+                    "zhilian-platform-id.htm?from=card"
+                ),
+            })
+
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(captured["platform"], "zhilian")
+        self.assertEqual(captured["platform_job_id"], "zhilian-platform-id")
+        self.assertEqual(
+            captured["canonical_url"],
+            "https://www.zhaopin.com/jobdetail/zhilian-platform-id.htm",
+        )
+        self.assertEqual(captured["source_url"], captured["canonical_url"])
+        self.assertEqual(captured["job_link"], captured["canonical_url"])
+        self.assertEqual(captured["job_id"], "zhilian-platform-id")
+
+    def test_job_detail_activation_failure_uses_central_source_message(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.frozen_browser_identity import FrozenBrowserBindingError
+
+        source_run_id = "zhilian-detail-activation-failure"
+        self.store.create_screening_run(
+            source_run_id,
+            execution_params={
+                "platform": "zhilian",
+                "browser_account": "a",
+                "cdp_port": 9223,
+                "profile_key": "zhilian:a",
+            },
+        )
+        diagnostic = "raw-profile-bind-diagnostic"
+        self.app.config["PROPAGATE_EXCEPTIONS"] = False
+        context = self.app.config["PIPELINE_CONTEXT"]
+        with mock.patch.object(
+            context,
+            "activate_run_browser",
+            side_effect=FrozenBrowserBindingError(diagnostic),
+        ), mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready",
+            side_effect=AssertionError("activation failure must stop before Chrome check"),
+        ):
+            resp = self.client.post("/api/job-detail", json={
+                "job_id": "internal-job-id",
+                "platform_job_id": "zhilian-platform-id",
+                "source_run_id": source_run_id,
+                "source_url": (
+                    "https://www.zhaopin.com/jobdetail/"
+                    "zhilian-platform-id.htm"
+                ),
+            })
+
+        self.assertEqual(resp.status_code, 503)
+        data = resp.get_json()
+        self.assertEqual(
+            data["error"], ERROR_USER_MESSAGES["source_cdp_unavailable"]
+        )
+        self.assertNotIn(diagnostic, json.dumps(data, ensure_ascii=False))
+
+    def test_job_detail_chrome_failure_uses_central_source_message(self):
+        diagnostic = "raw-chrome-diagnostic"
+        with mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready",
+            return_value=(False, diagnostic),
+        ):
+            resp = self.client.post("/api/job-detail", json={
+                "job_id": "job-chrome-failure",
+                "source_url": "https://www.zhipin.com/job/abc.html",
+            })
+
+        self.assertEqual(resp.status_code, 503)
+        data = resp.get_json()
+        self.assertEqual(data["error"], "连不上调试浏览器")
+        self.assertNotIn(diagnostic, json.dumps(data, ensure_ascii=False))
+
+    def test_job_detail_source_failure_uses_registry_message_for_source_codes(self):
+        from webui.error_registry import ALIAS_TO_CODE, ERROR_USER_MESSAGES
+        from webui.source import SourceOutcome
+
+        failed_codes = (
+            "source_cdp_unavailable", "cdp_unavailable",
+            "source_request_limit_exceeded",
+            "source_login_required", "login_expired",
+            "source_verification_required", "captcha_required",
+            "source_rate_limited", "source_account_restricted",
+            "source_status_unclear", "source_blocked", "ip_risk_control",
+            "source_unreachable", "source_not_found", "source_invalid_output",
+            "source_input_drift", "source_timeout", "source_unknown_error",
+            "source_result_write_failed",
+        )
+        for failed_code in failed_codes:
+            with self.subTest(failed_code=failed_code):
+                diagnostic = f"raw-detail-diagnostic-{failed_code}"
+                fake_source = mock.MagicMock()
+                fake_source.fetch_detail.return_value = SourceOutcome.failure(
+                    failed_code=failed_code,
+                    failed_reason=diagnostic,
+                )
+                with mock.patch.object(
+                    self.app.config["PIPELINE_CONTEXT"],
+                    "source_class",
+                    return_value=fake_source,
+                ), mock.patch(
+                    "webui.pipeline_exec.ensure_chrome_ready",
+                    return_value=(True, ""),
+                ):
+                    resp = self.client.post("/api/job-detail", json={
+                        "job_id": f"job-source-failure-{failed_code}",
+                        "source_url": "https://www.zhipin.com/job/abc.html",
+                    })
+
+                self.assertEqual(resp.status_code, 502)
+                data = resp.get_json()
+                canonical = ALIAS_TO_CODE.get(failed_code, failed_code)
+                self.assertEqual(data["error"], ERROR_USER_MESSAGES[canonical])
+                self.assertNotIn(diagnostic, json.dumps(data, ensure_ascii=False))
+
+    def test_job_detail_missing_source_uses_central_unreachable_message(self):
+        with mock.patch.object(
+            self.app.config["PIPELINE_CONTEXT"],
+            "source_class",
+            return_value=None,
+        ), mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready",
+            return_value=(True, ""),
+        ):
+            resp = self.client.post("/api/job-detail", json={
+                "job_id": "job-source-missing",
+                "source_url": "https://www.zhipin.com/job/abc.html",
+            })
+
+        self.assertEqual(resp.status_code, 500)
+        self.assertEqual(resp.get_json()["error"], "抓取脚本不可用")
 
     def test_job_detail_zhilian_requires_source_run_id(self):
         """契约 L247-251：智联单 JD 不得只凭 URL 猜测来源。"""

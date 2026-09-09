@@ -39,7 +39,7 @@ import { useAutoGrowTextarea } from "./useAutoGrowTextarea";
 import type { AnalyzeResponse } from "./useDiscoveryState";
 
 export function useDiscoverySearch(state: DiscoveryState, deps: SearchNeeds) {
-  const { LOGIN_ERROR_CODES, SPEED_FIELDS, activeCategory, activeStep, advancedBusy, advancedRanges, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, cityCatalogBusy, cityCatalogRef, cityList, cityLoader, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, dragActive, executionSelection, fieldLabels, filterGroups, filterValues, finishedPartial, historyBackToLatest, historyRound, interruptedRunId, keywords, locationDraft, loginGuide, nationalScopeConfirm, oneClickOpen, pagesValue, pausedRunId, pendingPlatformSwitch, pipelineResult, pipelineResultRunId, platformState, profileConfirmed, profileError, profileFacts, profileInputEl, profileSummary, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resumeAnalysis, resumeError, schemaBusy, schemaLoader, schemaRef, scopePreview, scopePreviewBusy, scopePreviewReqId, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uploadBusy } = state;
+  const { LOGIN_ERROR_CODES, SPEED_FIELDS, activeCategory, activeStep, advancedBusy, advancedRanges, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, cityCatalogBusy, cityCatalogRef, cityList, cityLoader, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, draftPlatformDisabled, dragActive, executionSelection, fieldLabels, filterGroups, filterValues, finishedPartial, historyBackToLatest, historyRound, interruptedRunId, keywords, locationDraft, loginGuide, nationalScopeConfirm, oneClickOpen, pagesValue, pausedRunId, pendingPlatformSwitch, pipelineResult, pipelineResultRunId, platformState, profileConfirmed, profileError, profileFacts, profileInputEl, profileSummary, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resumeAnalysis, resumeError, schemaBusy, schemaLoader, schemaRef, scopePreview, scopePreviewBusy, scopePreviewReqId, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uploadBusy } = state;
   const { cancelActiveTasksForNewRound, clearLatestResult, enterSearchStep, notify, openOneClickDialog, restoreRunningTask, startScrape } = deps;
   const { scheduleResize: scheduleProfileSummaryResize } = useAutoGrowTextarea(profileInputEl, profileSummary);
 
@@ -138,8 +138,11 @@ function confirmPlatformSwitch() {
 // 保证旧平台响应晚到不覆盖当前平台（platform-schema.md L151-156）。
 // T509：默认参数 = 草稿平台（新任务表单/简历建议路径）；deps.restoreRunningTask 显式传入任务平台
 // 以满足 platform-schema.md L157「先从任务响应设置任务平台，再加载对应 schema/城市」。
+let schemaLoadToken = 0;
+
 async function loadFilterLabels(platform: Platform = platformState.draft) {
   if (schemaLoader.loadedPlatform === platform && schemaRef.value) return;
+  const requestToken = ++schemaLoadToken;
   schemaBusy.value = true;
   try {
     const accepted = await schemaLoader.load(platform, (p, signal) =>
@@ -153,7 +156,7 @@ async function loadFilterLabels(platform: Platform = platformState.draft) {
     }
   } catch { /* non-critical：loader 已记录 error */ }
   finally {
-    if (schemaLoader.pendingPlatform === null) schemaBusy.value = false;
+    if (requestToken === schemaLoadToken) schemaBusy.value = false;
   }
 }
 
@@ -487,6 +490,14 @@ function currentScopePreviewKey(): string {
 async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
   if (!selectedKeywords.value.length) {
     scopePreview.value = null;
+    return null;
+  }
+  // 平台切换期间 schema 仍属于旧平台，或当前平台明确禁用新任务时，
+  // 不向后端提交范围预览；否则会把一个预期的“平台不可用”状态制造成
+  // 503 警告。schema 就绪后由 watcher 重新尝试可用平台的预览。
+  if (schemaBusy.value || draftPlatformDisabled.value) {
+    scopePreview.value = null;
+    scopePreviewBusy.value = false;
     return null;
   }
   const reqId = ++scopePreviewReqId.value;

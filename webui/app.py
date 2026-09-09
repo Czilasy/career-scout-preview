@@ -291,6 +291,7 @@ def create_app(config=None):
                 artifact_root=artifact,
                 cdp_port=int(cdp_port) if cdp_port else boss.DEFAULT_CDP_PORT,
                 browser_account=str(browser_account or "").strip() or None,
+                profile_key=str(profile_key or "").strip() or None,
                 in_process=(_runtime_mode == "exe"),
                 run_id=run_id,
             )

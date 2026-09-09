@@ -128,6 +128,7 @@ def register_pipeline_jobs_routes(app, ctx):
         source_run_id + platform_job_id 为权威；从 source run 继承冻结平台。
         """
         from webui.pipeline_exec import ensure_chrome_ready
+        from webui.pipeline_exec_status import user_visible_failure_reason
         raw = request.get_json(silent=True) or {}
         job_id = str(raw.get('job_id') or '').strip()
         platform_job_id = str(raw.get('platform_job_id') or job_id).strip()
@@ -138,7 +139,7 @@ def register_pipeline_jobs_routes(app, ctx):
         if ctx.has_active_pipeline_task():
             return (jsonify({'ok': False, 'error': 'browser_busy', 'message': '当前已有任务在运行，请等待任务完成或结束后再抓取岗位详情'}), 409)
         parent = inherit_parent_frozen_identity(ctx.store, source_run_id, ctx.operational_errors)
-        frozen_platform = parent['platform']
+        frozen_platform = parent['platform'] or 'boss'
         frozen_browser_account = parent['browser_account']
         frozen_cdp_port = parent['cdp_port']
         frozen_profile_key = parent['profile_key']
@@ -153,19 +154,38 @@ def register_pipeline_jobs_routes(app, ctx):
         if frozen_platform == 'zhilian' and (not (frozen_browser_account and frozen_cdp_port and frozen_profile_key)):
             return (jsonify({'ok': False, 'error': 'run_identity_conflict', 'error_code': 'run_identity_conflict', 'message': '智联来源 run 缺少冻结浏览器身份'}), 409)
         if source_run_id and parent_run is not None:
-            ctx.activate_run_browser(parent_run)
+            from webui.frozen_browser_identity import FrozenBrowserBindingError
+            try:
+                ctx.activate_run_browser(parent_run)
+            except FrozenBrowserBindingError:
+                return (jsonify({'ok': False, 'error': user_visible_failure_reason(
+                    FrozenBrowserBindingError.failed_code, '', frozen_platform,
+                )}), 503)
         chrome_ok, chrome_err = ensure_chrome_ready(frozen_cdp_port if frozen_platform == 'zhilian' else None, minimize_after_launch=True)
         if not chrome_ok:
-            return (jsonify({'ok': False, 'error': f'调试浏览器未能就绪：{chrome_err}'}), 503)
+            return (jsonify({'ok': False, 'error': user_visible_failure_reason(
+                'source_cdp_unavailable', chrome_err, frozen_platform,
+            )}), 503)
         source = ctx.make_cdp_source(platform=frozen_platform, browser_account=frozen_browser_account, cdp_port=frozen_cdp_port, profile_key=frozen_profile_key, run_id=source_run_id or '')
         if source is None:
-            return (jsonify({'ok': False, 'error': '抓取源不可用'}), 500)
-        job = {'job_id': platform_job_id, 'source_url': source_url, 'job_link': source_url}
+            return (jsonify({'ok': False, 'error': user_visible_failure_reason(
+                'source_unreachable', '', frozen_platform,
+            )}), 500)
+        job = {
+            'job_id': platform_job_id,
+            'platform': frozen_platform,
+            'platform_job_id': platform_job_id,
+            'canonical_url': source_url,
+            'source_url': source_url,
+            'job_link': source_url,
+        }
         detail_path = str(Path(app.config['RESULT_DIR']) / f'job_detail_{platform_job_id}.json')
         with ctx.job_detail_lock:
             outcome = source.fetch_detail(job, detail_output_path=detail_path)
         if not outcome.ok:
-            return (jsonify({'ok': False, 'error': f'详情抓取失败（{outcome.failed_code}）'}), 502)
+            return (jsonify({'ok': False, 'error': user_visible_failure_reason(
+                outcome.failed_code, outcome.failed_reason, frozen_platform,
+            )}), 502)
         jd = str((outcome.detail or {}).get('jd', '')).strip()
         if not jd:
             return (jsonify({'ok': False, 'error': '详情页未提取到 JD 正文，岗位可能已下架'}), 502)

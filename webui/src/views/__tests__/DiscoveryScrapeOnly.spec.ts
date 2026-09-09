@@ -134,16 +134,16 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
     expect(wrapper.find('[data-testid="view-scraped-only"]').exists()).toBe(true);
   });
 
-  it("直接查看：保存成功进入 04 页待筛选模式，顶栏已抓取", async () => {
-    const { wrapper, fetchMock } = await completedScrape();
+  it("直接查看：238 个未筛选岗位按待筛选展示，不计入 kept", async () => {
+    const { wrapper, fetchMock } = await completedScrape(238);
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/scrape-result-save")) {
         return response({
           ok: true, saved: true, run_id: "run-1",
           result: {
-            ok: true, jobs: jobs(2), dropped: [], total_scraped: 2,
-            total_kept: 2, total_matched: 0, total_dropped: 0, profile_summary: "",
+            ok: true, jobs: jobs(238), dropped: [], total_scraped: 238,
+            total_kept: 0, total_matched: 0, total_dropped: 0, profile_summary: "",
           },
         });
       }
@@ -170,10 +170,11 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
     // 进入 04 页：单"待筛选"tab、岗位展示
     expect(wrapper.text()).toContain("待筛选");
     expect(wrapper.text()).toContain("岗位 0");
+    expect(wrapper.find('.result-tabs [role="tab"]').text()).toContain("238");
     expect(wrapper.text()).not.toContain("判定依据");
-    // 顶栏上抛 scraped 相位（已抓取数 = 2）
+    // 顶栏上抛 scraped 相位（已抓取数 = 238）
     const scraped = wrapper.emitted("round-status")?.findLast(([p]) => (p as { phase: string }).phase === "scraped");
-    expect(scraped?.[0]).toMatchObject({ phase: "scraped", judged: 2 });
+    expect(scraped?.[0]).toMatchObject({ phase: "scraped", judged: 238 });
   });
 
   it("04 scraped_only 轮显示“开始 AI 筛选”入口", async () => {
@@ -183,7 +184,7 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
         status: "scraped_only", scrape_task_id: "scrape-1",
         result: {
           ok: true, jobs: jobs(2), dropped: [], total_scraped: 2,
-          total_kept: 2, total_matched: 0, total_dropped: 0, profile_summary: "画像",
+          total_kept: 0, total_matched: 0, total_dropped: 0, profile_summary: "画像",
         },
       },
     });
@@ -215,7 +216,7 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
         scrape_task_id: "scrape-1",
         result: {
           ok: true, jobs: jobs(2), dropped: [], total_scraped: 2,
-          total_kept: 2, total_matched: 0, total_dropped: 0, profile_summary: "画像",
+          total_kept: 0, total_matched: 0, total_dropped: 0, profile_summary: "画像",
         },
       },
     });
@@ -240,7 +241,7 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
         ok: true,
         items: [{
           run_id: "run-1", platform: "boss", status: "scraped_only",
-          created_at: "2026-08-12T00:00:00", total_scraped: 2, total_kept: 2,
+          created_at: "2026-08-12T00:00:00", total_scraped: 2, total_kept: 0,
           total_matched: 0, total_dropped: 0, pending_count: 0,
           mismatch_count: 0,
           keyword_summary: "Python / 上海", profile_summary_preview: "",
@@ -253,7 +254,7 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
           platform: "boss", status: "scraped_only", scrape_task_id: "scrape-1",
           result: {
             ok: true, jobs: jobs(2), dropped: [], total_scraped: 2,
-            total_kept: 2, total_matched: 0, total_dropped: 0,
+            total_kept: 0, total_matched: 0, total_dropped: 0,
             profile_summary: "3年Python后端",
           },
         },

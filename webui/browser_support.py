@@ -11,6 +11,7 @@ from scripts import boss_cdp_raw as boss
 import sqlite3
 
 from webui.constants import _OPERATIONAL_ERRORS
+from webui.task_pause_support import is_user_paused_run
 
 
 def build_browser_support(store, tasks, lock, account_for_run, activate_run_browser):
@@ -27,24 +28,26 @@ def build_browser_support(store, tasks, lock, account_for_run, activate_run_brow
                             str(task.get("platform") or "boss"))
         try:
             with store._connection() as conn:
-                row = conn.execute(
+                rows = conn.execute(
                     "SELECT id FROM screening_runs WHERE status = 'paused' "
-                    "ORDER BY updated_at DESC LIMIT 1"
-                ).fetchone()
+                    "ORDER BY updated_at DESC"
+                ).fetchall()
         except (sqlite3.Error, RuntimeError):
-            row = None
-        if row is None:
-            return None, None, None
-        try:
-            run = store.get_screening_run(row["id"]) or {}
-            account = account_for_run(run)
-        except _OPERATIONAL_ERRORS:
-            return "paused", None, None
-        params = run.get("execution_params") or {}
-        if not isinstance(params, dict):
-            params = {}
-        platform = str(params.get("platform") or run.get("platform") or "boss")
-        return "paused", account, platform
+            rows = []
+        for row in rows:
+            try:
+                run = store.get_screening_run(row["id"]) or {}
+                if not is_user_paused_run(run):
+                    continue
+                account = account_for_run(run)
+            except _OPERATIONAL_ERRORS:
+                continue
+            params = run.get("execution_params") or {}
+            if not isinstance(params, dict):
+                params = {}
+            platform = str(params.get("platform") or run.get("platform") or "boss")
+            return "paused", account, platform
+        return None, None, None
 
     def _browser_busy() -> bool:
         return _browser_lock()[0] is not None
@@ -53,17 +56,22 @@ def build_browser_support(store, tasks, lock, account_for_run, activate_run_brow
         """Return the latest paused run and its frozen CDP port, if any."""
         try:
             with store._connection() as conn:
-                row = conn.execute(
+                rows = conn.execute(
                     "SELECT id FROM screening_runs WHERE status = 'paused' "
-                    "ORDER BY updated_at DESC LIMIT 1"
-                ).fetchone()
+                    "ORDER BY updated_at DESC"
+                ).fetchall()
         except (sqlite3.Error, RuntimeError):
             return None, None
-        if row is None:
-            return None, None
-        try:
-            run = store.get_screening_run(row["id"]) or {}
-        except _OPERATIONAL_ERRORS:
+        run = None
+        for row in rows:
+            try:
+                candidate = store.get_screening_run(row["id"]) or {}
+            except _OPERATIONAL_ERRORS:
+                continue
+            if is_user_paused_run(candidate):
+                run = candidate
+                break
+        if run is None:
             return None, None
         params = run.get("execution_params") or {}
         if not isinstance(params, dict):

@@ -89,6 +89,80 @@ describe("TaskProgress diagnostics", () => {
   });
 });
 
+describe("TaskProgress scrape counts", () => {
+  it("paused + scrape 直接显示后端 current/total，不回退为 0/total", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: snapshot({
+          status: "paused",
+          stage: "scrape",
+          total: 14,
+          progress: { stage: "scrape", current: 4, total: 14, message: "已暂停" },
+          pause_info: { error_code: "source_rate_limited", error_reason: "平台暂停" },
+        }) as never,
+      },
+    });
+    expect(wrapper.get('[data-testid="task-counts"]').text()).toContain("已完成 4 / 14");
+    expect(wrapper.get('[data-testid="task-counts"]').text()).toContain("未开始 10");
+    wrapper.unmount();
+  });
+
+  it("paused scrape 保持公共错误码的原始阻断原因", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: snapshot({
+          status: "paused",
+          stage: "scrape",
+          total: 14,
+          progress: { stage: "scrape", current: 4, total: 14, message: "已暂停" },
+          pause_info: {
+            error_code: "source_unreachable",
+            error_reason: "系统性阻断：抓取脚本不可用",
+          },
+        }) as never,
+      },
+    });
+    expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("系统性阻断：抓取脚本不可用");
+    expect(wrapper.get('[data-testid="pause-reason"]').text()).not.toContain("平台暂时无法访问");
+    wrapper.unmount();
+  });
+
+  it("paused scrape 无错误文案时不提示不存在的继续按钮", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: snapshot({
+          status: "paused",
+          stage: "scrape",
+          total: 2,
+          progress: { stage: "scrape", current: 1, total: 2, message: "已暂停" },
+        }) as never,
+      },
+    });
+    expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("任务已暂停，请处理后点继续");
+    wrapper.unmount();
+  });
+
+  it.each(["boss", "zhilian"])("两平台对 source_unreachable 显示同一公共错误码文案：%s", (platform) => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: snapshot({
+          status: "paused",
+          platform,
+          pause_info: { error_code: "source_unreachable" },
+        }) as never,
+      },
+    });
+    const reason = wrapper.get('[data-testid="pause-reason"]').text();
+    expect(reason).toContain("抓取脚本不可用");
+    expect(reason).toContain("source_unreachable");
+    wrapper.unmount();
+  });
+});
+
 describe("TaskProgress 033 V2 integrity", () => {
   const integrity = (conclusion: string, reason = "证据不足") => ({
     conclusion, label: conclusion, evidence_complete: conclusion === "succeeded",

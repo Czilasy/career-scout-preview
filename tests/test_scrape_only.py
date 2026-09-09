@@ -57,7 +57,7 @@ class ScrapeOnlyServiceTests(unittest.TestCase):
     def test_build_undecided_result_normalizes_fields(self):
         result = build_undecided_result(_scrape_jobs(2), platform="boss")
         self.assertEqual(result["total_scraped"], 2)
-        self.assertEqual(result["total_kept"], 2)
+        self.assertEqual(result["total_kept"], 0)
         self.assertEqual(result["total_matched"], 0)
         job = result["jobs"][0]
         self.assertEqual(job["platform"], "boss")
@@ -76,6 +76,8 @@ class ScrapeOnlyServiceTests(unittest.TestCase):
         self.assertEqual(outcome["result"]["source_run_id"], outcome["run_id"])
         run = self.store.get_screening_run(outcome["run_id"])
         self.assertEqual(run["status"], "scraped_only")
+        self.assertEqual(run["total_scraped"], 2)
+        self.assertEqual(run["total_kept"], 0)
         self.assertEqual(run["execution_params"].get("scrape_task_id"), "scrape-1")
 
     def test_save_scrape_snapshot_zero_jobs_skips_persist(self):

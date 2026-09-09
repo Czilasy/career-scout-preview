@@ -16,6 +16,8 @@ from webui.constants import (
     _MSG_USER_STOPPED_SCRAPE,
 )
 from webui.task_status import _public_task_status
+from webui.error_registry import ALIAS_TO_CODE, resolve_code
+from webui.pipeline_exec_status import user_visible_failure_reason
 from webui.resume_identity import (
     append_account_switch_log_line,
     ensure_frozen_browser_account,
@@ -23,7 +25,32 @@ from webui.resume_identity import (
 from webui.task_runners import _iso_epoch_ms
 from webui.logging_setup import get_logger
 from webui.exec_search_whitebox import begin_scrape_whitebox, mark_scrape_submission_failed
+from webui.task_pause_support import (
+    STOP_MODE_CANCEL,
+    ScrapeCheckpointReadError,
+    request_stop,
+    scrape_checkpoint,
+)
 _logger = get_logger(__name__)
+
+
+def _public_failure_details(
+        code: object, diagnostic: object = "", platform: str = "",
+) -> tuple[str, str]:
+    """Return a canonical code and safe public reason for one failure."""
+    raw_code = str(code or "").strip()
+    canonical = raw_code
+    if raw_code.startswith("source_") or raw_code in ALIAS_TO_CODE:
+        canonical = resolve_code(raw_code, default="source_unknown_error")
+    is_source = canonical.startswith("source_")
+    if not is_source:
+        return canonical, str(diagnostic or raw_code or "")
+    reason = user_visible_failure_reason(
+        canonical, "", platform,
+    )
+    return canonical, reason
+
+
 def register_exec_search_routes(app, ctx):
     @app.route("/api/search-scope/preview", methods=["POST"])
     def search_scope_preview():
@@ -402,7 +429,45 @@ def register_exec_search_routes(app, ctx):
             return jsonify({"ok": False, "error": "whitebox_incomplete",
                             "error_reason": reason,
                             "detail": type(exc).__name__}), 503
-        ctx.activate_run_browser()
+        try:
+            ctx.activate_run_browser()
+        except (OSError, RuntimeError, ValueError, KeyError) as exc:
+            raw_error_code = str(
+                getattr(exc, "error_code", "")
+                or getattr(exc, "failed_code", "")
+                or "source_cdp_unavailable"
+            )
+            error_code, reason = _public_failure_details(
+                raw_error_code, "", str(platform_raw),
+            )
+            try:
+                ctx.write_run(
+                    task_id,
+                    status="failed",
+                    current_stage="scrape",
+                    error_code=error_code,
+                    error_reason=reason,
+                )
+                ctx.record_pause_failure(
+                    task_id, "scrape", error_code, reason,
+                    exception=exc, include_traceback=True,
+                )
+            except Exception:
+                _logger.warning("搜索任务激活失败状态写入失败", exc_info=True)
+            with ctx.lock:
+                task["status"] = "failed"
+                task["error"] = reason
+            ctx.clear_auto_screen(task_id)
+            ctx.schedule_pipeline_task_cleanup(task_id)
+            ctx.release_worker_resume_claims(task)
+            return jsonify({
+                "ok": False,
+                "error": error_code,
+                "error_code": error_code,
+                "status": "failed",
+                "error_reason": reason,
+                "detail": type(exc).__name__,
+            }), 503
         try:
             ctx.executor.submit(
                 ctx.run_pipeline_task, task_id, script_params,
@@ -468,19 +533,134 @@ def register_exec_search_routes(app, ctx):
                 "status": _public_task_status(effective_status),
                 "message": "只有 paused 状态的任务才能继续",
             }), 409
+
+        def _finish_resume_failure(
+                error_code, reason, exception=None, *, platform=""):
+            """Converge a resume-time source/preflight error to failed."""
+            code, message = _public_failure_details(
+                error_code or "internal_error", reason, platform,
+            )
+            message = message or code
+            try:
+                ctx.write_run(
+                    old_task_id,
+                    status="failed",
+                    current_stage="scrape",
+                    error_code=code,
+                    error_reason=message,
+                )
+            except ctx.operational_errors as persist_exc:
+                _logger.warning(
+                    "续跑失败状态写入失败 error_type=%s",
+                    type(persist_exc).__name__,
+                )
+            recorder = getattr(ctx, "record_pause_failure", None)
+            if callable(recorder):
+                try:
+                    recorder(
+                        old_task_id, "scrape", code, message,
+                        exception=exception, include_traceback=exception is not None,
+                    )
+                except Exception:
+                    _logger.warning("续跑失败审计写入失败", exc_info=True)
+            with ctx.lock:
+                current = ctx.tasks.get(old_task_id)
+                if current is not None:
+                    current["status"] = "failed"
+                    current["error"] = message
+            ctx.clear_auto_screen(old_task_id)
+            ctx.schedule_pipeline_task_cleanup(old_task_id)
+            ctx.release_worker_resume_claims(ctx.tasks.get(old_task_id))
+            return code, message
+
+        resume_snapshot = old_snapshot.get("result") if old_snapshot else {}
+        resume_completed = (
+            resume_snapshot.get("completed_combos")
+            if isinstance(resume_snapshot, dict) else None
+        )
+        try:
+            # Use the same strict reader as pause persistence.  A corrupt
+            # payload is not equivalent to an empty checkpoint: reject before
+            # browser activation, claims, or worker submission so resume can
+            # never restart from zero or overwrite the raw bytes.
+            completed = set(scrape_checkpoint(
+                ctx, old_task_id, completed_combos=resume_completed,
+            ))
+        except ScrapeCheckpointReadError as exc:
+            return jsonify({
+                "ok": False,
+                "error": exc.error_code,
+                "error_code": exc.error_code,
+                "error_reason": exc.public_reason,
+                "message": exc.public_reason,
+                "status": "failed",
+            }), 409
         if db_run is not None and not _block_checked:
+            try:
+                ctx.activate_run_browser(db_run)
+            except (OSError, RuntimeError, ValueError, KeyError) as exc:
+                platform = str(
+                    db_run.get("platform")
+                    or (db_run.get("execution_params") or {}).get("platform")
+                    or ""
+                )
+                code, reason = _finish_resume_failure(
+                    getattr(exc, "error_code", "")
+                    or getattr(exc, "failed_code", "")
+                    or "source_cdp_unavailable",
+                    "", exception=exc, platform=platform,
+                )
+                return jsonify({
+                    "ok": False,
+                    "error": code,
+                    "error_code": code,
+                    "status": "failed",
+                    "message": reason,
+                    "error_reason": reason,
+                    "detail": type(exc).__name__,
+                }), 409
             passed, code, reason = ctx.check_resume_block(db_run)
             if not passed:
+                platform = str(
+                    db_run.get("platform")
+                    or (db_run.get("execution_params") or {}).get("platform")
+                    or ""
+                )
+                code, reason = _finish_resume_failure(
+                    code, reason, platform=platform,
+                )
                 return jsonify({
                     "ok": False, "error": "block_not_resolved",
                     "error_code": code, "error_reason": reason,
-                    "status": "paused",
+                    "status": "failed",
                 }), 409
         if db_run is not None:
-            ensure_frozen_browser_account(
-                ctx.store, old_task_id, db_run,
-                platform=str((db_run.get("execution_params") or {}).get("platform") or "boss"),
-                fallback_account=ctx.account_for_run(db_run))
+            try:
+                ensure_frozen_browser_account(
+                    ctx.store, old_task_id, db_run,
+                    platform=str((db_run.get("execution_params") or {}).get("platform") or "boss"),
+                    fallback_account=ctx.account_for_run(db_run))
+            except (OSError, RuntimeError, ValueError, KeyError) as exc:
+                platform = str(
+                    db_run.get("platform")
+                    or (db_run.get("execution_params") or {}).get("platform")
+                    or ""
+                )
+                code, reason = _finish_resume_failure(
+                    getattr(exc, "error_code", "")
+                    or getattr(exc, "failed_code", "")
+                    or "source_cdp_unavailable",
+                    "", exception=exc, platform=platform,
+                )
+                return jsonify({
+                    "ok": False,
+                    "error": code,
+                    "error_code": code,
+                    "status": "failed",
+                    "message": reason,
+                    "error_reason": reason,
+                    "detail": type(exc).__name__,
+                }), 409
         script_params = (old_snapshot or {}).get("script_params")
         if not script_params and db_run:
             try:
@@ -490,14 +670,6 @@ def register_exec_search_routes(app, ctx):
                 script_params = None
         if not script_params:
             return jsonify({"ok": False, "error": "原任务参数丢失，无法继续"}), 400
-        completed: set[str] = set()
-        try:
-            completed = ctx.store.load_checkpoint(old_task_id, "scrape")
-        except ctx.operational_errors:
-            completed = set()
-        if not completed and old_snapshot:
-            old_result = old_snapshot.get("result") or {}
-            completed = set(old_result.get("completed_combos") or [])
         try:
             old_jobs = ctx.store.load_scrape_run_jobs(old_task_id)
         except ctx.operational_errors:
@@ -606,16 +778,24 @@ def register_exec_search_routes(app, ctx):
                 return jsonify({"ok": False, "error": f"任务已结束，无法取消（当前状态：{task['status']}）"}), 400
             stop_event = task.get("stop_event")
             if stop_event is not None:
-                stop_event.set()
+                request_stop(task, stop_event, STOP_MODE_CANCEL)
             task["status"] = "cancelled"
             task["error"] = _MSG_USER_STOPPED_SCRAPE
             task["logs"].append("用户取消任务")
             cancel_platform = task.get("platform")
-        try:
-            from webui.pipeline_exec import close_debug_chrome
-            close_debug_chrome()
-        except Exception:
-            _logger.warning("调试 Chrome 关闭失败（不影响本次响应）", exc_info=True)
+        from webui import pipeline_exec as _facade
+        from webui.frozen_browser_identity import cleanup_frozen_task_browser
+        cleanup = cleanup_frozen_task_browser(
+            ctx.store, task_id, task,
+            accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
+            activate=_facade.set_active_cdp_data_dir,
+            close=_facade.close_debug_chrome,
+        )
+        if not cleanup.ok:
+            with ctx.lock:
+                current = ctx.tasks.get(task_id)
+                if current is not None:
+                    current["error"] = "用户已取消，但浏览器清理失败"
         ctx.clear_auto_screen(task_id)
         if not cancel_platform:
             try:
@@ -624,7 +804,11 @@ def register_exec_search_routes(app, ctx):
             except ctx.operational_errors:
                 pass
         return jsonify({
-            "ok": True, "run_id": task_id, "task_id": task_id,
+            "ok": cleanup.ok,
+            **({"error": "browser_cleanup_failed"}
+               if not cleanup.ok else {}),
+            "run_id": task_id, "task_id": task_id,
             "platform": cancel_platform, "status": "cancelled",
+            "cleanup": cleanup.as_dict(),
         })
     ctx.continue_execute_search = continue_execute_search

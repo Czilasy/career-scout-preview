@@ -2747,23 +2747,6 @@ body,
   cursor: not-allowed;
 }
 
-/* T510：TaskProgress 顶部任务平台徽章（data-platform=zhilian|boss）。 */
-.task-platform {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 10px;
-  border: 1px solid var(--brand-edge);
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1.4;
-  white-space: nowrap;
-  color: var(--brand-ink);
-  background: var(--brand-wash);
-}
-
-
 /* T511：JobWorkspace extra 区块（公司性质/规模/融资阶段等额外字段）。
    每个字段渲染为独立 chip：标签次级色 + 值主体加粗，形成可辨识的信息层级。 */
 .job-extra-facts {
@@ -2835,9 +2818,8 @@ body,
   white-space: nowrap;
 }
 
-/* 窄视口（390×844）下平台徽章与 extra 区块换行，避免横向溢出。 */
+/* 窄视口（390×844）下平台标签与 extra 区块换行，避免横向溢出。 */
 @media (max-width: 640px) {
-  .task-platform,
   .platform-pill {
     font-size: 11px;
   }

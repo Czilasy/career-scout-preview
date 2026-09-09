@@ -94,18 +94,25 @@ def _http_json(port: int, path: str, *, method: str = "GET") -> Any:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _is_zhilian_page_url(url: str | None) -> bool:
+    """Return whether a browser page belongs to the Zhilian domain."""
+
+    hostname = (urllib.parse.urlparse(str(url or "")).hostname or "").lower().rstrip(".")
+    return hostname == "zhaopin.com" or hostname.endswith(".zhaopin.com")
+
+
 def _find_page(port: int, create: bool = True) -> dict:
     pages = _http_json(port, "/json/list")
     for page in pages:
-        if page.get("type") == "page" and "zhaopin.com" in str(page.get("url") or ""):
-            return page
-    for page in pages:
-        if page.get("type") == "page":
+        if page.get("type") == "page" and _is_zhilian_page_url(page.get("url")):
             return page
     if not create:
-        raise RuntimeError("no_page")
+        raise RuntimeError("no_zhilian_page")
     url = urllib.parse.quote(_ZHILIAN_LOGIN_PROBE_URL, safe="")
-    return _http_json(port, f"/json/new?{url}", method="PUT")
+    page = _http_json(port, f"/json/new?{url}", method="PUT")
+    if not isinstance(page, dict) or not _is_zhilian_page_url(page.get("url")):
+        raise RuntimeError("no_zhilian_page")
+    return page
 
 
 def _connect(port: int) -> Any:

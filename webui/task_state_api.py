@@ -80,6 +80,7 @@ def register_task_state_routes(app, ctx):
             _scrape_page_overall_percent,
             failed_code_label,
         )
+        from webui.pipeline_exec_status import user_visible_failure_reason
 
         with ctx.lock:
             task = ctx.tasks.get(run_id)
@@ -151,18 +152,38 @@ def register_task_state_routes(app, ctx):
             or live_progress.get("stage")
             or "unknown"
         )
-        processed_db = int((run or {}).get("processed_count") or 0)
+        is_scrape = live_kind == "scrape" or str(stage) == "scrape"
+        stored_processed = int((run or {}).get("processed_count") or 0)
+        live_result = (live or {}).get("result") or {}
+        live_completed_keys = {
+            str(key) for key in (live_result.get("completed_combos") or [])
+            if str(key).strip()
+        }
+        try:
+            task_events = ctx.store.list_task_events(run_id)
+        except ctx.operational_errors:
+            task_events = []
         durable_completed = 0
-        if live_kind == "scrape" or str(stage) == "scrape":
+        if is_scrape:
             # A resumed scrape can finish combinations after the last run
             # projection write (or while the process is being refreshed). The
             # checkpoint is committed with each combo and is therefore the
             # durable floor for the user-facing progress counter.
             try:
-                durable_completed = len(ctx.store.load_checkpoint(run_id, "scrape"))
+                checkpoint_keys = {
+                    str(key) for key in ctx.store.load_checkpoint(run_id, "scrape")
+                    if str(key).strip()
+                }
+                live_completed_keys.update(checkpoint_keys)
+                durable_completed = len(checkpoint_keys)
             except ctx.operational_errors:
                 durable_completed = 0
-        processed_db = max(processed_db, durable_completed)
+        if is_scrape:
+            durable_completed = max(durable_completed, len(live_completed_keys))
+        processed_db = (
+            max(durable_completed, len(live_completed_keys))
+            if is_scrape else max(stored_processed, durable_completed)
+        )
         # DB processed_count 是批次粒度（智联详情每批 15 条才落库一次），
         # 为空时用实时 live current 兜底，保证进度按条前进且跨阶段不回退。
         processed = processed_db if processed_db > 0 else live_current
@@ -171,7 +192,7 @@ def register_task_state_routes(app, ctx):
         pending = int((run or {}).get("pending_count") or 0)
         dropped = int((run or {}).get("total_dropped") or 0)
         kept = int((run or {}).get("total_kept") or 0)
-        if kept <= 0:
+        if kept <= 0 and live_kind != "scrape" and str(stage) != "scrape":
             kept = max(0, source - dropped)
         exec_params = (run or {}).get("execution_params") or {}
         scraped_count_source = str(exec_params.get("scrape_task_id") or "") or run_id
@@ -181,6 +202,15 @@ def register_task_state_routes(app, ctx):
             scraped_count = 0
         error_code = (run or {}).get("error_code")
         error_reason = (run or {}).get("error_reason")
+        platform_name = str(
+            (run or {}).get("platform") or (live or {}).get("platform") or ""
+        )
+        pause_error_reason = user_visible_failure_reason(
+            error_code, error_reason, platform_name
+        )
+        visible_error_reason = user_visible_failure_reason(
+            error_code, (live or {}).get("error") or error_reason, platform_name
+        )
         progress_kind = live_kind or _pipeline_kind_for_stage(stage)
         # Recrawl runs persist their final stage as ``done``.  Once the live
         # task has been cleaned up, recover the kind from the durable run id
@@ -195,14 +225,37 @@ def register_task_state_routes(app, ctx):
         stage_total = kept if jd_stage and kept > 0 else source
         # processed_count 只记录已成功完成的当前阶段工作单元；pending
         # 是已失败并进入待确认的独立工作单元，两者不能互相扣减。
-        fail_count = pending
+        failed_combo_keys = {
+            str(item.get("combo_key") or "")
+            for item in source_outcomes
+            if str(item.get("outcome_kind") or "") == "failed"
+            and str(item.get("combo_key") or "").strip()
+        }
+        for event in task_events:
+            payload = event.get("payload") or {}
+            if (
+                event.get("type") == "combo_issue"
+                and payload.get("kind") == "combo_failed"
+                and str(payload.get("combo_key") or "").strip()
+            ):
+                failed_combo_keys.add(str(payload["combo_key"]))
+        failed_combo_count = len(failed_combo_keys - live_completed_keys)
+        fail_count = (
+            min(
+                max(0, stage_total - max(0, processed_db)),
+                max(pending, failed_combo_count),
+            )
+            if is_scrape else pending
+        )
         # success_count 必须单调且实时：live_current（条数语义）与 DB 计数
         # 取最大值，保证智联详情逐条推进、跨阶段切换不回退。
         # 精筛阶段（ai_fine/screen_b）的 match+mismatch 仍是粗筛/详情阶段的
         # 累计值，混入会把成功数钉死在上一阶段完成数（假 30/30 + 100% 干等）；
         # 该阶段成功数只算精筛自己的进度：processed 在精筛开始时已重置为
         # 已判定数，live_current 是精筛实时推送的 current。
-        if stage in ("ai_fine", "screen_b"):
+        if is_scrape:
+            success_count = max(0, processed_db)
+        elif stage in ("ai_fine", "screen_b"):
             success_count = max(processed, live_current)
         else:
             success_count = max(match + mismatch, processed, live_current)
@@ -239,7 +292,13 @@ def register_task_state_routes(app, ctx):
                 progress["overall_percent"] = _scrape_page_overall_percent(
                     stage, completed_count, stage_total, page_ratio)
         progress.setdefault("overall_percent", overall_percent)
-        if not count_live:
+        if is_scrape:
+            # Scrape progress is a combination count. Raw job rows and live
+            # page counters must never leak into this field.
+            progress["current"] = completed_count
+            if durable_completed > live_current:
+                progress["overall_percent"] = overall_percent
+        elif not count_live:
             # A browser refresh may leave an in-memory snapshot behind the
             # durable checkpoint. Do not let that stale current/percent mask
             # the reconciled combo count.
@@ -251,7 +310,10 @@ def register_task_state_routes(app, ctx):
                 progress["overall_percent"] = overall_percent
         else:
             progress.setdefault("current", success_count if jd_stage else completed_count)
-        progress.setdefault("total", stage_total)
+        if is_scrape:
+            progress["total"] = stage_total
+        else:
+            progress.setdefault("total", stage_total)
         # A persisted terminal task has no in-memory live progress after a
         # refresh. Reconstruct the user-facing result message from durable
         # status/counts so a partial recrawl never falls back to generic
@@ -275,9 +337,7 @@ def register_task_state_routes(app, ctx):
                 _resolved_error_code and _resolved_error_code in SYSTEMIC_BLOCK_CODES):
             pause_info = {
                 "error_code": error_code,
-                "error_reason": error_reason or failed_code_label(
-                    error_code, str((run or {}).get("platform") or (live or {}).get("platform") or "")
-                ) or error_code or "",
+                "error_reason": pause_error_reason or error_code or "",
             }
         if effective_status == "interrupted":
             progress.setdefault(
@@ -290,10 +350,6 @@ def register_task_state_routes(app, ctx):
             finished_at = _iso_epoch_ms((run or {}).get("finished_at"))
         # 暂停不计时：从 task_logs 的 pause/resume 事件推导累计实际运行时长。
         # 刷新页面后仍有效（事件已持久化）；无事件或无法计算时回退 None。
-        try:
-            task_events = ctx.store.list_task_events(run_id)
-        except ctx.operational_errors:
-            task_events = []
         active_elapsed_ms = _active_elapsed_ms(started_at, finished_at, task_events)
         # 016：软失败组合留痕（combo_issue/kind=combo_failed），倒序取最近 20 条；
         # 文案来自统一注册表，前端只展示不猜码。
@@ -325,7 +381,7 @@ def register_task_state_routes(app, ctx):
             "stage": stage,
             "progress": progress,
             "logs": (live or {}).get("logs", []),
-            "error": (live or {}).get("error") or error_reason or "",
+            "error": visible_error_reason or "",
             "success_count": success_count,
             "fail_count": fail_count,
             "unstarted_count": unstarted,

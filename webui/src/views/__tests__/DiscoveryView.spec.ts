@@ -391,7 +391,7 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
-  it("restores interrupted AI screen source ids so start is reachable", async () => {
+  it("restores interrupted AI screen source ids without occupying the new-task slot", async () => {
     const settings = {
       inter_combo_delay: 10,
       detail_batch_size: 15,
@@ -457,10 +457,17 @@ describe("DiscoveryView", () => {
 
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
-    await confirmProfileFromScreen(wrapper);
+    // 失败/中断只保留错误事实并回到 02，不能把页面锁在旧的 AI 任务上。
+    expect(wrapper.find('[data-testid="profile-confirm"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="continue-ai-screen"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("disabled")).toBeUndefined();
+    await confirmProfile(wrapper, "3年Python后端工程师候选人");
+    await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
+    await flushPromises();
     const resume = wrapper.get('[data-testid="continue-ai-screen"]');
     expect(resume.attributes("disabled")).toBeUndefined();
-    expect(wrapper.find(".task-progress").exists()).toBe(false);
+    expect(wrapper.find(".task-progress").exists()).toBe(true);
     expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
     await resume.trigger("click");
     await flushPromises();
@@ -538,9 +545,10 @@ describe("DiscoveryView", () => {
     expect(wrapper.get('[data-testid="platform-segment-boss"]').attributes("aria-selected")).toBe("true");
     expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("aria-selected")).toBe("false");
 
-    // interrupted screen 仍可重开（与 boss 任务对称）
-    expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
-    expect(wrapper.find(".task-progress").exists()).toBe(false);
+    // 中断任务初始回到 02，旧任务不占用新任务入口；进入 03 才显示其 AI 动作。
+    expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("disabled")).toBeUndefined();
 
     vi.unstubAllGlobals();
   });
@@ -1403,7 +1411,7 @@ describe("DiscoveryView", () => {
     expect(status.text()).toContain("已暂停");
     expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("触发验证码");
     expect(wrapper.find('[data-testid="cancel-paused-scrape"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="finish-paused-scrape"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
 
     vi.unstubAllGlobals();
   });
@@ -2622,7 +2630,7 @@ describe("DiscoveryView", () => {
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
     expect(wrapper.get('[data-testid="scraped-count"]').text()).toContain("1280");
-    await wrapper.get('[data-testid="finish-active-scrape"]').trigger("click");
+    await wrapper.get('[data-testid="finish-save-results"]').trigger("click");
     await flushPromises();
     expect(wrapper.find(".results-stage").exists()).toBe(false);
     await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
@@ -2663,7 +2671,7 @@ describe("DiscoveryView", () => {
     vi.stubGlobal("fetch", fetchMock);
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
-    const button = wrapper.get('[data-testid="finish-active-scrape"]');
+    const button = wrapper.get('[data-testid="finish-save-results"]');
     await button.trigger("click");
     await flushPromises();
     expect(button.attributes("disabled")).toBeDefined();
@@ -2715,7 +2723,7 @@ describe("DiscoveryView", () => {
     vi.stubGlobal("fetch", fetchMock);
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
-    await wrapper.get('[data-testid="finish-active-scrape"]').trigger("click");
+    await wrapper.get('[data-testid="finish-save-results"]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
     await flushPromises();
@@ -3937,6 +3945,71 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each(["boss", "zhilian"] as const)(
+    "scrape %s exposes the shared pause/finish/terminate actions while running",
+    async (platform) => {
+      const runId = `scrape-running-actions-${platform}`;
+      const fetchMock = oneClickBase({
+        "/api/latest-running-task": () => response({
+          ok: true, has_task: true, task_id: runId, kind: "scrape", status: "running",
+          platform, progress: { current: 5, total: 6, job_count: 198, page: 2, page_total: 2 }, logs: [],
+        }),
+        [`/api/task-state/${runId}`]: () => response({
+          status: "running", progress: { current: 5, total: 6, job_count: 198, page: 2, page_total: 2 }, logs: [],
+        }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const wrapper = mount(DiscoveryView, { props: { profileId: `scrape-actions-${platform}` } });
+      await flushPromises();
+
+      expect(wrapper.find('[data-testid="pause-scrape"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="cancel-scrape"]').exists()).toBe(true);
+      expect(wrapper.get('[data-testid="pause-scrape"]').attributes("disabled")).toBeUndefined();
+
+      wrapper.unmount();
+      vi.unstubAllGlobals();
+    },
+  );
+
+  it.each(["boss", "zhilian"] as const)(
+    "paused scrape %s routes continue/finish/terminate through the shared action set",
+    async (platform) => {
+      const runId = `scrape-paused-actions-${platform}`;
+      const fetchMock = oneClickBase({
+        "/api/latest-running-task": () => response({
+          ok: true, has_task: true, task_id: runId, kind: "scrape", status: "paused",
+          platform, progress: { current: 5, total: 6, job_count: 198, page: 2, page_total: 2 }, logs: [],
+          pause_info: { error_code: "user_paused", error_reason: "用户已暂停" },
+        }),
+        [`/api/task-state/${runId}`]: () => response({
+          status: "paused", progress: { current: 5, total: 6, job_count: 198, page: 2, page_total: 2 }, logs: [],
+          pause_info: { error_code: "user_paused", error_reason: "用户已暂停" },
+        }),
+        [`/api/task/continue/${runId}`]: () => response({ ok: true, task_id: `${runId}-continued` }),
+        [`/api/task/finish/${runId}`]: () => response({
+          ok: true, platform, status: "completed_with_pending", scrape_task_id: runId,
+          result: { jobs: [], total_scraped: 198, total_kept: 0, total_dropped: 0 },
+        }),
+        [`/api/task/cancel/${runId}`]: () => response({ ok: true, platform, status: "cancelled" }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const wrapper = mount(DiscoveryView, { props: { profileId: `scrape-actions-${platform}` } });
+      await flushPromises();
+
+      expect(wrapper.find('[data-testid="continue-scrape"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="cancel-paused-scrape"]').exists()).toBe(true);
+
+      await wrapper.get('[data-testid="continue-scrape"]').trigger("click");
+      await flushPromises();
+      expect(fetchMock.mock.calls.some(([url]) => String(url) === `/api/task/continue/${runId}`)).toBe(true);
+
+      wrapper.unmount();
+      vi.unstubAllGlobals();
+    },
+  );
+
   it("B031: refresh restores a running AI screen on the screen step with announcement", async () => {
     const fetchMock = oneClickBase({
       "/api/latest-running-task": () => response({
@@ -4274,23 +4347,16 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
-  it("B057: paused scrape continue can switch to another account", async () => {
+  it("B057: paused scrape continue uses the frozen account context", async () => {
     const continueBodies: Array<Record<string, unknown>> = [];
     const fetchMock = oneClickBase({
-      "/api/browser-accounts": () => response({
-        ok: true, active_account: "a",
-        accounts: [
-          { id: "a", name: "账号A" },
-          { id: "b", name: "账号B" },
-        ],
-      }),
       "/api/latest-running-task": () => response({
         ok: true, has_task: true, task_id: "paused-scrape", kind: "scrape", status: "paused",
         platform: "boss", scrape_completed: false, progress: {}, logs: [], error: "源账号限流",
       }),
       "/api/task-state/paused-scrape": () => response({ status: "paused", progress: {}, logs: [], error: "源账号限流" }),
       "/api/task/continue/paused-scrape": (url, init) => {
-        continueBodies.push(JSON.parse(String((init as RequestInit | undefined)?.body) || "{}"));
+        continueBodies.push(JSON.parse(String((init as RequestInit | undefined)?.body || "{}")));
         return response({ ok: true, task_id: "resumed-scrape" });
       },
       "/api/task-state/resumed-scrape": () => response({ status: "completed", progress: {}, logs: [], error: "", scraped_count: 1 }),
@@ -4298,15 +4364,206 @@ describe("DiscoveryView", () => {
     vi.stubGlobal("fetch", fetchMock);
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
-    const picker = wrapper.get("[data-testid=\"scrape-continue-account\"]");
-    expect(picker.attributes("disabled")).toBeUndefined();
-    await picker.setValue("b");
+    expect(wrapper.find("[data-testid=\"scrape-continue-account\"]").exists()).toBe(false);
     await wrapper.get("[data-testid=\"continue-scrape\"]").trigger("click");
     await flushPromises();
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toContain("/api/task/continue/paused-scrape");
     expect(continueBodies.length).toBe(1);
-    expect(continueBodies[0]).toEqual({ target_account: "b" });
+    expect(continueBodies[0]).toEqual({});
     vi.unstubAllGlobals();
   });
+
+  it.each(["boss", "zhilian"] as const)(
+    "screen %s keeps live actions while terminal errors return to the new-task path",
+    async (platform) => {
+      const statusCases = [
+        { status: "running", actionTestId: "pause-ai-screen", occupies: true },
+        { status: "paused", actionTestId: "continue-ai-screen", occupies: true },
+        { status: "interrupted", actionTestId: "", occupies: false },
+        { status: "failed", actionTestId: "", occupies: false },
+      ] as const;
+
+      for (const { status, actionTestId, occupies } of statusCases) {
+        const runId = `screen-${platform}-${status}`;
+        const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith("/api/latest-running-task")) {
+            return response({
+              ok: true, has_task: true, task_id: runId, kind: "ai_screen", status,
+              platform, scrape_task_id: `scrape-${platform}`, scrape_completed: true,
+              frozen_filters: { salary: ["406"] }, profile_summary: "3年Python后端候选人",
+              pause_info: { error_code: "source_verification_required", error_reason: "验证码" },
+              progress: { message: `AI 筛选${status}` }, logs: [],
+            });
+          }
+          if (url.includes(`/api/task-state/${runId}`)) {
+            return response({
+              status, progress: { message: `AI 筛选${status}` }, logs: [],
+              pause_info: { error_code: "source_verification_required", error_reason: "验证码" },
+            });
+          }
+          if (url === `/api/task/finish/${runId}`) {
+            return response({
+              ok: true, run_id: runId, snapshot_run_id: `snapshot-${runId}`, platform,
+              status: "completed_with_pending", scrape_task_id: `scrape-${platform}`,
+              cleanup_error: "browser_cleanup_failed",
+              cleanup: { ok: false, error_code: "source_cdp_unavailable" },
+              result: { jobs: [], total_scraped: 0, total_kept: 0, total_dropped: 0 },
+            });
+          }
+          if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+          if (url.includes("/api/filter-labels")) {
+            return response({
+              ok: true, platform, schema_version: 1, enabled_for_new_tasks: true,
+              fields: platform === "boss"
+                ? [{ key: "stage", label: "融资阶段", multiple: false, options: [{ value: "804", label: "B轮" }] }]
+                : [{ key: "company_nature", label: "公司性质", multiple: false, options: [{ value: "1", label: "国企" }] }],
+            });
+          }
+          if (url.includes("/api/options")) return response({ ok: true, platform, city_mapping_version: 1, cities: [] });
+          if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+          return response({});
+        });
+        vi.stubGlobal("fetch", fetchMock);
+
+        const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+        await flushPromises();
+        if (occupies) {
+          expect(wrapper.find(`[data-testid="${actionTestId}"]`).exists()).toBe(true);
+          expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
+
+          await wrapper.get('[data-testid="finish-save-results"]').trigger("click");
+          await flushPromises();
+          const finishCalls = fetchMock.mock.calls.filter(
+            ([url]) => String(url) === `/api/task/finish/${runId}`,
+          );
+          expect(finishCalls).toHaveLength(1);
+          expect(finishCalls[0]?.[1]?.method).toBe("POST");
+          expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/task/cancel/"))).toBe(false);
+          expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/task/continue/"))).toBe(false);
+        } else {
+          // failed/interrupted are visible facts, not an occupied task slot.
+          expect(wrapper.find('[data-testid="continue-ai-screen"]').exists()).toBe(false);
+          expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(false);
+          expect(wrapper.find('[data-testid="start-scrape"]').exists()).toBe(true);
+          expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("disabled")).toBeUndefined();
+        }
+
+        wrapper.unmount();
+        sessionStorage.clear();
+        localStorage.clear();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it.each(["boss", "zhilian"] as const)(
+    "failed scrape %s shows saved-result plus cleanup failure in the shared view",
+    async (platform) => {
+      const runId = `scrape-cleanup-${platform}`;
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/latest-running-task")) {
+          return response({
+            ok: true, has_task: true, task_id: runId, kind: "scrape", status: "failed",
+            platform, scraped_count: 1, source_total: 1, progress: { message: "抓取失败" },
+            logs: [], error: "列表抓取失败",
+            pause_info: { error_code: "source_unreachable", error_reason: "列表抓取失败" },
+          });
+        }
+        if (url === `/api/task/finish/${runId}`) {
+          return response({
+            ok: true, run_id: runId, snapshot_run_id: `snapshot-${platform}`,
+            platform, status: "completed_with_pending", scrape_task_id: runId,
+            cleanup_error: "browser_cleanup_failed",
+            cleanup: { ok: false, error_code: "source_cdp_unavailable" },
+            result: { jobs: [], total_scraped: 1, total_kept: 0, total_dropped: 0 },
+          });
+        }
+        if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+        if (url.includes("/api/filter-labels")) {
+          return response(platform === "boss" ? bossSchema() : {
+            ok: true, platform, schema_version: 1, enabled_for_new_tasks: true,
+            fields: [{ key: "company_nature", label: "公司性质", multiple: false, options: [{ value: "1", label: "国企" }] }],
+          });
+        }
+        if (url.includes("/api/options")) return response({ ok: true, platform, city_mapping_version: 1, cities: [] });
+        if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+        return response({});
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+      await flushPromises();
+
+      await wrapper.get('[data-testid="finish-save-results"]').trigger("click");
+      await flushPromises();
+
+      expect(wrapper.text()).toContain("结果已保存，但浏览器清理失败");
+      expect(wrapper.text()).not.toContain("任务已结束，已完成结果已保存");
+      expect(fetchMock.mock.calls.some(([url]) => String(url) === `/api/task/finish/${runId}`)).toBe(true);
+
+      wrapper.unmount();
+      sessionStorage.clear();
+      localStorage.clear();
+      vi.unstubAllGlobals();
+    },
+  );
+
+  it.each(["boss", "zhilian"] as const)(
+    "paused scrape %s shows shared cancel cleanup failure feedback",
+    async (platform) => {
+      const runId = `paused-scrape-cleanup-${platform}`;
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/latest-running-task")) {
+          return response({
+            ok: true, has_task: true, task_id: runId, kind: "scrape", status: "paused",
+            platform, progress: {}, logs: [], error: "源平台暂停",
+            pause_info: { error_code: "source_verification_required", error_reason: "需要人工处理" },
+          });
+        }
+        if (url.includes(`/api/task-state/${runId}`)) {
+          return response({
+            status: "paused", progress: {}, logs: [], error: "源平台暂停",
+            pause_info: { error_code: "source_verification_required", error_reason: "需要人工处理" },
+          });
+        }
+        if (url === `/api/task/cancel/${runId}`) {
+          return response({
+            ok: false, error: "browser_cleanup_failed",
+            cleanup_error: "browser_cleanup_failed",
+            cleanup: { ok: false, error_code: "source_cdp_unavailable" }, platform,
+            status: "cancelled",
+          });
+        }
+        if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+        if (url.includes("/api/filter-labels")) {
+          return response(platform === "boss" ? bossSchema() : {
+            ok: true, platform, schema_version: 1, enabled_for_new_tasks: true,
+            fields: [{ key: "company_nature", label: "公司性质", multiple: false, options: [{ value: "1", label: "国企" }] }],
+          });
+        }
+        if (url.includes("/api/options")) return response({ ok: true, platform, city_mapping_version: 1, cities: [] });
+        if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+        return response({});
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+      await flushPromises();
+
+      await wrapper.get('[data-testid="cancel-paused-scrape"]').trigger("click");
+      await flushPromises();
+
+      expect(wrapper.text()).toContain("任务已停止，但浏览器清理失败");
+      expect(wrapper.text()).not.toContain("已取消任务，已有结果保留");
+      expect(fetchMock.mock.calls.some(([url]) => String(url) === `/api/task/cancel/${runId}`)).toBe(true);
+
+      wrapper.unmount();
+      sessionStorage.clear();
+      localStorage.clear();
+      vi.unstubAllGlobals();
+    },
+  );
 
   describe("按钮矩阵：AI 筛选三态与结果页胶囊", () => {
     const MATRIX_ACTION_IDS = [
@@ -4467,7 +4724,6 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 });
-
 describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
   const b078Settings = {
     inter_combo_delay: 10,
@@ -4734,7 +4990,8 @@ describe("DiscoveryView 035 界面收口（US1/US2 界面级）", () => {
     await flushPromises();
 
     // 02 页显示抓取运行中的真实进度
-    expect(wrapper.get('[data-testid="start-scrape"]').text()).toContain("停止抓取");
+    expect(wrapper.find('[data-testid="start-scrape"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="pause-scrape"]').text()).toContain("暂停");
     // 进入 03 页（scrapeCompleted 由旧快照带入 true，步骤可达——真机踩中路径）
     await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
     await flushPromises();
@@ -4772,7 +5029,8 @@ describe("DiscoveryView 035 界面收口（US1/US2 界面级）", () => {
     await flushPromises();
 
     // 后台抓取运行中（02 页为当前进度页）
-    expect(wrapper.get('[data-testid="start-scrape"]').text()).toContain("停止抓取");
+    expect(wrapper.find('[data-testid="start-scrape"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="pause-scrape"]').text()).toContain("暂停");
 
     // 进历史模式，查看旧一轮 04 页
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
@@ -4786,7 +5044,8 @@ describe("DiscoveryView 035 界面收口（US1/US2 界面级）", () => {
     await flushPromises();
 
     // 跳回 02 抓取进度页（真机问题②验收），并退出历史模式
-    expect(wrapper.get('[data-testid="start-scrape"]').text()).toContain("停止抓取");
+    expect(wrapper.find('[data-testid="start-scrape"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="pause-scrape"]').text()).toContain("暂停");
     expect(wrapper.find('[data-testid="history-round-marker"]').exists()).toBe(false);
     // 任务未被取消、未开新一轮、未归档最新结果
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/api/task/cancel"))).toBe(false);

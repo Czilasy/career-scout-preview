@@ -300,6 +300,86 @@ class StatusMappingTests(unittest.TestCase):
         # DB processed_count=0、match/mismatch=0：组合序号 3 不得透出。
         self.assertEqual(data["success_count"], 0)
 
+    def test_task_state_scrape_jobs_do_not_advance_combo_progress(self):
+        """抓到岗位但没有完成组合证据时，组合进度必须保持 0/6。"""
+        run_id = "test_scrape_jobs_not_combos"
+        self.store.create_screening_run(run_id, source_count=6)
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape",
+        )
+        jobs = [{"job_id": f"job-{index}"} for index in range(40)]
+        self.store.save_scrape_combo_result(run_id, "前端|上海", jobs, [])
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "running",
+            "progress": {"stage": "searching", "current": 0, "total": 6},
+            "logs": [], "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+        }
+
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+
+        self.assertEqual(data["scraped_count"], 40)
+        self.assertEqual(data["success_count"], 0)
+        self.assertEqual(data["fail_count"], 0)
+        self.assertEqual(data["pending_count"], 0)
+        self.assertEqual(data["progress"]["current"], 0)
+        self.assertEqual(data["total"], 6)
+
+    def test_task_state_scrape_checkpoint_is_a_monotonic_combo_floor(self):
+        """恢复时 checkpoint 推进组合 current，后续 checkpoint 只能增长。"""
+        run_id = "test_scrape_checkpoint_floor"
+        self.store.create_screening_run(run_id, source_count=6)
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape",
+        )
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "running", "progress": {},
+            "logs": [], "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+        }
+
+        self.store.save_checkpoint(run_id, "scrape", ["前端|上海"])
+        first = self.client.get(f"/api/task-state/{run_id}").get_json()
+        self.assertEqual(first["progress"]["current"], 1)
+        self.assertEqual(first["success_count"], 1)
+
+        self.store.save_checkpoint(
+            run_id, "scrape", ["前端|上海", "后端|上海"],
+        )
+        second = self.client.get(f"/api/task-state/{run_id}").get_json()
+        self.assertEqual(second["progress"]["current"], 2)
+        self.assertEqual(second["success_count"], 2)
+
+    def test_task_state_scrape_combo_failure_counts_one_combination(self):
+        """组合失败只完成一个组合，不能把岗位数当成失败/完成数。"""
+        run_id = "test_scrape_combo_failure"
+        self.store.create_screening_run(run_id, source_count=6)
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape",
+        )
+        self.store.append_task_event(
+            run_id,
+            "combo_issue",
+            {
+                "kind": "combo_failed",
+                "combo_key": "前端|上海",
+                "failed_code": "source_timeout",
+            },
+        )
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "running", "progress": {},
+            "logs": [], "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+        }
+
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+
+        self.assertEqual(data["success_count"], 0)
+        self.assertEqual(data["fail_count"], 1)
+        self.assertEqual(data["unstarted_count"], 5)
+        self.assertEqual(data["progress"]["current"], 1)
+        self.assertEqual(data["total"], 6)
+
     def test_task_state_interrupted_maps_to_cancelled(self):
         """T410: interrupted DB 状态 → cancelled 任务状态。"""
         run_id = "test_interrupted_mapping"
@@ -587,10 +667,15 @@ class PauseElapsedAndResumeConfigTests(unittest.TestCase):
         frozen = (run.get("execution_params") or {}).get("frozen_scope") or {}
         self.assertEqual(frozen.get("pages_per_combination"), 3)
 
-    def test_continue_scrape_refreshes_inter_combo_delay(self):
-        """暂停续抓：run_search 收到刷新后的间隔，pages 仍用冻结的 frozen_scope。"""
+    def test_continue_scrape_preserves_frozen_execution_config(self):
+        """暂停续抓：保持原冻结配置摘要与范围，不受当前高级设置影响。"""
+        from webui.execution_config import ExecutionConfigSnapshot, FrozenTaskScope
+
         run_id = "resume-scrape-config"
-        old = self._config(inter_combo_delay=30.0, detail_tab_pool_size=10)
+        old_config = ExecutionConfigSnapshot.create(
+            self._config(inter_combo_delay=30.0, detail_tab_pool_size=10)
+        )
+        frozen_scope = FrozenTaskScope.from_dict(self._scope())
         self.store.create_screening_run(
             run_id,
             source_count=1,
@@ -598,8 +683,8 @@ class PauseElapsedAndResumeConfigTests(unittest.TestCase):
                 "platform": "boss",
                 "script_params": {"keyword": "Python", "city": ["上海"], "pages": 3},
                 "browser_account": "a", "cdp_port": 9222, "profile_key": "boss:a",
-                "execution_config": old,
-                "frozen_scope": self._scope(),
+                "execution_config": old_config.to_dict(),
+                "frozen_scope": frozen_scope.to_dict(),
             },
         )
         if self.store.get_screening_run(run_id)["status"] == "queued":
@@ -622,7 +707,11 @@ class PauseElapsedAndResumeConfigTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.get_json())
         run = self.store.get_screening_run(run_id)
         db_config = (run.get("execution_params") or {}).get("execution_config") or {}
-        self.assertEqual(db_config.get("inter_combo_delay"), 10.0)
+        self.assertEqual(db_config.get("inter_combo_delay"), 30.0)
+        self.assertEqual(db_config.get("config_digest"), old_config.config_digest)
+        frozen = (run.get("execution_params") or {}).get("frozen_scope") or {}
+        self.assertEqual(frozen.get("scope_digest"), frozen_scope.scope_digest)
+        self.assertEqual(frozen.get("pages_per_combination"), 3)
 
         # submit 被拦截后 start_gate 已放行；手动跑续抓 worker 并拦截 run_search
         fn, args, kwargs = captured[0]
@@ -638,7 +727,11 @@ class PauseElapsedAndResumeConfigTests(unittest.TestCase):
            mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class"):
             fn()
         self.assertEqual(len(run_search_calls), 1)
-        self.assertEqual(run_search_calls[0]["execution_config"].inter_combo_delay, 10.0)
+        self.assertEqual(run_search_calls[0]["execution_config"].inter_combo_delay, 30.0)
+        self.assertEqual(
+            run_search_calls[0]["execution_config"].config_digest,
+            old_config.config_digest,
+        )
         self.assertEqual(run_search_calls[0]["pages"], 3)
 
     def test_continue_recrawl_refreshes_match_concurrency(self):
@@ -988,7 +1081,7 @@ class AutoScreenChainTests(unittest.TestCase):
         )
         data = self.client.get("/api/latest-running-task").get_json()
         self.assertTrue(data["has_task"])
-        self.assertEqual(data["status"], "paused")
+        self.assertEqual(data["status"], "failed")
         self.assertEqual(data["profile_summary"], "3年Python后端")
         self.assertEqual(
             data["profile_facts"],
@@ -1052,7 +1145,7 @@ class AutoScreenChainTests(unittest.TestCase):
         )
         data = self.client.get("/api/latest-running-task").get_json()
         self.assertTrue(data["has_task"])
-        self.assertEqual(data["status"], "paused")
+        self.assertEqual(data["status"], "failed")
         self.assertTrue(data["auto_screen"])
 
     def test_task_state_returns_auto_screen_with_memory_priority(self):

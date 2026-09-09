@@ -178,6 +178,81 @@ describe("DiscoveryView paused AI recovery", () => {
     expect(continueCall?.[1]?.body).toBeUndefined();
   });
 
+  it.each(["boss", "zhilian"] as const)(
+    "shared paused scrape action matrix keeps frozen account identity for %s",
+    async (platform) => {
+      const taskId = `paused-scrape-${platform}`;
+      const endpointCases = [
+        { id: "continue-scrape", path: `/api/task/continue/${taskId}` },
+        { id: "cancel-paused-scrape", path: `/api/task/cancel/${taskId}` },
+        { id: "finish-save-results", path: `/api/task/finish/${taskId}` },
+      ] as const;
+
+      for (const endpointCase of endpointCases) {
+        const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/api/latest-running-task") {
+            return response({
+              ok: true, has_task: true, task_id: taskId, kind: "scrape", status: "paused",
+              platform, progress: { current: 2, total: 5 }, logs: [],
+              pause_info: { error_code: "source_rate_limited", error_reason: "账号限流" },
+            });
+          }
+          if (url === `/api/task-state/${taskId}`) {
+            return response({
+              status: "paused", progress: { current: 2, total: 5 }, logs: [],
+              pause_info: { error_code: "source_rate_limited", error_reason: "账号限流" },
+            });
+          }
+          if (url === endpointCase.path) {
+            if (endpointCase.id === "continue-scrape") {
+              return response({ ok: true, task_id: `${taskId}-resumed` });
+            }
+            if (endpointCase.id === "finish-save-results") {
+              return response({
+                ok: true, run_id: taskId, platform, status: "completed_with_pending",
+                scrape_task_id: taskId,
+                result: { jobs: [], total_scraped: 2, total_kept: 2, total_dropped: 0 },
+              });
+            }
+            return response({ ok: true, run_id: taskId, status: "cancelled" });
+          }
+          if (url === `/api/task-state/${taskId}-resumed`) {
+            return response({ status: "completed", progress: {}, logs: [] });
+          }
+          if (url.startsWith("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+          if (url.includes("/api/filter-labels")) return response({ ok: true, platform, schema_version: 1, enabled_for_new_tasks: true, fields: [] });
+          if (url.includes("/api/options")) return response({ ok: true, platform, city_mapping_version: 1, cities: [] });
+          if (url === "/api/advanced-settings") return response({ ok: true, selection: "balanced", settings: {} });
+          if (url === "/api/version") return response({ backend_version: "010", build_hash: expectedBackendBuildHash, build_time: "now" });
+          return response({});
+        });
+        vi.stubGlobal("fetch", fetchMock);
+        const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+        await flushPromises();
+
+        expect(wrapper.find('[data-testid="scrape-continue-account-picker"]').exists()).toBe(false);
+        expect(wrapper.find('[data-testid="continue-scrape"]').exists()).toBe(true);
+        expect(wrapper.find('[data-testid="cancel-paused-scrape"]').exists()).toBe(true);
+        expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
+        await wrapper.get(`[data-testid="${endpointCase.id}"]`).trigger("click");
+        await flushPromises();
+
+        expect(fetchMock.mock.calls.some(([url]) => String(url) === endpointCase.path)).toBe(true);
+        const otherActions = endpointCases.filter((candidate) => candidate.path !== endpointCase.path);
+        for (const other of otherActions) {
+          expect(fetchMock.mock.calls.some(([url]) => String(url) === other.path)).toBe(false);
+        }
+        const actionCall = fetchMock.mock.calls.find(
+          ([url]) => String(url) === endpointCase.path,
+        );
+        expect(actionCall?.[1]?.body).toBeUndefined();
+        wrapper.unmount();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
   it("continue failure restores the paused snapshot and hides the english error code", async () => {
     // 016：AI 限流未解除 → 继续返回 409 block_not_resolved。界面应回到报错暂停时的
     // 样子（进度/日志/红色错误/中文原因），不重建空快照、不直出英文码。
@@ -251,6 +326,71 @@ describe("DiscoveryView paused AI recovery", () => {
     expect(wrapper.text()).not.toContain("block_not_resolved");
     expect(wrapper.find('[data-testid="continue-ai-screen"]').exists()).toBe(true);
   });
+
+  it.each(["boss", "zhilian"] as const)(
+    "%s scrape continue 409 restores paused state and shared actions",
+    async (platform) => {
+      const taskId = `corrupt-scrape-${platform}`;
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/latest-running-task") {
+          return response({
+            ok: true,
+            has_task: true,
+            task_id: taskId,
+            kind: "scrape",
+            status: "paused",
+            platform,
+            progress: { current: 2, total: 5, overall_percent: 40 },
+            logs: ["已保存断点"],
+            error: "暂停断点读取失败，原有断点已保留，请重试",
+            pause_info: {
+              error_code: "checkpoint_read_failed",
+              error_reason: "暂停断点读取失败，原有断点已保留，请重试",
+            },
+          });
+        }
+        if (url === `/api/task-state/${taskId}`) {
+          return response({
+            status: "paused",
+            progress: { current: 2, total: 5, overall_percent: 40 },
+            logs: ["已保存断点"],
+            error: "暂停断点读取失败，原有断点已保留，请重试",
+            pause_info: {
+              error_code: "checkpoint_read_failed",
+              error_reason: "暂停断点读取失败，原有断点已保留，请重试",
+            },
+          });
+        }
+        if (url === `/api/task/continue/${taskId}`) {
+          return response({
+            ok: false,
+            error: "checkpoint_read_failed",
+            error_code: "checkpoint_read_failed",
+            error_reason: "暂停断点读取失败，原有断点已保留，请重试",
+            status: "paused",
+          }, 409);
+        }
+        if (url.startsWith("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+        if (url === "/api/version") return response({ backend_version: "010", build_hash: expectedBackendBuildHash, build_time: "now" });
+        if (url === "/api/browser-accounts") return response({ ok: true, accounts: [{ id: "a", name: "账号A" }] });
+        return response({});
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+      await flushPromises();
+      await wrapper.get('[data-testid="continue-scrape"]').trigger("click");
+      await flushPromises();
+
+      expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("暂停断点读取失败");
+      expect(wrapper.text()).not.toContain("断点续抓启动失败");
+      expect(wrapper.find('[data-testid="continue-scrape"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="cancel-paused-scrape"]').exists()).toBe(true);
+      expect(fetchMock.mock.calls.some(([url]) => String(url) === `/api/task-state/${taskId}`)).toBe(true);
+    },
+  );
 });
 
 describe("TaskProgress canonical terminal states", () => {

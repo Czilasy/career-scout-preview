@@ -575,6 +575,8 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                             criteria=recrawl_criteria,
                             profile_facts=profile_facts,
                             execution_config=execution_config,
+                            platform=frozen_platform,
+                            correlation_id=task_id,
                         )
                     except ai_service.AISecurityError as _ai_exc:
                         # 切片8：systemic 错误暂停（不批量变 uncertain 后完成）

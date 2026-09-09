@@ -18,7 +18,6 @@ import websocket
 DEFAULT_BASE_URL = "http://127.0.0.1:5050"
 VIEWPORTS = ((375, 812), (390, 844), (768, 1024), (1440, 900))
 CONTINUE_SELECTOR = (
-    '[data-testid="continue-scrape"],'
     '[data-testid="resume-ai-screen"],'
     '[data-testid="resume-recrawl"]'
 )

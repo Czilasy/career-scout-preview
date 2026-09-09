@@ -266,6 +266,11 @@ const scrapeTaskId = ref("");
 const scrapeBusy = ref(false);
 
 
+// 抓取任务当前公共动作（暂停/继续）自身的请求状态；与 scrapeBusy 分离，
+// 运行中的任务仍必须允许点击“暂停”。
+const scrapeActionBusy = ref("");
+
+
 const scrapeSnapshot = ref<TaskSnapshot | null>(null);
 
 
@@ -273,12 +278,6 @@ const screenBusy = ref(false);
 
 
 const pausingScreen = ref(false);
-
-
-const switchAccounts = ref<Array<{ id: string; name: string }>>([]);
-
-
-const switchAccountId = ref("");
 
 
 const screenSnapshot = ref<TaskSnapshot | null>(null);
@@ -541,14 +540,13 @@ const profileConfirmed = ref(false);
 
 // 任意 pipeline 任务占用中（运行/暂停/待恢复）都禁止再启动新任务。
 
-// 任意 pipeline 任务占用中（运行/暂停/失败/中断待处理）都禁止再启动新任务。
-// 035：与 hasLiveTaskState 口径对齐——failed/interrupted 快照也视为未结束，防止
-// 「上传简历被挡、开始抓取不挡」等入口行为打架。
+// 任意 pipeline 任务占用中（运行/暂停）都禁止再启动新任务；失败/中断只保留
+// 用户可见错误快照，不再把新任务入口锁死。
 const pipelineBusy = computed(() => Boolean(
   scrapeBusy.value || screenBusy.value || recrawlBusy.value
-  || pausedRunId.value || interruptedRunId.value
+  || pausedRunId.value
   || [scrapeSnapshot.value?.status, screenSnapshot.value?.status, recrawlSnapshot.value?.status]
-    .some((s) => s && ["paused", "failed", "interrupted"].includes(String(s))),
+    .some((s) => s && String(s) === "paused"),
 ));
 
 
@@ -976,11 +974,10 @@ return {
   appliedResumePlatforms,
   scrapeTaskId,
   scrapeBusy,
+  scrapeActionBusy,
   scrapeSnapshot,
   screenBusy,
   pausingScreen,
-  switchAccounts,
-  switchAccountId,
   screenSnapshot,
   screenTaskId,
   recrawlBusy,
@@ -1089,10 +1086,10 @@ return {
 
 export type DiscoveryState = ReturnType<typeof useDiscoveryState>;
 
-/** 035：未结束任务真实存在判定（浏览历史不改变任务状态；供开新一轮入口守卫复用）。 */
+/** 未结束任务真实存在判定（浏览历史不改变任务状态；供开新一轮入口守卫复用）。 */
 export function hasLiveTaskState(state: DiscoveryState): boolean {
-  if (state.pausedRunId.value || state.interruptedRunId.value) return true;
-  const liveStatuses = new Set(["running", "queued", "paused", "failed", "interrupted"]);
+  if (state.pausedRunId.value) return true;
+  const liveStatuses = new Set(["running", "queued", "paused"]);
   for (const snap of [
     state.screenSnapshot.value,
     state.scrapeSnapshot.value,
@@ -1115,16 +1112,16 @@ export interface LiveTaskProbe {
   interruptedRunId?: string;
 }
 
-const LIVE_TASK_STATUSES = new Set(["running", "queued", "paused", "failed", "interrupted"]);
+const LIVE_TASK_STATUSES = new Set(["running", "queued", "paused"]);
 
 function snapshotLive(snapshot?: { status?: string | null } | null): boolean {
   return Boolean(snapshot && LIVE_TASK_STATUSES.has(String(snapshot.status || "")));
 }
 
 /**
- * 035：未结束任务的「真实进度页」只读派生（US2/US3 共享）：
- * 抓取活（运行/排队/暂停/失败/中断）→ "search"（02，抓取任务的真实进度页）；
- * 筛选/重抓活（含 pausedRunId/interruptedRunId）→ "screen"（03）；无活任务 → ""。
+ * 未结束任务的「真实进度页」只读派生：
+ * 抓取活（运行/排队/暂停）→ "search"（02，抓取任务的真实进度页）；
+ * 筛选/重抓活（含 pausedRunId）→ "screen"（03）；失败/中断快照只保留错误展示。
  * 抓取+筛选同时活时以抓取为准（一键链路筛选接续时抓取快照已终态，自然落 03）。
  */
 export function deriveLiveTaskStep(probe: LiveTaskProbe): StepId | "" {
@@ -1133,7 +1130,7 @@ export function deriveLiveTaskStep(probe: LiveTaskProbe): StepId | "" {
     probe.screenBusy || probe.recrawlBusy
     || snapshotLive(probe.screenSnapshot)
     || snapshotLive(probe.recrawlSnapshot)
-    || probe.pausedRunId || probe.interruptedRunId
+    || probe.pausedRunId
   ) return "screen";
   return "";
 }

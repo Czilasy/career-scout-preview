@@ -8,6 +8,7 @@
   - source_boss_cdp.py       BossCdpSource 主体（preflight/list/detail/命令构建）
   - source_boss_cdp_detail.py  批量详情、事件校验、in-process 执行 mixin
   - source_zhilian_cdp.py    ZhilianCdpSource 与智联常量/校验助手
+  - source_zhilian_runtime_adapter.py  智联新增 signal/降级/切号预检适配
   - source_zhilian_defaults.py  智联默认 CLI runner 与失败原因映射
   - source_fake.py           FakeJobSource 测试替身
 除本拆分批次外，不得在此追加逻辑（宪法 VI）。

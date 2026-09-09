@@ -8,6 +8,7 @@ from webui.pipeline_exec_status import (
     _classify_detail_batch_exception,
     failed_code_label,
     taxonomy_reason,
+    user_visible_failure_reason,
 )
 from webui.browser_recovery import BrowserRecovery
 from webui.error_registry import SYSTEMIC_BLOCK_CODES as _HARD_STOP_CODES
@@ -181,18 +182,21 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 hard_stop_code = outcome.failed_code
             if not jd and batch_exc_code:
                 jd_fail_by_idx[idx] = batch_exc_code
-                jd_fail_reason_by_idx[idx] = taxonomy_reason(
-                    batch_exc_code, getattr(source, "platform", ""),
-                    fallback="抓取失败",
+                jd_fail_reason_by_idx[idx] = user_visible_failure_reason(
+                    batch_exc_code,
+                    taxonomy_reason(
+                        batch_exc_code, getattr(source, "platform", ""),
+                        fallback="抓取失败",
+                    ),
+                    getattr(source, "platform", ""),
                 )
             elif not jd and outcome is not None and outcome.failed_code:
                 jd_fail_by_idx[idx] = outcome.failed_code
-                jd_fail_reason_by_idx[idx] = (
-                    outcome.failed_reason
-                    or failed_code_label(
-                        outcome.failed_code, getattr(source, "platform", "")
-                    ) or "岗位详情抓取失败"
-                )
+                jd_fail_reason_by_idx[idx] = user_visible_failure_reason(
+                    outcome.failed_code,
+                    outcome.failed_reason,
+                    getattr(source, "platform", ""),
+                ) or "岗位详情抓取失败"
                 jd_fail_evidence_by_idx[idx] = str(getattr(outcome, "safe_log", "") or "")
             jd_by_idx[idx] = jd
             if jd and idx not in counted_fetched:
@@ -598,7 +602,11 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                     if jd_by_idx.get(idx, ""):
                         continue
                     jd_fail_by_idx[idx] = _giveup_code
-                    jd_fail_reason_by_idx[idx] = _giveup_reason
+                    jd_fail_reason_by_idx[idx] = user_visible_failure_reason(
+                        _giveup_code,
+                        _giveup_reason,
+                        getattr(source, "platform", ""),
+                    ) or _giveup_reason
                 guard.complete_batch(batch_key)
                 break
             if batch_exception_code is not None and not recovery.is_browser_lost(batch_exception_code):

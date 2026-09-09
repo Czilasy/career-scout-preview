@@ -8,6 +8,10 @@ from __future__ import annotations
 from scripts import boss_cdp_raw as boss
 from webui import recruiter_activity
 from webui.core import salary_monthly_bounds
+from webui.ai_platform_adapter import (
+    _COMBINED_EXPERIENCE_CODES,
+    resolve_platform_ai_adapter,
+)
 
 
 
@@ -50,82 +54,112 @@ def _adv_setting(key, default):
         return default
 
 
+def _resolve_platform(platform=None, job=None):
+    """Resolve the source platform without falling back across field maps."""
+    candidate = platform
+    if not candidate and isinstance(job, dict):
+        candidate = job.get("platform")
+    normalized = str(candidate or "boss").strip().lower()
+    return normalized if normalized in {"boss", "zhilian"} else "boss"
 
 
-def _degree_code_label(code):
+def _platform_option_maps(platform, field):
+    """Return ``label -> code`` and ``code -> label`` for one platform field."""
+    return resolve_platform_ai_adapter(platform).option_maps(field)
+
+
+def _platform_value_code(value, platform, field):
+    """Normalize a schema label or code into that platform's stable code."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    label_to_code, _code_to_label = _platform_option_maps(platform, field)
+    return str(label_to_code.get(text, text))
+
+
+def _platform_value_label(value, platform, field):
+    """Normalize a schema label or code into that platform's display label."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    _label_to_code, code_to_label = _platform_option_maps(platform, field)
+    return str(code_to_label.get(text, text))
+
+
+def _criteria_codes_for_platform(values, platform, field):
+    return {
+        code
+        for value in values or []
+        if (code := _platform_value_code(value, platform, field))
+    }
+
+
+def _criteria_labels_for_platform(values, platform, field):
+    labels = []
+    seen = set()
+    for value in values or []:
+        label = _platform_value_label(value, platform, field)
+        if label and label not in seen:
+            labels.append(label)
+            seen.add(label)
+    return labels
+
+
+def _job_field_text(job, field, platform=None):
+    """Read one normalized job field at the platform adapter boundary."""
+    return resolve_platform_ai_adapter(platform, job).job_field_text(job, field)
+
+
+def _is_unrestricted_code(platform, field, code):
+    return resolve_platform_ai_adapter(platform).is_unrestricted(field, code)
+
+
+def _screen_hard_fields_text(platform):
+    return resolve_platform_ai_adapter(platform).screen_hard_fields_text()
+
+
+def _screen_input_note(platform):
+    return resolve_platform_ai_adapter(platform).screen_input_note()
+
+
+def _screen_fields(job, platform=None):
+    """Return the adapter-owned compact list fields for the shared screen flow."""
+    return resolve_platform_ai_adapter(platform, job).screen_fields(job)
+
+
+def _detail_fields(job, platform=None):
+    """Return the adapter-owned detail fields for the shared match flow."""
+    return resolve_platform_ai_adapter(platform, job).detail_fields(job)
+
+
+
+
+def _degree_code_label(code, platform="boss"):
     """学历码反查中文标签（用于拼 AI 提示词）。"""
-    for label, c in boss.DEGREE_MAP.items():
-        if c == code:
-            return label
-    return code
+    return resolve_platform_ai_adapter(platform).degree_code_label(code)
 
 
 
 
-def _build_criteria_description(criteria):
+def _build_criteria_description(criteria, platform="boss"):
     """把候选人标准（画像摘要 + 确认的筛选字段）转成自然语言给 AI 读。"""
-    lines = []
-    summary = (criteria.get("profile_summary") or "").strip()
-    if summary:
-        lines.append(f"候选人画像（仅用于放宽，不作为硬条件）：{summary}")
-    if criteria.get("city"):
-        lines.append("期望城市：" + "、".join(criteria["city"]))
-    if criteria.get("degree"):
-        lines.append("候选人学历：" + "、".join(_degree_code_label(c) for c in criteria["degree"]))
-    _label_fields = (
-        ("salary", boss.SALARY_MAP, "期望薪资"),
-        ("experience", boss.EXPERIENCE_MAP, "经验要求"),
-        ("industry", boss.INDUSTRY_MAP, "期望行业"),
-        ("scale", boss.SCALE_MAP, "期望公司规模"),
-        ("stage", boss.STAGE_MAP, "期望融资阶段"),
-    )
-    for key, mapping, label in _label_fields:
-        codes = criteria.get(key) or []
-        if codes:
-            names = [l for l, c in mapping.items() if c in codes]
-            if names:
-                lines.append(f"{label}：" + "、".join(names))
-    return "\n".join(lines) if lines else "（无明确标准，宽松判断）"
+    return resolve_platform_ai_adapter(platform).build_criteria_description(criteria)
 
 
 
 
-def _salary_selected_bounds(selected_codes):
+def _salary_selected_bounds(selected_codes, platform="boss"):
     """把已选薪资码映射为 (low, high) 月薪区间；high=None 表示无上限。"""
-    bounds = []
-    for label, code in boss.SALARY_MAP.items():
-        if code not in selected_codes or label == "不限":
-            continue
-        if label == "3K以下":
-            bounds.append((0.0, 3.0))
-        elif label == "3-5K":
-            bounds.append((3.0, 5.0))
-        elif label == "5-10K":
-            bounds.append((5.0, 10.0))
-        elif label == "10-20K":
-            bounds.append((10.0, 20.0))
-        elif label == "20-50K":
-            bounds.append((20.0, 50.0))
-        elif label == "50K以上":
-            bounds.append((50.0, None))
-    return bounds
+    return resolve_platform_ai_adapter(platform).salary_selected_bounds(selected_codes)
 
 
 
 
-def _salary_hard_mismatch(salary_text, selected_codes):
+def _salary_hard_mismatch(salary_text, selected_codes, platform="boss"):
     """薪资筛选是硬规则：已知薪资与全部已选区间都无重叠时返回 True。"""
-    if not selected_codes:
-        return False
-    job_bounds = salary_monthly_bounds(salary_text)
-    if job_bounds is None:
-        return False  # 面议/无法解析：不按硬规则误杀，交给 AI 判断
-    job_low, job_high = job_bounds
-    for band_low, band_high in _salary_selected_bounds(selected_codes):
-        upper = band_high if band_high is not None else float("inf")
-        if job_low < upper and job_high >= band_low:
-            return False
-    return True
+    return resolve_platform_ai_adapter(platform).salary_hard_mismatch(
+        salary_text, selected_codes,
+    )
 
 
 
@@ -136,15 +170,8 @@ _FILTER_FIELD_LABELS = {
     "scale": "公司规模",
     "stage": "融资阶段",
     "industry": "行业",
+    "company_nature": "公司性质",
 }
-
-
-
-# BOSS 列表经验标签有时合并为"在校/应届"，对应在校生+应届生两个码。
-_COMBINED_EXPERIENCE_CODES = {
-    "在校/应届": ("108", "102"),
-}
-
 
 
 
@@ -161,54 +188,38 @@ def _job_filter_tag_text(job):
 
 
 
-def _job_experience_codes(job):
+def _job_experience_codes(job, platform=None):
     """从列表标签提取经验码；"在校/应届"按在校生+应届生处理。"""
-    codes = set()
-    for part in _job_filter_tag_text(job).split("|"):
-        token = part.strip()
-        if token in boss.EXPERIENCE_MAP:
-            codes.add(boss.EXPERIENCE_MAP[token])
-        elif token in _COMBINED_EXPERIENCE_CODES:
-            codes.update(_COMBINED_EXPERIENCE_CODES[token])
-    return codes
+    return resolve_platform_ai_adapter(platform, job).job_experience_codes(job)
 
 
 
 
-def _job_degree_codes(job):
+def _job_degree_codes(job, platform=None):
     """从列表标签提取学历码。"""
-    codes = set()
-    for part in _job_filter_tag_text(job).split("|"):
-        token = part.strip()
-        if token in boss.DEGREE_MAP:
-            codes.add(boss.DEGREE_MAP[token])
-    return codes
+    return resolve_platform_ai_adapter(platform, job).job_degree_codes(job)
 
 
 
 
-def _job_scale_codes(job):
-    code = boss.SCALE_MAP.get((job.get("company_scale") or "").strip())
-    return {code} if code else set()
+def _job_scale_codes(job, platform=None):
+    return resolve_platform_ai_adapter(platform, job).job_scale_codes(job)
 
 
 
 
-def _job_stage_codes(job):
-    code = boss.STAGE_MAP.get((job.get("company_stage") or "").strip())
-    return {code} if code else set()
+def _job_stage_codes(job, platform=None):
+    return resolve_platform_ai_adapter(platform, job).job_stage_codes(job)
 
 
 
 
-def _job_industry_codes(job):
-    industry = (job.get("company_industry") or "").strip()
-    if industry in boss.INDUSTRY_MAP:
-        return {boss.INDUSTRY_MAP[industry]}
-    for name, code in boss.INDUSTRY_MAP.items():
-        if name and name in industry:
-            return {code}
-    return set()
+def _job_industry_codes(job, platform=None):
+    return resolve_platform_ai_adapter(platform, job).job_industry_codes(job)
+
+
+def _job_company_nature_codes(job, platform=None):
+    return resolve_platform_ai_adapter(platform, job).job_company_nature_codes(job)
 
 
 
@@ -224,18 +235,9 @@ _FILTER_CODE_READERS = {
 
 
 
-def _job_value_label(job, field):
+def _job_value_label(job, field, platform=None):
     """取岗位在该筛选字段上的可读值，用于剔除理由。"""
-    if field in ("experience", "degree"):
-        mapping = boss.EXPERIENCE_MAP if field == "experience" else boss.DEGREE_MAP
-        codes = _job_experience_codes(job) if field == "experience" else _job_degree_codes(job)
-        parts = []
-        for token in (part.strip() for part in _job_filter_tag_text(job).split("|")):
-            is_combined_exp = field == "experience" and token in _COMBINED_EXPERIENCE_CODES
-            if is_combined_exp or mapping.get(token) in codes:
-                parts.append(token)
-        return "、".join(dict.fromkeys(parts))
-    return str(job.get(f"company_{field}") or "").strip()
+    return resolve_platform_ai_adapter(platform, job).job_value_label(job, field)
 
 
 
@@ -263,25 +265,35 @@ def _criteria_codes(values, mapping):
 
 
 
-def _job_criteria_hard_mismatch(job, criteria):
+def _job_criteria_hard_mismatch(job, criteria, platform=None):
     """已选筛选字段与岗位明确值冲突时返回 (field, reason)，未知/未选字段不误杀。"""
     if not isinstance(criteria, dict):
         return None, ""
-    for field, reader in _FILTER_CODE_READERS.items():
-        selected = _criteria_codes(criteria.get(field), _FILTER_CODE_MAPS[field])
-        if not selected or "0" in selected:
+    adapter = resolve_platform_ai_adapter(platform, job)
+    platform = adapter.key
+    for field in adapter.filter_fields:
+        selected = adapter.criteria_codes(criteria.get(field), field)
+        if not selected:
             continue
-        job_codes = reader(job)
+        selected = {
+            code for code in selected
+            if not _is_unrestricted_code(platform, field, code)
+        }
+        if not selected:
+            continue
+        job_codes = adapter.job_codes(job, field)
         if job_codes and not (job_codes & selected):
-            return field, f"{_FILTER_FIELD_LABELS[field]}{_job_value_label(job, field)}不在筛选范围"
-    salary_codes = _criteria_codes(criteria.get("salary"), boss.SALARY_MAP)
-    if salary_codes and _salary_hard_mismatch(job.get("salary"), salary_codes):
+            return field, f"{_FILTER_FIELD_LABELS[field]}{_job_value_label(job, field, platform)}不在筛选范围"
+    salary_codes = adapter.criteria_codes(criteria.get("salary"), "salary")
+    if salary_codes and _salary_hard_mismatch(
+        job.get("salary"), salary_codes, platform
+    ):
         return "salary", f"薪资{job.get('salary', '')}不在筛选范围"
     return None, ""
 
 
 
-def job_hard_mismatch(job, criteria, *, include_recruiter=False):
+def job_hard_mismatch(job, criteria, *, include_recruiter=False, platform=None):
     """组合硬规则入口：六类码值冲突 +（仅精筛）第 7 类招聘者活跃。
 
     第 7 类事实读 ``job["extra"]["recruiter_activity"]``（028 详情抓取产出）。
@@ -289,7 +301,9 @@ def job_hard_mismatch(job, criteria, *, include_recruiter=False):
     （028 FR-008）。返回 (field, reason)；field="recruiter_activity" 表示
     第 7 类命中，reason 由判定域模板生成（「负责人上次活跃X，超过要求的Y」）。
     """
-    field, reason = _job_criteria_hard_mismatch(job, criteria)
+    field, reason = _job_criteria_hard_mismatch(
+        job, criteria, platform=platform
+    )
     if field:
         return field, reason
     if not include_recruiter or not isinstance(criteria, dict):

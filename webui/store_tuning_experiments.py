@@ -97,7 +97,7 @@ class StoreTuningExperimentsMixin:
         # T606: 保留 controller 冻结的 runtime 字段（preview_scope 不返回它们）
         for runtime_field in (
             "browser_account", "cdp_port", "profile_key",
-            "filter_schema_version", "task_input_digest",
+            "filter_schema_version", "task_input_digest", "run_id",
         ):
             if runtime_field in source_scope:
                 normalized_source[runtime_field] = source_scope[runtime_field]
@@ -158,6 +158,7 @@ class StoreTuningExperimentsMixin:
                 "profile_key": normalized_source.get("profile_key"),
                 "filter_schema_version": normalized_source.get("filter_schema_version"),
                 "task_input_digest": normalized_source.get("task_input_digest"),
+                "run_id": normalized_source.get("run_id"),
             }
             artifact_bytes = json.dumps(
                 artifact_manifest, ensure_ascii=False, sort_keys=True,
@@ -426,6 +427,7 @@ class StoreTuningExperimentsMixin:
                         "filter_schema_version"
                     ),
                     "task_input_digest": experiment_scope.get("task_input_digest"),
+                    "run_id": experiment_scope.get("run_id"),
                 }
                 if artifact_manifest != expected_manifest:
                     raise ValueError("workload artifact manifest 身份或内容不匹配")

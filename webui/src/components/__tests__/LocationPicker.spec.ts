@@ -24,6 +24,16 @@ const BOSS_CATALOG = {
   ],
 };
 
+const ZHILIAN_CATALOG = {
+  ok: true,
+  platform: "zhilian",
+  city: "北京",
+  city_code: "530",
+  districts: [
+    { code: "2006", name: "朝阳区", children: [] },
+  ],
+};
+
 function fetchMockFor(urlPart: string, payload: unknown) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -75,7 +85,7 @@ describe("LocationPicker", () => {
     expect(wrapper.emitted("update:modelValue")!.at(-1)![0]).toEqual([]);
   });
 
-  it("shows business level only for BOSS", async () => {
+  it("renders the shared business-level block when catalog data exists", async () => {
     vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", BOSS_CATALOG));
     const wrapper = await mountPicker("boss");
     await wrapper.get('[data-testid="location-district-310115"]').trigger("click");
@@ -87,6 +97,16 @@ describe("LocationPicker", () => {
     const emitted = wrapper.emitted("update:modelValue")!.at(-1)![0] as LocationCondition[];
     expect(emitted[0].business_name).toBe("北蔡");
     expect(emitted[0].business_code).toBe("154");
+  });
+
+  it("uses the same unavailable state when a platform has no business-level data", async () => {
+    vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", ZHILIAN_CATALOG));
+    const wrapper = await mountPicker("zhilian");
+    await wrapper.get('[data-testid="location-district-2006"]').trigger("click");
+    const selected = wrapper.emitted("update:modelValue")!.at(-1)![0] as LocationCondition[];
+    await wrapper.setProps({ modelValue: selected });
+    expect(wrapper.get('[data-testid="location-business-empty-2006"]').text()).toContain("暂无商圈/镇数据");
+    expect(wrapper.find('[data-testid^="location-business-2006-"]').exists()).toBe(false);
   });
 
   it("shows city-level fallback when no district data exists", async () => {

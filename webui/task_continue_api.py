@@ -17,17 +17,35 @@ from webui.task_status import (
 )
 from webui.resume_identity import (
     append_account_switch_log_line,
-    apply_continue_account_switch,
-    decide_auto_account_switch,
+    activate_frozen_identity_candidate,
+    commit_continue_identity,
+    invalidate_login_cache_for_resume,
+    prepare_continue_identity,
 )
 from webui.store import DiscoveryStoreConflictError
-from webui.task_pause_support import cancel_task_cleanup, pause_with_mode
+from webui.error_registry import resolve_code
+from webui.pipeline_exec_status import user_visible_failure_reason
+from webui.task_pause_support import (
+    STOP_MODE_CANCEL,
+    STOP_MODE_FINISH,
+    ScrapeCheckpointReadError,
+    cancel_task_cleanup,
+    pause_with_mode,
+    request_stop,
+    continue_task_kind,
+    scrape_checkpoint,
+)
 from webui.task_runners import _iso_epoch_ms
+from webui.logging_setup import get_logger
+from webui.task_event_audit import append_task_event_best_effort
+
+_logger = get_logger(__name__)
+
 def register_task_continue_routes(app, ctx):
     def _build_partial_pipeline_result(
             source_jobs, verdicts, pending_rows, jd_map, profile_summary,
             source_dropped=None, total_scraped=None, platform="",
-            profile_facts=None):
+            profile_facts=None, unfiltered=False):
         """Build a displayable result snapshot from persisted partial work."""
         pending_reasons = {}
         pending_codes = {}
@@ -119,7 +137,7 @@ def register_task_continue_routes(app, ctx):
                 total_scraped if total_scraped is not None
                 else len(source_jobs or []) + len(source_dropped or [])
             ),
-            "total_kept": len(jobs),
+            "total_kept": 0 if unfiltered else len(jobs),
             "total_matched": sum(1 for j in jobs if j.get("verdict") == "match"),
             "total_dropped": len(dropped),
             "profile_summary": profile_summary or "",
@@ -146,27 +164,35 @@ def register_task_continue_routes(app, ctx):
                 "status": _public_task_status(run["status"], run.get("interruption_kind")),
                 "message": "只有 paused 状态的任务才能继续",
             }), 409
-        _continue_body = request.get_json(silent=True) or {}
-        target_account = str(_continue_body.get("target_account") or "").strip()
-        auto_switch: tuple[bool, str, str] | None = None
-        if not target_account:
-            active_account = str(
-                (ctx.load_legacy_advanced_settings() or {}).get("browser_account") or "a"
+        # Scrape continuation must validate the same strict checkpoint before
+        # touching browser identity/cache state.  A corrupt payload is not an
+        # empty checkpoint: finish the run as failed and leave all activation
+        # and identity persistence side effects untouched.
+        continue_kind = continue_task_kind(ctx, run_id, run)
+        if continue_kind == "scrape":
+            with ctx.lock:
+                current_task = ctx.tasks.get(run_id)
+                current_result = (current_task or {}).get("result") or {}
+            completed_combos = (
+                current_result.get("completed_combos")
+                if isinstance(current_result, dict) else None
             )
-            auto_switch = decide_auto_account_switch(
-                run, current_active_account=active_account)
-            if auto_switch[0]:
-                target_account = auto_switch[2]
-        if target_account:
-            applied = apply_continue_account_switch(
-                ctx.store, run, run_id=run_id, target_account=target_account,
-                auto_switch=auto_switch,
-                accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
-                check_resume_block=ctx.check_resume_block)
-            if applied["status"] != "ok":
-                return jsonify(applied["body"]), applied["http_status"]
-            run = applied["run"]
-        ctx.activate_run_browser(run)
+            try:
+                scrape_checkpoint(
+                    ctx, run_id, completed_combos=completed_combos,
+                )
+            except ScrapeCheckpointReadError as exc:
+                return jsonify({
+                    "ok": False,
+                    "error": exc.error_code,
+                    "error_code": exc.error_code,
+                    "error_reason": exc.public_reason,
+                    "message": exc.public_reason,
+                    "status": "failed",
+                }), 409
+        # Reject stale/repeated requests before binding or persisting a new
+        # identity.  These checks are intentionally side-effect free so a
+        # failed retry keeps the durable run paused and unmodified.
         with ctx.lock:
             existing = ctx.tasks.get(run_id)
             if existing is not None and existing.get("status") == "running":
@@ -184,76 +210,57 @@ def register_task_continue_routes(app, ctx):
                 "run_version": run_version,
                 "current_version": ctx.backend_version,
             }), 409
-        from webui.resume_identity import (
-            ensure_frozen_browser_account,
-            invalidate_login_cache_for_resume,
-            persist_frozen_identity,
-            resolve_frozen_identity,
+        _continue_body = request.get_json(silent=True) or {}
+        target_account = str(_continue_body.get("target_account") or "").strip()
+        plan = prepare_continue_identity(
+            ctx.store,
+            run,
+            target_account=target_account,
+            current_account=ctx.load_legacy_advanced_settings,
+            fallback_account=lambda: ctx.account_for_run(run),
+            accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
         )
-        identity = resolve_frozen_identity(ctx.store, run)
-        if not str((run.get("execution_params") or {}).get("browser_account") or ""):
-            effective_account = ensure_frozen_browser_account(
-                ctx.store, run_id, run,
-                platform=str(identity.get("platform") or ""),
-                fallback_account=ctx.account_for_run(run),
-                accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
-                role="R2")
-            if effective_account:
-                identity["browser_account"] = effective_account
-        missing = [
-            key for key in ("platform", "browser_account", "cdp_port", "profile_key")
-            if identity.get(key) in (None, "")
-        ]
-        if not identity.get("platform") or (
-            identity["platform"] == "zhilian" and missing
-        ):
-            return jsonify({
-                "ok": False, "error": "missing_frozen_identity",
-                "message": "继续任务缺少冻结的账号或浏览器身份，无法安全恢复", "status": "paused",
-                "missing_fields": missing,
-            }), 409
+        if plan["status"] != "ok":
+            return jsonify(plan["body"]), plan["http_status"]
+        identity = plan["identity"]
+        auto_switch = plan.get("auto_switch")
         invalidate_login_cache_for_resume(
             identity["browser_account"], identity["platform"])
-        persist_frozen_identity(ctx.store, run_id, identity)
-        run["platform"] = identity["platform"]
-        run["execution_params"] = dict(run.get("execution_params") or {})
-        run["execution_params"].update(
-            {k: v for k, v in identity.items() if v not in (None, "")})
-        stage = str(run.get("current_stage") or "")
-        refreshed_config = None
-        def _refresh_run_config():
-            nonlocal refreshed_config
-            refreshed_config = _refresh_paused_run_execution_config(run, ctx.store)
-            if refreshed_config is not None:
-                run["execution_params"]["execution_config"] = refreshed_config.to_dict()
-        if stage.startswith("recrawl_"):
-            passed, code, reason = ctx.check_resume_block(run)
-            if not passed:
+        passed, code, reason = ctx.check_resume_block(
+            plan["run"], persist=False, probe_only=True,
+        )
+        if not passed:
+            default_probe_deferred = (
+                code == "source_cdp_unavailable"
+                and not callable(ctx.app.config.get("RESUME_BLOCK_CHECKER"))
+            )
+            if not default_probe_deferred:
                 return jsonify({
                     "ok": False, "error": "block_not_resolved",
                     "error_code": code, "error_reason": reason,
                     "status": "paused",
                 }), 409
-            _refresh_run_config()
-            return ctx.continue_recrawl(
-                run_id, _block_checked=True,
-                account_switch_note=(
-                    (auto_switch[1], auto_switch[2])
-                    if auto_switch is not None and auto_switch[0] else None))
-        if stage == "scrape":
-            passed, code, reason = ctx.check_resume_block(run)
-            if not passed:
-                return jsonify({
-                    "ok": False, "error": "block_not_resolved",
-                    "error_code": code, "error_reason": reason,
-                    "status": "paused",
-                }), 409
-            _refresh_run_config()
-            return ctx.continue_execute_search(
-                run_id, _block_checked=True,
-                account_switch_note=(
-                    (auto_switch[1], auto_switch[2])
-                    if auto_switch is not None and auto_switch[0] else None))
+        activation = activate_frozen_identity_candidate(
+            ctx.activate_run_browser, run, identity)
+        if not activation["ok"]:
+            error_code = resolve_code(
+                activation.get("error_code") or activation.get("error"),
+                default="source_cdp_unavailable",
+            )
+            error_reason = user_visible_failure_reason(
+                error_code, "", str(identity.get("platform") or ""),
+            )
+            return jsonify({
+                "ok": False,
+                "error": error_code,
+                "error_code": error_code,
+                "error_reason": error_reason,
+                "message": error_reason,
+                "status": activation["status"],
+            }), 409
+        run = activation["run"]
+        # The candidate is already bound; this check is deliberately pure and
+        # must run before any identity commit or pipeline claim.
         passed, code, reason = ctx.check_resume_block(run)
         if not passed:
             return jsonify({
@@ -261,6 +268,47 @@ def register_task_continue_routes(app, ctx):
                 "error_code": code, "error_reason": reason,
                 "status": "paused",
             }), 409
+        try:
+            commit_continue_identity(ctx.store, run_id, identity, auto_switch)
+        except ctx.operational_errors as exc:
+            return jsonify({
+                "ok": False,
+                "error": "resume_identity_persist_failed",
+                "message": "继续任务身份未能保存，任务保持暂停，请重试",
+                "status": "paused",
+                "detail": type(exc).__name__,
+            }), 503
+        except (KeyError, ValueError) as exc:
+            return jsonify({
+                "ok": False,
+                "error": "resume_identity_persist_failed",
+                "message": "继续任务身份未能保存，任务保持暂停，请重试",
+                "status": "paused",
+                "detail": type(exc).__name__,
+            }), 503
+        refreshed_config = None
+        def _refresh_run_config():
+            nonlocal refreshed_config
+            refreshed_config = _refresh_paused_run_execution_config(run, ctx.store)
+            if refreshed_config is not None:
+                run["execution_params"]["execution_config"] = refreshed_config.to_dict()
+        if continue_kind == "recrawl":
+            _refresh_run_config()
+            return ctx.continue_recrawl(
+                run_id, _block_checked=True,
+                account_switch_note=(
+                    (auto_switch[1], auto_switch[2])
+                    if auto_switch is not None and auto_switch[0] else None))
+        if continue_kind == "scrape":
+            # Scrape resumes the immutable execution snapshot captured by
+            # this run.  Unlike AI/recrawl, changing current advanced
+            # settings must not alter the search pacing or frozen scope of a
+            # partially completed platform crawl.
+            return ctx.continue_execute_search(
+                run_id, _block_checked=True,
+                account_switch_note=(
+                    (auto_switch[1], auto_switch[2])
+                    if auto_switch is not None and auto_switch[0] else None))
         params = run.get("execution_params") or {}
         scrape_task_id = str(params.get("scrape_task_id") or "")
         profile_summary = str(params.get("profile_summary") or "")
@@ -418,10 +466,11 @@ def register_task_continue_routes(app, ctx):
             }:
                 stop_event = task.get("stop_event")
                 if stop_event is not None:
-                    stop_event.set()
+                    request_stop(task, stop_event, STOP_MODE_CANCEL)
         run = ctx.store.get_screening_run(run_id)
         if run is None and task is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
+        cleanup_run = dict(run or task or {})
         if run is not None and run.get("status") == "interrupted" and run.get("error_code") == "user_finished":
             return jsonify({
                 "ok": False, "error": "already_finished",
@@ -438,7 +487,10 @@ def register_task_continue_routes(app, ctx):
                         error_reason="用户已取消",
                     )
                     ctx.store.save_interruption_kind(run_id, "user_cancelled")
-                    ctx.store.append_task_event(run_id, "cancel", {"by": "user"})
+                    append_task_event_best_effort(
+                        ctx.store, run_id, "cancel", {"by": "user"},
+                        logger=_logger,
+                    )
             except ValueError as exc:
                 latest = ctx.store.get_screening_run(run_id)
                 if latest is None or latest.get("status") not in (
@@ -478,17 +530,32 @@ def register_task_continue_routes(app, ctx):
         ctx.clear_auto_screen(run_id)
         if _parent_scrape and _parent_scrape != run_id:
             ctx.clear_auto_screen(_parent_scrape)
-        if task is not None:
-            try:
-                from webui.pipeline_exec import close_debug_chrome
-                if run is not None:
-                    ctx.activate_run_browser(run)
-                close_debug_chrome()
-            except (OSError, RuntimeError):
-                pass  # best-effort 关闭浏览器；取消状态已经可靠提交。
+        cleanup = None
+        if run is not None or task is not None:
+            from webui import pipeline_exec as _facade
+            from webui.frozen_browser_identity import close_frozen_run_browser
+            cleanup = close_frozen_run_browser(
+                ctx.store, cleanup_run,
+                accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
+                activate=_facade.set_active_cdp_data_dir,
+                close=_facade.close_debug_chrome,
+            )
+            if not cleanup.ok:
+                append_task_event_best_effort(
+                    ctx.store, run_id, "browser_cleanup_failed",
+                    cleanup.as_dict(), logger=_logger,
+                    context="browser cleanup audit event write failed",
+                )
+                with ctx.lock:
+                    current = ctx.tasks.get(run_id)
+                    if current is not None:
+                        current["error"] = "用户已取消，但浏览器清理失败"
         cancel_task_cleanup(ctx, run_id)
+        cleanup_payload = cleanup.as_dict() if cleanup is not None else None
+        cleanup_failed = cleanup is not None and not cleanup.ok
         return jsonify({
-            "ok": True,
+            "ok": not cleanup_failed,
+            **({"error": "browser_cleanup_failed"} if cleanup_failed else {}),
             "run_id": run_id,
             "platform": (run or {}).get("platform"),
             "status": (
@@ -496,6 +563,7 @@ def register_task_continue_routes(app, ctx):
             ),
             "processed_count": int((run or {}).get("processed_count") or 0),
             "message": "任务已取消，已有结果保留",
+            "cleanup": cleanup_payload,
         })
     @app.route("/api/task/finish/<run_id>", methods=["POST"])
     def api_task_finish(run_id: str):
@@ -563,7 +631,7 @@ def register_task_continue_routes(app, ctx):
                 stop_event = task.get("stop_event") if task is not None else None
                 flush_lock = task.get("page_flush_lock") if task is not None else None
             if stop_event is not None:
-                stop_event.set()
+                request_stop(task, stop_event, STOP_MODE_FINISH)
             if flush_lock is not None:
                 stable_since = time.monotonic()
                 last_seq = None
@@ -642,14 +710,10 @@ def register_task_continue_routes(app, ctx):
         with ctx.lock:
             task = ctx.tasks.get(run_id)
             if task is not None and task.get("stop_event") is not None:
-                task["stop_event"].set()
+                request_stop(task, task["stop_event"], STOP_MODE_FINISH)
             ctx.resume_claims.discard(run_id)
-        try:
-            from webui.pipeline_exec import close_debug_chrome
-            ctx.activate_run_browser(run)
-            close_debug_chrome()
-        except (OSError, RuntimeError):
-            pass
+        from webui import pipeline_exec as _facade
+        from webui.frozen_browser_identity import close_frozen_run_browser
         result = _build_partial_pipeline_result(
             source_jobs, verdicts, pending_rows, jd_map,
             profile_summary,
@@ -657,6 +721,7 @@ def register_task_continue_routes(app, ctx):
             total_scraped=source_total_scraped,
             platform=platform,
             profile_facts=profile_facts,
+            unfiltered=str(run.get("current_stage") or "") == "scrape",
         )
         from webui.screen_flow import build_round_script_params
         from webui.result_rounds import save_finished_round
@@ -698,24 +763,36 @@ def register_task_continue_routes(app, ctx):
         if scrape_task_id and scrape_task_id != run_id:
             ctx.clear_auto_screen(scrape_task_id)
         ctx.prune_history_best_effort()
-        ctx.store.append_task_event(run_id, "finish", {
-            "snapshot_run_id": snapshot_run_id,
-            "stage": run.get("current_stage") or "", "jobs": len(result["jobs"]),
-            "dropped": len(result["dropped"]),
-        })
+        append_task_event_best_effort(
+            ctx.store, run_id, "finish", {
+                "snapshot_run_id": snapshot_run_id,
+                "stage": run.get("current_stage") or "", "jobs": len(result["jobs"]),
+                "dropped": len(result["dropped"]),
+            }, logger=_logger,
+        )
         with ctx.lock:
             current = ctx.tasks.get(run_id)
             if current is not None:
-                current["status"] = "cancelled"
+                current["status"] = "completed_with_pending"
                 current["error"] = "用户提前结束，已保存部分结果"
                 current["result"] = result
                 current["finished_at"] = int(time.time() * 1000)
-        try:
-            from webui.pipeline_exec import close_debug_chrome
-            ctx.activate_run_browser(run)
-            close_debug_chrome()
-        except (OSError, RuntimeError):
-            pass
+        cleanup = close_frozen_run_browser(
+            ctx.store, run,
+            accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
+            activate=_facade.set_active_cdp_data_dir,
+            close=_facade.close_debug_chrome,
+        )
+        if not cleanup.ok:
+            append_task_event_best_effort(
+                ctx.store, run_id, "browser_cleanup_failed",
+                cleanup.as_dict(), logger=_logger,
+                context="browser cleanup audit event write failed",
+            )
+            with ctx.lock:
+                current = ctx.tasks.get(run_id)
+                if current is not None:
+                    current["error"] = "结果已保存，但浏览器清理失败"
         return jsonify({
             "ok": True, "run_id": run_id, "snapshot_run_id": snapshot_run_id,
             "platform": platform,
@@ -723,4 +800,7 @@ def register_task_continue_routes(app, ctx):
             "integrity": whitebox_integrity,
             "scrape_task_id": parent_scrape_task_id,
             "message": "任务已结束，已完成结果已保存",
+            "cleanup": cleanup.as_dict(),
+            **({"cleanup_error": "browser_cleanup_failed"}
+               if not cleanup.ok else {}),
         })

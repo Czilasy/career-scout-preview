@@ -17,8 +17,14 @@ from webui.constants import (
     _MSG_TASK_NOT_FOUND,
     _MSG_USER_STOPPED_SCREEN,
 )
-from webui.resume_identity import ensure_frozen_browser_account
+from webui.resume_identity import (
+    activate_frozen_identity_candidate,
+    ensure_frozen_browser_account,
+    persist_frozen_identity,
+    resolve_child_frozen_identity,
+)
 from webui.task_runners import _iso_epoch_ms
+from webui.task_pause_support import STOP_MODE_CANCEL, request_stop
 
 from webui.logging_setup import get_logger
 
@@ -45,18 +51,27 @@ def register_ai_screen_routes(app, ctx):
                 return jsonify({"ok": False, "error": f"任务已结束，无法取消（当前状态：{task['status']}）"}), 400
             stop_event = task.get("stop_event")
             if stop_event is not None:
-                stop_event.set()
+                request_stop(task, stop_event, STOP_MODE_CANCEL)
             # 立刻标记 cancelled，让前端轮询马上看到状态变化
             task["status"] = "cancelled"
             task["error"] = _MSG_USER_STOPPED_SCREEN
             task["logs"].append("用户取消任务")
             cancel_platform = task.get("platform")
-        # 关浏览器放到锁外（仅抓 JD 阶段有意义），best-effort，失败不阻塞取消。
-        try:
-            from webui.pipeline_exec import close_debug_chrome
-            close_debug_chrome()
-        except Exception:
-            _logger.warning("调试 Chrome 关闭失败（不影响本次响应）", exc_info=True)
+        # 关浏览器放到锁外（仅抓 JD 阶段有意义），但必须按任务冻结
+        # 身份绑定；智联缺身份时不能落到 BOSS 默认端口。
+        from webui import pipeline_exec as _facade
+        from webui.frozen_browser_identity import cleanup_frozen_task_browser
+        cleanup = cleanup_frozen_task_browser(
+            ctx.store, task_id, task,
+            accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
+            activate=_facade.set_active_cdp_data_dir,
+            close=_facade.close_debug_chrome,
+        )
+        if not cleanup.ok:
+            with ctx.lock:
+                current = ctx.tasks.get(task_id)
+                if current is not None:
+                    current["error"] = "用户已取消，但浏览器清理失败"
 
         # T412 契约 http-api.md L223-229：DB run 存在时以 DB platform 为权威；
         # 仅 DB 创建前内存窗口用注册 task 的不可变平台快照。
@@ -67,8 +82,12 @@ def register_ai_screen_routes(app, ctx):
             except ctx.operational_errors:
                 pass
         return jsonify({
-            "ok": True, "run_id": task_id, "task_id": task_id,
+            "ok": cleanup.ok,
+            **({"error": "browser_cleanup_failed"}
+               if not cleanup.ok else {}),
+            "run_id": task_id, "task_id": task_id,
             "platform": cancel_platform, "status": "cancelled",
+            "cleanup": cleanup.as_dict(),
         })
 
     @app.route("/api/ai-screen", methods=["POST"])
@@ -115,15 +134,31 @@ def register_ai_screen_routes(app, ctx):
         ):
             return jsonify({"ok": False, "error": "抓取任务尚未成功完成"}), 409
 
-        # T406: 从父搜索 run 读取平台身份
-        try:
-            parent_identity = ctx.store.get_run_checkpoint_identity(scrape_task_id)
-        except ctx.operational_errors:
-            parent_identity = None
-        if parent_identity is None:
-            parent_platform = str(source_snapshot.get("platform") or "boss")
-        else:
-            parent_platform = parent_identity.get("platform") or "boss"
+        # T406/T417: 从父抓取 run 的冻结身份组装完整子任务登录空间。
+        parent_identity = resolve_child_frozen_identity(
+            ctx.store,
+            scrape_task_id,
+            fallback_account=ctx.account_for_run,
+            accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
+            operational_errors=ctx.operational_errors,
+            source_platform=(source_snapshot.get("platform") or request_platform),
+        )
+        parent_platform = str(
+            parent_identity.get("platform")
+            or source_snapshot.get("platform")
+            or "boss"
+        )
+        parent_identity["platform"] = parent_platform
+        missing_identity = [
+            key for key in ("platform", "browser_account", "cdp_port", "profile_key")
+            if parent_identity.get(key) in (None, "")
+        ]
+        if missing_identity:
+            return jsonify({
+                "ok": False, "error": "missing_frozen_identity",
+                "message": "来源抓取任务缺少冻结的账号或浏览器身份，无法安全开始 AI 筛选",
+                "status": "paused", "missing_fields": missing_identity,
+            }), 409
         # 客户端显式 platform 与父平台不一致
         if request_platform and request_platform != parent_platform:
             return jsonify({
@@ -190,6 +225,42 @@ def register_ai_screen_routes(app, ctx):
             }), 503
         if prev is not None:
             resume_from_run_id = prev["id"]
+        candidate_base = dict(prev or {})
+        candidate_base.update({
+            "kind": "ai_screen",
+            "source_task_id": scrape_task_id,
+        })
+        activation = activate_frozen_identity_candidate(
+            ctx.activate_run_browser,
+            candidate_base,
+            parent_identity,
+        )
+        if not activation["ok"]:
+            return jsonify({
+                "ok": False,
+                "error": activation["error"],
+                "error_code": activation["error_code"],
+                "status": activation["status"],
+                "message": activation["message"],
+                "detail": activation["detail"],
+            }), 409
+        # A resumed paused run may predate frozen browser fields.  The
+        # candidate has already been activated successfully; persist the
+        # inherited identity before claiming the run so retries cannot lose
+        # the platform-specific login space.
+        if resume_from_run_id and prev is not None:
+            try:
+                persist_frozen_identity(
+                    ctx.store, resume_from_run_id, parent_identity)
+            except ctx.operational_errors as exc:
+                return jsonify({
+                    "ok": False,
+                    "error": "ai_screen_identity_persist_failed",
+                    "error_code": "source_cdp_unavailable",
+                    "status": "paused",
+                    "message": "筛选任务登录空间未能保存，任务保持暂停，请重试",
+                    "detail": type(exc).__name__,
+                }), 503
         if resume_from_run_id and prev is not None and prev["status"] == "paused":
             # paused run 就地转为 running，保持唯一任务身份和 canonical 状态。
             try:
@@ -235,19 +306,7 @@ def register_ai_screen_routes(app, ctx):
         account_source = prev if resume_from_run_id else None
         if resume_from_run_id:
             claimed_task["resumed_from"] = resume_from_run_id
-        # B073：BOSS AI 筛选任务（含 JD 详情抓取阶段）按 R2 角色解析账号；
-        # 新建时 account_source=None 走角色解析，续跑时 run 冻结值优先；
-        # 智联平台不受角色影响，保持当前账号。
-        if parent_platform == "boss":
-            from webui.pipeline_exec import account_for_role
-            claimed_task["browser_account"] = account_for_role(
-                "R2", app.config["BROWSER_ACCOUNTS_PATH"],
-                run=account_source,
-                fallback=ctx.account_for_run(account_source),
-            )
-        else:
-            claimed_task["browser_account"] = ctx.account_for_run(account_source)
-        claimed_task["platform"] = parent_platform
+        claimed_task.update(parent_identity)
         # 030：新建路径把创建时全局当前账号随任务透传给 runner 落库为快照
         # （runner 的 INSERT OR REPLACE 会覆盖 API 预建行，快照必须随之写入）
         claimed_task["active_account_at_freeze"] = ctx.account_for_run()
@@ -274,7 +333,6 @@ def register_ai_screen_routes(app, ctx):
                 fallback_account=ctx.account_for_run(prev),
                 accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
                 role="R2")
-        ctx.activate_run_browser(account_source)
         # T407: 创建 AI run 时保存平台身份和筛选快照
         if not resume_from_run_id:
             try:
@@ -290,6 +348,8 @@ def register_ai_screen_routes(app, ctx):
                         "profile_facts": profile_facts,
                         "scrape_task_id": scrape_task_id,
                         "browser_account": claimed_task.get("browser_account"),
+                        "cdp_port": claimed_task.get("cdp_port"),
+                        "profile_key": claimed_task.get("profile_key"),
                         "task_input_digest": ai_digest,
                         "cross_platform_dedupe": cross_platform_dedupe,
                     },

@@ -330,6 +330,16 @@ class BossCdpSourcePlatformTests(unittest.TestCase):
         sig = inspect.signature(BossCdpSource.__init__)
         self.assertIn("cdp_port", sig.parameters)
 
+    def test_constructor_preserves_frozen_profile_key(self):
+        """BOSS source 必须保留任务创建时冻结的登录空间 key。"""
+        source = BossCdpSource(
+            browser_account="a",
+            cdp_port=9222,
+            profile_key="boss:a",
+        )
+
+        self.assertEqual(source.profile_key, "boss:a")
+
 
 # ===========================================================================
 # spec003 tasks004 T026 — BossCdpSource in_process argv 翻译

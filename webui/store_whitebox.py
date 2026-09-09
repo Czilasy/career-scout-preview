@@ -69,6 +69,38 @@ def _safe_payload(value: Any, *, key: str = "") -> Any:
 class StoreWhiteboxMixin:
     """Data-access methods only; conclusion rules live in ``whitebox_rules``."""
 
+    def set_whitebox_lifecycle(self, run_id: str, lifecycle_status: str) -> dict[str, Any]:
+        """Move an active whitebox run without creating a terminal conclusion."""
+        lifecycle_status = str(lifecycle_status or "").strip().lower()
+        if lifecycle_status not in {"queued", "running", "paused", "terminal"}:
+            raise ValueError("invalid whitebox lifecycle status")
+        now = _now()
+        with self._connection() as conn:
+            if hasattr(self, "_assert_recovery_writes_allowed"):
+                self._assert_recovery_writes_allowed(conn)
+            row = conn.execute(
+                "SELECT * FROM whitebox_runs WHERE id = ?", (str(run_id),)
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            current = dict(row)
+            if (
+                str(current.get("lifecycle_status") or "") == "terminal"
+                or current.get("finalized_at")
+                or str(current.get("conclusion") or "").strip().lower()
+                in {"succeeded", "empty", "partial", "failed", "interrupted"}
+            ):
+                return current
+            conn.execute(
+                "UPDATE whitebox_runs SET lifecycle_status = ?, updated_at = ? "
+                "WHERE id = ?",
+                (lifecycle_status, now, str(run_id)),
+            )
+            updated = conn.execute(
+                "SELECT * FROM whitebox_runs WHERE id = ?", (str(run_id),)
+            ).fetchone()
+        return dict(updated)
+
     def create_whitebox_run(self, owner_kind: str, owner_id: str, plan: dict,
                             parent_owner_id: str | None = None) -> dict[str, Any]:
         owner_kind = str(owner_kind or "").strip()

@@ -64,6 +64,8 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/source_boss_cdp_detail.py` — BossCdpSource 的 detail mixin：批量详情、终端事件校验、in-process 翻译执行、产物读取（021 B1）
 - `webui/source_boss_detail_events.py` — BOSS 详情事件归类纯助手：非零退出时按事件文件真实 safe_code 逐岗位归类，区分账号级阻断与单条软失败（034 拆分，纯函数）
 - `webui/source_zhilian_cdp.py` — ZhilianCdpSource 主体与智联 signal 映射/输入校验助手（021 B1）
+- `webui/source_zhilian_runtime_adapter.py` — 智联新增 signal/批量降级/切号后预检适配；仅由 source_zhilian_cdp.py 单向调用
+- `webui/platform_input_adapter.py` — BOSS/智联计划输入 hash 适配；由 account_round_robin.py 与 source_zhilian_cdp.py 单向调用
 - `webui/source_zhilian_defaults.py` — 智联默认 CLI runner 与 failed_code → 用户可读原因映射（021 B1）
 - `webui/source_fake.py` — FakeJobSource 内存测试替身（021 B1）
 - `webui/store.py` — store 域门面：TaskStore = 核心（连接/迁移引导）+ 域 mixin 组装 + re-export（021 B2）
@@ -102,6 +104,7 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/ai_errors.py` — AI 错误分类与测量遥测事件（021 B7 T022）
 - `webui/ai_schannel.py` — Windows schannel curl POST 适配（021 B7 T022）
 - `webui/ai_client.py` — AI 传输层：URL 构建、JSON POST、密钥环、连通性（021 B7 T022）
+- `webui/ai_platform_adapter.py` — AI 平台字段与筛选 schema 归一化适配器；仅承载 BOSS/智联映射，供 `ai_filters.py`/`ai_screening.py` 单向调用，不持有流程状态机
 - `webui/ai_filters.py` — AI 筛选条件构建与确认不匹配判定助手（021 B7 T022）
 - `webui/ai_screening.py` — AI 粗筛 screen_jobs 与 JD 精筛 match_jds（021 B7 T022）
 - `webui/ai_resume.py` — AI 简历解析、统一字段校验与偏好更新（021 B7 T022）
@@ -109,7 +112,10 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/resume_identity.py` — 续跑身份域：冻结身份解析/持久化、账号快照、双门槛自动换号判定、换号留痕、角色感知兜底、父身份继承（030）；038 B091 in-flight 撞墙换号留痕由 account_round_robin 限流标记承担
 - `webui/pipeline_exec_settings.py` — 高级设置读写（021 B7 T023）
 - `webui/pipeline_exec_accounts.py` — 浏览器账号簿与 CDP 数据目录；Spec 038 B091 账号池配置 schema（pool 多选 + 配额 + 限流标记）+ 默认零配置 + 限流持久化 helper（021 B7 T023 / 038 B091 T003/T014）
-- `webui/account_round_robin.py` — Spec 038 B091 多账号轮询分摊调度域：纯调度（RotationQueue/plan_round_robin）、IO 编排（ListRobin/DetailRobin/clone_source/_switch_browser_account）、撞墙换号接力、engagement 规则保护既有替身、限流持久化 best-effort（038 B091 T001）+ 白箱 seam 接线（038 B091 V2）
+- `webui/frozen_browser_identity.py` — 冻结任务的平台注册登录空间与浏览器 profile 解析/绑定；由 app_support 与 pipeline_exec_search 单向调用，不承载 Chrome 生命周期或任务状态
+- `webui/task_event_audit.py` — 任务审计事件 best-effort 写入与安全异常留痕；不让审计故障覆盖主业务结果
+- `webui/account_round_robin.py` — Spec 038 B091 多账号轮询分摊调度域：纯调度（RotationQueue/plan_round_robin）、IO 编排（ListRobin/DetailRobin）、撞墙换号接力、engagement 规则保护既有替身、限流持久化 best-effort（038 B091 T001）+ 白箱 seam 接线（038 B091 V2）
+- `webui/account_round_robin_sources.py` — 轮询的账号 profile 切换与平台 source 克隆适配；由 account_round_robin.py 单向调用，不承载队列状态或生命周期
 - `webui/r2_rotation_session.py` — Spec 038 B091 V4 R2 任务级轮询会话：冻结账号池、连续配额位置、版本化断点导出/恢复与身份校验；由 runner 创建并向详情执行域下发
 - `webui/detail_attempts.py` — Spec 038 B091 V4 详情尝试事实：分配段、唯一尝试/产物身份、终态数量守恒、按账号唯一成功聚合；由详情执行域调用，不反向依赖 runner 或存储
 - `webui/account_round_robin_observability.py` — Spec 038 B091 V2 轮询白箱安全摘要适配器：账号池快照、分配段、正常/撞墙切换、失败不完整标记，复用 `task_logs`，不记录凭据或岗位正文

@@ -4,9 +4,25 @@ import json
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from unittest import mock
 
 from tests.healthy_pipeline.harness import _make_app, _authed_test_client, _wait_for_pipeline_task, _pause_run
+
+
+def _enable_zhilian_for_test():
+    """仅为启用态编排语义测试打开智联，不改变生产注册状态。"""
+    from webui.platforms import get_platform, register_platform
+
+    current = get_platform("zhilian")
+    schema = replace(current.filter_schema, enabled_for_new_tasks=True)
+    register_platform(replace(
+        current,
+        filter_schema=schema,
+        enabled_for_new_tasks=True,
+        availability_reason="",
+    ))
+    return current
 
 
 class Slice8RecrawlTests(unittest.TestCase):
@@ -837,6 +853,272 @@ class LoginRecheckTests(unittest.TestCase):
         self.assertNotIn("hard_stop", result)
         self.assertEqual(len(wakes), 1)
 
+    def test_source_combo_issue_reason_uses_registry_message(self):
+        """source combo issue 不把 safe_log 诊断作为用户主文案。"""
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        class SourceFailure:
+            platform = "boss"
+
+            def preflight(self):
+                return SourceOutcome.success()
+
+            def fetch_list(self, _plan_item, *, on_page_completed=None):
+                return SourceOutcome.failure(
+                    failed_code="source_unknown_error",
+                    safe_log="reason=raw source parser diagnostic",
+                )
+
+        issues = []
+        with mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ):
+            run_search(
+                {"keyword": "前端", "city": ["上海"]},
+                SourceFailure(), pages=1, sleeper=lambda _s: None,
+                on_issue=lambda combo, entry: issues.append((combo, dict(entry))),
+                close_chrome_on_success=False,
+            )
+
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(
+            issues[0][1]["reason"], ERROR_USER_MESSAGES["source_unknown_error"]
+        )
+        self.assertNotIn("raw source parser diagnostic", issues[0][1]["reason"])
+
+    def test_non_source_combo_issue_keeps_diagnostic(self):
+        """非 source 组合失败仍保留原始诊断。"""
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        class InternalFailure:
+            platform = "boss"
+
+            def preflight(self):
+                return SourceOutcome.success()
+
+            def fetch_list(self, _plan_item, *, on_page_completed=None):
+                return SourceOutcome.failure(
+                    failed_code="job_offline",
+                    safe_log="reason=internal persistence diagnostic",
+                )
+
+        issues = []
+        with mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ):
+            run_search(
+                {"keyword": "前端", "city": ["上海"]},
+                InternalFailure(), pages=1, sleeper=lambda _s: None,
+                on_issue=lambda combo, entry: issues.append((combo, dict(entry))),
+                close_chrome_on_success=False,
+            )
+
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(
+            issues[0][1]["reason"], "internal persistence diagnostic"
+        )
+
+
+class ScrapeWhiteboxHardStopTests(unittest.TestCase):
+    """抓取硬阻断必须在白箱完整性中保留 source 主错误。"""
+
+    class _Source:
+        platform = "boss"
+        cdp_port = 9222
+
+        def __init__(self, preflight, outcomes=()):
+            self._preflight = preflight
+            self._outcomes = list(outcomes)
+            self.preflight_calls = 0
+            self.fetch_calls = 0
+
+        def preflight(self):
+            self.preflight_calls += 1
+            return self._preflight
+
+        def fetch_list(self, _plan_item, *, on_page_completed=None):
+            self.fetch_calls += 1
+            if not self._outcomes:
+                raise AssertionError("unexpected fetch")
+            return self._outcomes[min(self.fetch_calls - 1, len(self._outcomes) - 1)]
+
+    def setUp(self):
+        self.app, self.temp = _make_app()
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_initial_chrome_failure_keeps_source_reason_in_integrity(self):
+        from webui import pipeline_exec
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.source import SourceOutcome
+
+        source = self._Source(SourceOutcome.success())
+        with mock.patch.object(
+            pipeline_exec,
+            "ensure_chrome_ready",
+            return_value=(False, "raw chrome probe diagnostic"),
+        ):
+            result = pipeline_exec.run_search(
+                {"keyword": "前端", "city": ["上海"]},
+                source,
+                pages=1,
+                sleeper=lambda _seconds: None,
+                task_id="whitebox-initial-chrome-failure",
+                task_event_store=self.store,
+                close_chrome_on_success=False,
+            )
+
+        self.assertEqual(result["integrity"]["primary_code"], "source_cdp_unavailable")
+        self.assertEqual(
+            result["integrity"]["primary_reason"],
+            ERROR_USER_MESSAGES["source_cdp_unavailable"],
+        )
+        self.assertEqual(source.preflight_calls, 0)
+        self.assertEqual(source.fetch_calls, 0)
+
+    def test_preflight_source_failure_keeps_source_reason_in_integrity(self):
+        from webui import pipeline_exec
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.source import SourceOutcome
+
+        source = self._Source(
+            SourceOutcome.failure(
+                failed_code="source_rate_limited",
+                safe_log="raw preflight diagnostic",
+            )
+        )
+        with mock.patch.object(
+            pipeline_exec, "ensure_chrome_ready", return_value=(True, "")
+        ):
+            result = pipeline_exec.run_search(
+                {"keyword": "前端", "city": ["上海"]},
+                source,
+                pages=1,
+                sleeper=lambda _seconds: None,
+                task_id="whitebox-preflight-source-failure",
+                task_event_store=self.store,
+                close_chrome_on_success=False,
+            )
+
+        self.assertEqual(result["integrity"]["primary_code"], "source_rate_limited")
+        self.assertEqual(
+            result["integrity"]["primary_reason"],
+            ERROR_USER_MESSAGES["source_rate_limited"],
+        )
+        self.assertEqual(source.preflight_calls, 1)
+        self.assertEqual(source.fetch_calls, 0)
+
+    def test_restart_failure_keeps_source_reason_in_integrity(self):
+        from webui import pipeline_exec
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.source import SourceOutcome
+
+        source = self._Source(
+            SourceOutcome.success(),
+            [SourceOutcome.failure(failed_code="source_cdp_unavailable")],
+        )
+        with mock.patch.object(
+            pipeline_exec,
+            "ensure_chrome_ready",
+            side_effect=[(True, ""), (False, "raw restart diagnostic")],
+        ):
+            result = pipeline_exec.run_search(
+                {"keyword": "前端", "city": ["上海"]},
+                source,
+                pages=1,
+                sleeper=lambda _seconds: None,
+                task_id="whitebox-restart-failure",
+                task_event_store=self.store,
+                close_chrome_on_success=False,
+            )
+
+        self.assertEqual(result["integrity"]["primary_code"], "source_cdp_unavailable")
+        self.assertEqual(
+            result["integrity"]["primary_reason"],
+            ERROR_USER_MESSAGES["source_cdp_unavailable"],
+        )
+        self.assertEqual(source.fetch_calls, 1)
+
+    def test_restart_still_lost_keeps_source_reason_in_integrity(self):
+        from webui import pipeline_exec
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.source import SourceOutcome
+
+        source = self._Source(
+            SourceOutcome.success(),
+            [
+                SourceOutcome.failure(failed_code="source_cdp_unavailable"),
+                SourceOutcome.failure(
+                    failed_code="source_cdp_unavailable",
+                    safe_log="raw second loss diagnostic",
+                ),
+            ],
+        )
+        with mock.patch.object(
+            pipeline_exec,
+            "ensure_chrome_ready",
+            side_effect=[(True, ""), (True, "")],
+        ):
+            result = pipeline_exec.run_search(
+                {"keyword": "前端", "city": ["上海"]},
+                source,
+                pages=1,
+                sleeper=lambda _seconds: None,
+                task_id="whitebox-restart-still-lost",
+                task_event_store=self.store,
+                close_chrome_on_success=False,
+            )
+
+        self.assertEqual(result["integrity"]["primary_code"], "source_cdp_unavailable")
+        self.assertEqual(
+            result["integrity"]["primary_reason"],
+            ERROR_USER_MESSAGES["source_cdp_unavailable"],
+        )
+        self.assertEqual(source.fetch_calls, 2)
+
+    def test_first_combo_source_hard_stop_keeps_source_reason_in_integrity(self):
+        from webui import pipeline_exec
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.source import SourceOutcome
+
+        source = self._Source(
+            SourceOutcome.success(),
+            [
+                SourceOutcome.failure(
+                    failed_code="source_verification_required",
+                    safe_log="raw source verification diagnostic",
+                ),
+            ],
+        )
+        with mock.patch.object(
+            pipeline_exec, "ensure_chrome_ready", return_value=(True, "")
+        ):
+            result = pipeline_exec.run_search(
+                {"keyword": "前端,后端", "city": ["上海"]},
+                source,
+                pages=1,
+                sleeper=lambda _seconds: None,
+                task_id="whitebox-first-combo-source-stop",
+                task_event_store=self.store,
+                close_chrome_on_success=False,
+            )
+
+        self.assertEqual(
+            result["integrity"]["primary_code"],
+            "source_verification_required",
+        )
+        self.assertEqual(
+            result["integrity"]["primary_reason"],
+            ERROR_USER_MESSAGES["source_verification_required"],
+        )
+        self.assertEqual(source.fetch_calls, 1)
+        self.assertEqual(result["completed_combos"], [])
+
 
 # ===========================================================================
 # SPEC011 T005 — 冻结配置摘要一致性 RED 测试
@@ -1051,6 +1333,48 @@ class FrozenConfigDigestTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_frozen_source_profile_binding_returns_structured_failure(self):
+        """平台冻结身份绑定失败必须由公共 helper 结构化返回。"""
+        from webui.frozen_browser_identity import bind_frozen_source_profile
+
+        source = mock.Mock(
+            platform="zhilian",
+            browser_account="a",
+            profile_key="zhilian:a",
+            cdp_port=9223,
+        )
+        config = mock.Mock(inter_combo_delay=1.0)
+        with mock.patch(
+            "webui.frozen_browser_identity.activate_frozen_browser_profile",
+            side_effect=RuntimeError("cdp setter failed"),
+        ):
+            result = bind_frozen_source_profile(
+                source, config, activate=mock.Mock(),
+            )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "source_cdp_unavailable")
+        self.assertIn("冻结登录空间不可用", result.error)
+        self.assertIsNone(result.profile)
+
+    def test_preflight_failure_classification_preserves_shared_contract(self):
+        """预检失败文案与硬阻断判定必须由公共状态 helper 统一产生。"""
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.pipeline_exec_status import classify_preflight_failure
+
+        systemic = classify_preflight_failure(
+            mock.Mock(failed_code="source_rate_limited"),
+        )
+        ordinary = classify_preflight_failure(
+            mock.Mock(failed_code="source_unknown_error"),
+        )
+
+        self.assertEqual(systemic["error"], ERROR_USER_MESSAGES["source_rate_limited"])
+        self.assertTrue(systemic["hard_stop"])
+        self.assertEqual(systemic["hard_stop_code"], "source_rate_limited")
+        self.assertEqual(ordinary["error"], ERROR_USER_MESSAGES["source_unknown_error"])
+        self.assertNotIn("hard_stop", ordinary)
+
     def test_run_search_accepts_execution_config_snapshot(self):
         """run_search 必须接受 execution_config 参数，而非运行时读 JSON。"""
         from webui.execution_config import ExecutionConfigSnapshot
@@ -1150,6 +1474,243 @@ class FrozenConfigDigestTests(unittest.TestCase):
                 self.assertEqual(captured_config["digest"], config.config_digest)
             # load_advanced_settings 不应被调用
             mock_load.assert_not_called()
+
+    def test_run_search_binds_each_frozen_platform_profile_before_cdp(self):
+        """冻结任务必须在 CDP 检查前绑定该平台的真实登录空间。"""
+        from webui.execution_config import ExecutionConfigSnapshot
+        from webui import pipeline_exec
+        from webui.pipeline_exec_accounts import resolve_browser_account
+        from webui.platforms import derive_zhilian_profile_dir
+
+        config = ExecutionConfigSnapshot.create({
+            "inter_combo_delay": 1.0,
+            "detail_batch_size": 1,
+            "detail_interval": 1.0,
+            "detail_reset_every": 1,
+            "detail_batch_cooldown": 1.0,
+            "screen_batch_size": 1,
+            "screen_concurrency": 1,
+            "match_batch_size": 1,
+            "match_concurrency": 1,
+        })
+        boss_profile = resolve_browser_account(
+            "a", self.app.config["BROWSER_ACCOUNTS_PATH"]
+        )
+
+        class FrozenSource:
+            def __init__(self, platform):
+                self.platform = platform
+                self.browser_account = "a"
+                self.profile_key = f"{platform}:a"
+                self.cdp_port = 9223 if platform == "zhilian" else 9222
+                self.preflight_calls = 0
+                self.fetch_calls = 0
+
+            def preflight(self):
+                self.preflight_calls += 1
+                raise AssertionError("profile binding failure must stop before preflight")
+
+            def fetch_list(self, *_args, **_kwargs):
+                self.fetch_calls += 1
+                raise AssertionError("profile binding failure must stop before fetch")
+
+        for platform in ("boss", "zhilian"):
+            with self.subTest(platform=platform):
+                source = FrozenSource(platform)
+                expected = (
+                    boss_profile
+                    if platform == "boss"
+                    else derive_zhilian_profile_dir(boss_profile)
+                )
+                with mock.patch.object(
+                    pipeline_exec, "set_active_cdp_data_dir"
+                ) as bind_profile, mock.patch.object(
+                    pipeline_exec, "ensure_chrome_ready", return_value=(False, "offline")
+                ), mock.patch.object(
+                    pipeline_exec, "load_advanced_settings"
+                ) as load_settings:
+                    result = pipeline_exec.run_search(
+                        {"keyword": "test", "city": ["北京"]},
+                        source,
+                        pages=1,
+                        sleeper=lambda _seconds: None,
+                        execution_config=config,
+                        close_chrome_on_success=False,
+                    )
+
+                bind_profile.assert_called_once_with(expected)
+                load_settings.assert_not_called()
+                self.assertEqual(source.preflight_calls, 0)
+                self.assertEqual(source.fetch_calls, 0)
+                self.assertFalse(result["ok"])
+
+    def test_run_search_rejects_missing_frozen_account_without_fallback(self):
+        """冻结身份缺账号时不能回退到默认账号或继续抓取。"""
+        from webui.execution_config import ExecutionConfigSnapshot
+        from webui import pipeline_exec
+
+        config = ExecutionConfigSnapshot.create({
+            "inter_combo_delay": 1.0,
+            "detail_batch_size": 1,
+            "detail_interval": 1.0,
+            "detail_reset_every": 1,
+            "detail_batch_cooldown": 1.0,
+            "screen_batch_size": 1,
+            "screen_concurrency": 1,
+            "match_batch_size": 1,
+            "match_concurrency": 1,
+        })
+
+        class MissingIdentitySource:
+            platform = "boss"
+            browser_account = ""
+            profile_key = ""
+            cdp_port = 9222
+            preflight_calls = 0
+            fetch_calls = 0
+
+            def preflight(self):
+                self.preflight_calls += 1
+                raise AssertionError("missing identity must stop before preflight")
+
+            def fetch_list(self, *_args, **_kwargs):
+                self.fetch_calls += 1
+                raise AssertionError("missing identity must stop before fetch")
+
+        source = MissingIdentitySource()
+        with mock.patch.object(
+            pipeline_exec, "set_active_cdp_data_dir"
+        ) as bind_profile, mock.patch.object(
+            pipeline_exec, "ensure_chrome_ready", return_value=(False, "offline")
+        ) as ensure_chrome, mock.patch.object(
+            pipeline_exec, "load_advanced_settings"
+        ) as load_settings:
+            result = pipeline_exec.run_search(
+                {"keyword": "test", "city": ["北京"]}, source,
+                pages=1, sleeper=lambda _seconds: None,
+                execution_config=config, close_chrome_on_success=False,
+            )
+
+        bind_profile.assert_not_called()
+        ensure_chrome.assert_not_called()
+        load_settings.assert_not_called()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["hard_stop_code"], "source_cdp_unavailable")
+        self.assertEqual(source.preflight_calls, 0)
+        self.assertEqual(source.fetch_calls, 0)
+
+    def test_run_search_rejects_mismatched_frozen_profile_key(self):
+        """冻结 profile_key 不属于该平台时，必须停止而不是借用另一空间。"""
+        from webui.execution_config import ExecutionConfigSnapshot
+        from webui import pipeline_exec
+
+        config = ExecutionConfigSnapshot.create({
+            "inter_combo_delay": 1.0,
+            "detail_batch_size": 1,
+            "detail_interval": 1.0,
+            "detail_reset_every": 1,
+            "detail_batch_cooldown": 1.0,
+            "screen_batch_size": 1,
+            "screen_concurrency": 1,
+            "match_batch_size": 1,
+            "match_concurrency": 1,
+        })
+
+        class MismatchedIdentitySource:
+            platform = "zhilian"
+            browser_account = "a"
+            profile_key = "boss:a"
+            cdp_port = 9223
+            preflight_calls = 0
+            fetch_calls = 0
+
+            def preflight(self):
+                self.preflight_calls += 1
+                raise AssertionError("mismatched identity must stop before preflight")
+
+            def fetch_list(self, *_args, **_kwargs):
+                self.fetch_calls += 1
+                raise AssertionError("mismatched identity must stop before fetch")
+
+        source = MismatchedIdentitySource()
+        with mock.patch.object(
+            pipeline_exec, "set_active_cdp_data_dir"
+        ) as bind_profile, mock.patch.object(
+            pipeline_exec, "ensure_chrome_ready", return_value=(False, "offline")
+        ) as ensure_chrome:
+            result = pipeline_exec.run_search(
+                {"keyword": "test", "city": ["北京"]}, source,
+                pages=1, sleeper=lambda _seconds: None,
+                execution_config=config, close_chrome_on_success=False,
+            )
+
+        bind_profile.assert_not_called()
+        ensure_chrome.assert_not_called()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["hard_stop_code"], "source_cdp_unavailable")
+        self.assertEqual(source.preflight_calls, 0)
+        self.assertEqual(source.fetch_calls, 0)
+
+    def test_run_search_stops_when_frozen_profile_binding_raises(self):
+        """绑定异常必须保留可追踪身份并停止，不能仅 debug 后继续。"""
+        from webui.execution_config import ExecutionConfigSnapshot
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui import pipeline_exec
+
+        config = ExecutionConfigSnapshot.create({
+            "inter_combo_delay": 1.0,
+            "detail_batch_size": 1,
+            "detail_interval": 1.0,
+            "detail_reset_every": 1,
+            "detail_batch_cooldown": 1.0,
+            "screen_batch_size": 1,
+            "screen_concurrency": 1,
+            "match_batch_size": 1,
+            "match_concurrency": 1,
+        })
+
+        class BoundIdentitySource:
+            platform = "zhilian"
+            browser_account = "a"
+            profile_key = "zhilian:a"
+            cdp_port = 9223
+            preflight_calls = 0
+            fetch_calls = 0
+
+            def preflight(self):
+                self.preflight_calls += 1
+                raise AssertionError("binding exception must stop before preflight")
+
+            def fetch_list(self, *_args, **_kwargs):
+                self.fetch_calls += 1
+                raise AssertionError("binding exception must stop before fetch")
+
+        source = BoundIdentitySource()
+        with mock.patch.object(
+            pipeline_exec, "set_active_cdp_data_dir",
+            side_effect=RuntimeError("cdp setter failed"),
+        ), mock.patch.object(
+            pipeline_exec, "ensure_chrome_ready", return_value=(False, "offline")
+        ) as ensure_chrome:
+            result = pipeline_exec.run_search(
+                {"keyword": "test", "city": ["北京"]}, source,
+                pages=1, sleeper=lambda _seconds: None,
+                execution_config=config, close_chrome_on_success=False,
+            )
+
+        ensure_chrome.assert_not_called()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["hard_stop_code"], "source_cdp_unavailable")
+        self.assertEqual(
+            result["integrity"]["primary_code"], "source_cdp_unavailable"
+        )
+        self.assertEqual(
+            result["integrity"]["primary_reason"],
+            ERROR_USER_MESSAGES["source_cdp_unavailable"],
+        )
+        self.assertIn("zhilian:a", result["error"])
+        self.assertEqual(source.preflight_calls, 0)
+        self.assertEqual(source.fetch_calls, 0)
 
     def test_pipeline_task_stores_config_digest(self):
         """真实启动从后端 scope/selection 冻结并存储两个摘要。"""
@@ -1276,6 +1837,7 @@ class B073TaskAccountRoleTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.temp = _make_app()
+        self._original_zhilian_registry = _enable_zhilian_for_test()
         self.client = _authed_test_client(self.app)
         token = self.client.get("/api/session").get_json()["token"]
         self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
@@ -1283,6 +1845,8 @@ class B073TaskAccountRoleTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+        from webui.platforms import register_platform
+        register_platform(self._original_zhilian_registry)
         from webui.pipeline_exec import reset_browser_accounts_path
         reset_browser_accounts_path()
 

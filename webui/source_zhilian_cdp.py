@@ -4,8 +4,6 @@ __INITIAL_STATE__ 详情抓取与批量熔断复用；signal 映射常量与输�
 助手同文件。默认 CLI runner 见 source_zhilian_defaults。
 """
 from __future__ import annotations
-import hashlib
-import json
 import random
 import time
 from collections.abc import Callable
@@ -19,6 +17,12 @@ from webui.source_zhilian_defaults import (
     _default_zhilian_preflight_runner,
     _zhilian_failed_reason,
 )
+from webui.source_zhilian_runtime_adapter import (
+    build_zhilian_detail_signal_map,
+    normalize_zhilian_detail_signal,
+    run_zhilian_preflight_after_profile_switch,
+)
+from webui.platform_input_adapter import compute_zhilian_input_hash
 from webui.logging_setup import get_logger
 _logger = get_logger(__name__)
 ZHILIAN_DEFAULT_CDP_PORT = 9223
@@ -68,6 +72,9 @@ _ZHILIAN_DETAIL_SIGNAL_MAP = {
     "blocked": "source_blocked",
     "unreachable": "source_unreachable",
 }
+_ZHILIAN_DETAIL_SIGNAL_MAP = build_zhilian_detail_signal_map(
+    _ZHILIAN_DETAIL_SIGNAL_MAP,
+)
 _ZHILIAN_LIST_SIGNAL_MAP = {
     "ok": None,
     "empty": None,  # 真实空结果走 empty_success 路径，由 marker fixture 解锁
@@ -79,14 +86,7 @@ _ZHILIAN_LIST_SIGNAL_MAP = {
     "timeout": "source_timeout",
     "invalid_output": "source_invalid_output",
 }
-def _zhilian_input_hash(payload: Any) -> str:
-    """智联 input_hash：覆盖 platform/关键词/完整城市解析快照/页数。
-    与 BOSS _input_hash 区别：智联 hash 必须包含 platform 字段和完整 city
-    解析快照（name/platform_code/mapping_version），用于跨平台去重和
-    缺城映射阻断校验。
-    """
-    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+_zhilian_input_hash = compute_zhilian_input_hash
 def _is_zhilian_host(url: str) -> bool:
     """URL host 是否在智联 allowlist 内（脱敏判定，不解析 path/query）。"""
     return _safe_host(url).lower() in _ZHILIAN_HOST_ALLOWLIST
@@ -233,7 +233,7 @@ class ZhilianCdpSource:
                 stage="preflight", failed_code="platform_disabled",
                 counts={"platform_enabled": 0},
             ),
-            failed_reason="智联平台当前禁用（enabled_for_new_tasks=False）",
+            failed_reason="当前平台已禁用新建任务",
         )
     def preflight(self) -> SourceOutcome:
         """检查智联冻结 CDP 端口、profile、登录态和平台可访问性。
@@ -258,6 +258,11 @@ class ZhilianCdpSource:
             from scripts.login_state_cache import write_login_state
             write_login_state(self.browser_account, "zhilian", state)
         return self._outcome_for_signal(signal)
+
+    def preflight_after_profile_switch(self) -> SourceOutcome:
+        """公开给账号轮询层的切号后预检能力。"""
+        return run_zhilian_preflight_after_profile_switch(self.preflight)
+
     def _outcome_for_signal(self, signal: str) -> SourceOutcome:
         """把智联 preflight signal 映射为统一 SourceOutcome。"""
         failed_code = _ZHILIAN_PREFLIGHT_SIGNAL_MAP.get(signal, "source_unknown_error")
@@ -418,9 +423,9 @@ class ZhilianCdpSource:
                     url_host=_safe_host(str(job.get("canonical_url") or "")),
                 ),
             )
-        failed_code = _ZHILIAN_DETAIL_SIGNAL_MAP.get(signal, "source_unknown_error")
-        if failed_code is None:
-            failed_code = "source_unknown_error"
+        failed_code = normalize_zhilian_detail_signal(
+            signal, _ZHILIAN_DETAIL_SIGNAL_MAP,
+        )
         if failed_code in SourceCircuitBreaker.SIGNAL_CODES:
             self.breaker.record_signal(failed_code)
         self._record_risk_signal(failed_code, _zhilian_failed_reason(failed_code))
@@ -601,12 +606,11 @@ class ZhilianCdpSource:
                     ),
                 )
             elif signal == "skipped":
-                if degrade_signal == "cdp_unavailable":
-                    skipped_code = "source_cdp_unavailable"
-                elif degrade_signal == "unreachable":
-                    skipped_code = "source_unknown_error"
-                else:
-                    skipped_code = "source_blocked"
+                skipped_code = normalize_zhilian_detail_signal(
+                    degrade_signal,
+                    _ZHILIAN_DETAIL_SIGNAL_MAP,
+                    fallback="source_status_unclear",
+                ) or "source_status_unclear"
                 results[key] = SourceOutcome.failure(
                     failed_code=skipped_code,
                     safe_log=_zhilian_safe_log(
@@ -616,7 +620,9 @@ class ZhilianCdpSource:
                     failed_reason=_zhilian_failed_reason(skipped_code),
                 )
             else:
-                failed_code = _ZHILIAN_DETAIL_SIGNAL_MAP.get(signal, "source_unknown_error")
+                failed_code = normalize_zhilian_detail_signal(
+                    signal, _ZHILIAN_DETAIL_SIGNAL_MAP,
+                )
                 if failed_code in SourceCircuitBreaker.SIGNAL_CODES:
                     self.breaker.record_signal(failed_code)
                 if failed_code not in recorded_batch_signals:

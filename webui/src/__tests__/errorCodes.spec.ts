@@ -32,6 +32,10 @@ describe("errorCodes mirror (B043)", () => {
     expect(ERROR_MESSAGES["source_result_write_failed"]).toBe("结果文件写入失败");
   });
 
+  it("mirrors the public source_unreachable registry message", () => {
+    expect(ERROR_MESSAGES["source_unreachable"]).toBe("抓取脚本不可用");
+  });
+
   it("exposes the mirror type for API payloads", () => {
     const code: ErrorCode = "internal_error";
     expect(code).toBe("internal_error");

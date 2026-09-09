@@ -111,6 +111,37 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(data["total"], 246)
         self.assertEqual(data["source_total"], 311)
 
+    def test_task_state_scrape_keeps_combo_total_separate_from_scraped_jobs(self):
+        """scrape 阶段的 source_count 是组合数，不得兜底成保留岗位数。"""
+        run_id = "count-scrape-combos"
+        self.store.create_screening_run(run_id, source_count=6)
+        jobs = [
+            {
+                "platform_job_id": f"scrape-job-{index}",
+                "title": f"岗位{index}",
+                "source_url": f"https://zhipin.example/job-{index}.html",
+            }
+            for index in range(238)
+        ]
+        combo_keys = [f"keyword-{index}|city" for index in range(6)]
+        for index, combo_key in enumerate(combo_keys):
+            combo_jobs = jobs[index::len(combo_keys)]
+            self.store.save_scrape_combo_result(
+                run_id, combo_key, combo_jobs, combo_keys[:index + 1],
+            )
+        self.store.update_screening_run(
+            run_id, status="succeeded", current_stage="scrape",
+        )
+
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+
+        self.assertEqual(data["scraped_count"], 238)
+        self.assertEqual(data["total"], 6)
+        self.assertEqual(data["source_total"], 6)
+        self.assertEqual(data["kept_count"], 0)
+        self.assertEqual(data["dropped_count"], 0)
+        self.assertEqual(data["pending_count"], 0)
+
     def test_task_state_fallback_matches_screen_stage_weights(self):
         """DB-only task-state 兜底百分比必须与 emit 权重一致且不提前到 100。"""
         cases = [
@@ -362,7 +393,7 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         data = resp.get_json()
         self.assertEqual(data["status"], "completed_with_pending")
         self.assertEqual(data["result"]["total_scraped"], 2)
-        self.assertEqual(data["result"]["total_kept"], 2)
+        self.assertEqual(data["result"]["total_kept"], 0)
         latest = self.client.get("/api/latest-pipeline-result").get_json()
         self.assertEqual(latest["status"], "completed_with_pending")
 
@@ -470,7 +501,7 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
     def test_latest_running_task_restores_paused_and_interrupted_counts(self):
         self._seed_scrape_run(
             "recover-paused", 12, "paused", platform="boss",
-            error_code="captcha_required", error_reason="验证码",
+            error_code="user_paused", error_reason="用户已暂停",
         )
         paused = self.client.get("/api/latest-running-task").get_json()
         self.assertEqual(paused["status"], "paused")
@@ -482,7 +513,8 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
             error_code="source_login_required", error_reason="",
         )
         data = self.client.get("/api/latest-running-task").get_json()
-        self.assertEqual(data["pause_info"]["error_reason"], "智联登录已失效")
+        self.assertEqual(data["status"], "failed")
+        self.assertEqual(data["error"], "登录已失效，需重新登录")
         self.assertNotIn("BOSS", data["progress"]["message"])
 
     def test_latest_running_task_restores_interrupted_count(self):
@@ -560,9 +592,126 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(data["status"], "completed_with_pending")
         self.assertEqual(data["platform"], "zhilian")
         self.assertEqual(data["result"]["total_scraped"], 3)
+        self.assertEqual(data["result"]["total_kept"], 0)
         finished = self.store.get_screening_run("finish-failed-scrape")
         self.assertEqual(finished["status"], "interrupted")
         self.assertEqual(finished["error_code"], "user_finished")
+
+    def test_finish_status_survives_memory_and_db_refresh_for_both_platforms(self):
+        """结束保存完成态不能在内存或刷新后的公共状态中退化为取消。"""
+        tasks = self.app.config["PIPELINE_TASKS"]
+        for platform in ("boss", "zhilian"):
+            with self.subTest(platform=platform):
+                run_id = f"finish-status-{platform}"
+                self._seed_scrape_run(
+                    run_id, 2, "failed", platform=platform,
+                    error_code="scrape_failed", error_reason="列表抓取失败",
+                )
+                tasks[run_id] = {
+                    "kind": "scrape", "status": "failed", "stage": "scrape",
+                    "progress": {"stage": "scrape", "current": 2, "total": 1},
+                    "logs": [], "result": None, "error": "",
+                    "started_at": 1000, "finished_at": None,
+                    "stop_event": threading.Event(), "platform": platform,
+                }
+
+                response = self.client.post(f"/api/task/finish/{run_id}")
+                self.assertEqual(response.status_code, 200, response.get_json())
+                self.assertEqual(response.get_json()["status"], "completed_with_pending")
+
+                live = self.client.get(f"/api/task-state/{run_id}").get_json()
+                self.assertEqual(live["status"], "completed_with_pending")
+                self.assertNotEqual(live["status"], "cancelled")
+
+                tasks.pop(run_id, None)
+                refreshed = self.client.get(f"/api/task-state/{run_id}").get_json()
+                self.assertEqual(refreshed["status"], "completed_with_pending")
+                self.assertNotEqual(refreshed["status"], "cancelled")
+                self.assertEqual(
+                    self.store.get_screening_run(run_id)["error_code"],
+                    "user_finished",
+                )
+
+    @mock.patch(
+        "webui.pipeline_exec.close_debug_chrome",
+        side_effect=RuntimeError("close failed"),
+    )
+    def test_finish_browser_cleanup_failure_is_observable_after_save(self, _mock_close):
+        self._seed_scrape_run(
+            "finish-cleanup-failure", 2, "failed", platform="boss",
+            error_code="scrape_failed", error_reason="列表抓取失败",
+        )
+        response = self.client.post("/api/task/finish/finish-cleanup-failure")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["cleanup"]["ok"])
+        self.assertEqual(payload["cleanup"]["error_code"], "source_cdp_unavailable")
+        self.assertEqual(payload["status"], "completed_with_pending")
+        self.assertEqual(
+            self.store.get_screening_run("finish-cleanup-failure")["error_code"],
+            "user_finished",
+        )
+
+    def test_finish_audit_write_failure_does_not_override_saved_result(self):
+        run_id = "finish-audit-write-failure"
+        self._seed_scrape_run(
+            run_id, 1, "failed", platform="boss",
+            error_code="scrape_failed", error_reason="列表抓取失败",
+        )
+        original_append = self.store.append_task_event
+
+        def append_event(task_id, event_type, payload=None):
+            if event_type == "finish":
+                raise RuntimeError("audit sink unavailable")
+            return original_append(task_id, event_type, payload)
+
+        with mock.patch.object(self.store, "append_task_event", side_effect=append_event), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome", return_value=True):
+            response = self.client.post(f"/api/task/finish/{run_id}")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()["ok"])
+        self.assertEqual(response.get_json()["status"], "completed_with_pending")
+        self.assertEqual(self.store.get_screening_run(run_id)["error_code"], "user_finished")
+
+    def test_cancel_audit_write_failure_does_not_override_cancel(self):
+        run_id = "cancel-audit-write-failure"
+        self._seed_scrape_run(run_id, 1, "running", platform="boss")
+        original_append = self.store.append_task_event
+
+        def append_event(task_id, event_type, payload=None):
+            if event_type == "cancel":
+                raise RuntimeError("audit sink unavailable")
+            return original_append(task_id, event_type, payload)
+
+        with mock.patch.object(self.store, "append_task_event", side_effect=append_event), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome", return_value=True):
+            response = self.client.post(f"/api/task/cancel/{run_id}")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()["ok"])
+        self.assertEqual(response.get_json()["status"], "cancelled")
+        self.assertEqual(self.store.get_screening_run(run_id)["status"], "interrupted")
+
+    @mock.patch("webui.pipeline_exec.set_active_cdp_data_dir")
+    @mock.patch("webui.pipeline_exec.close_debug_chrome", return_value=True)
+    def test_finish_closes_the_frozen_platform_port(
+            self, mock_close, _mock_activate):
+        """结束保存仍按任务冻结身份清理对应平台浏览器。"""
+        self._seed_scrape_run(
+            "finish-zhilian-cleanup-port", 1, "failed", platform="zhilian",
+            error_code="scrape_failed", error_reason="列表抓取失败",
+        )
+        self.store.update_screening_execution_params(
+            "finish-zhilian-cleanup-port", {
+                "platform": "zhilian", "browser_account": "a",
+                "cdp_port": 9223, "profile_key": "zhilian:a",
+            })
+        response = self.client.post(
+            "/api/task/finish/finish-zhilian-cleanup-port")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        mock_close.assert_called_once_with(9223)
 
     def test_finish_running_scrape_run_saves_partial_snapshot(self):
         self._seed_scrape_run("finish-running-scrape", 4, "running")
@@ -648,7 +797,7 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
             error_code="source_login_required", error_reason="",
         )
         data = self.client.get(f"/api/task-state/{run_id}").get_json()
-        self.assertIn("智联", data["pause_info"]["error_reason"])
+        self.assertEqual(data["pause_info"]["error_reason"], "登录已失效，需重新登录")
         self.assertNotIn("BOSS", data["pause_info"]["error_reason"])
 
     def test_finish_normalizes_mismatch_verdict(self):
@@ -997,6 +1146,9 @@ class ScreenContinueFlowTests(unittest.TestCase):
         if error_code:
             self.store.update_screening_run(
                 run_id, error_code=error_code, error_reason="用户提前结束")
+        elif status == "paused":
+            self.store.update_screening_run(
+                run_id, error_code="user_paused", error_reason="用户已暂停")
 
     def test_pause_route_returns_pausing_and_sets_stop_mode(self):
         scrape_id = self._create_completed_scrape_run()

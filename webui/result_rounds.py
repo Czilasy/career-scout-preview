@@ -87,7 +87,9 @@ def build_undecided_result(
         "jobs": jobs,
         "dropped": [],
         "total_scraped": len(jobs),
-        "total_kept": len(jobs),
+        # Raw scrape rows have not passed screening yet.  They are visible in
+        # the scraped-only view, but must not inflate the screened/kept count.
+        "total_kept": 0,
         "total_matched": 0,
         "total_dropped": 0,
         "profile_summary": str(profile_summary or ""),

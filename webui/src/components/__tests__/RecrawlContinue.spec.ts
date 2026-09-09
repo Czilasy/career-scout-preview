@@ -20,7 +20,9 @@ function response(body: unknown, status = 200): Response {
 describe("DiscoveryView paused recrawl recovery", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("continues the original recrawl task without creating another one", async () => {
+  it.each(["boss", "zhilian"] as const)(
+    "keeps the shared continue/finish actions for a paused %s recrawl without creating another one",
+    async (platform) => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/latest-running-task") {
@@ -30,6 +32,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
           task_id: "recrawl-original",
           kind: "recrawl",
           status: "paused",
+          platform,
           stage: "recrawl_fetch_jd",
           source_run_id: "source-run-1",
           pause_info: { error_code: "captcha_required", error_reason: "触发验证码" },
@@ -55,6 +58,17 @@ describe("DiscoveryView paused recrawl recovery", () => {
           completed_job_ids: ["j1", "j2"],
         });
       }
+      if (url === "/api/task/finish/recrawl-original") {
+        return response({
+          ok: true,
+          run_id: "recrawl-original",
+          snapshot_run_id: "snapshot-recrawl-original",
+          platform,
+          status: "completed_with_pending",
+          scrape_task_id: "scrape-parent",
+          result: { jobs: [], total_scraped: 2, total_kept: 2, total_dropped: 0 },
+        });
+      }
       if (url === "/api/task-state/recrawl-original") {
         return response({ status: "paused", progress: {}, logs: [], error: "触发验证码" });
       }
@@ -62,6 +76,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
         return response({
           ok: true,
           has_result: true,
+          platform,
           result: {
             jobs: [{ job_id: "j1", title: "前端", verdict: "uncertain", verdict_reason: "触发验证码" }],
           },
@@ -82,17 +97,37 @@ describe("DiscoveryView paused recrawl recovery", () => {
     // 暂停的重抓任务恢复后进 03 页：进度与继续按钮在 03 展示，04 不再放重抓进度。
     expect(wrapper.get(".task-stage").text()).toContain("重抓 JD 详情");
     expect(wrapper.get(".task-stage").text()).not.toContain("recrawl_fetch_jd");
-    const resumeButton = wrapper.get('[data-testid="continue-recrawl"]');
+    expect(wrapper.find('[data-testid="continue-recrawl"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="finish-save-results"]').text()).toContain("结束并保存结果");
     expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("触发验证码");
-    await resumeButton.trigger("click");
+
+    await wrapper.get('[data-testid="finish-save-results"]').trigger("click");
+    await flushPromises();
+    const finishCall = fetchMock.mock.calls.find(
+      ([url]) => String(url) === "/api/task/finish/recrawl-original",
+    );
+    expect(finishCall).toBeTruthy();
+    expect(finishCall?.[1]?.method).toBe("POST");
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/task/continue/recrawl-original")).toBe(false);
+
+    wrapper.unmount();
+    sessionStorage.clear();
+    localStorage.clear();
+    fetchMock.mockClear();
+    const continueWrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await continueWrapper.get('[data-testid="continue-recrawl"]').trigger("click");
     await flushPromises();
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/task/continue/recrawl-original",
       expect.objectContaining({ method: "POST" }),
     );
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/task/finish/recrawl-original")).toBe(false);
     expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/pipeline/recrawl")).toBe(false);
-  });
+    continueWrapper.unmount();
+    },
+  );
 
   it("starts bulk recrawl with the persisted source run id", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

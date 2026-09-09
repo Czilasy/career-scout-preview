@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-from webui.pipeline_exec_settings import _MSG_ZHILIAN_LOGIN_REQUIRED
-from webui.error_registry import ERROR_TAXONOMY, FAILED_CODE_LABELS as _FAILED_CODE_LABELS
+from webui.error_registry import (
+    ALIAS_TO_CODE,
+    ERROR_TAXONOMY,
+    ERROR_USER_MESSAGES,
+    FAILED_CODE_LABELS as _FAILED_CODE_LABELS,
+    SYSTEMIC_BLOCK_CODES,
+)
 from webui.error_registry import resolve_code
 
 
@@ -22,6 +27,7 @@ _SCRAPE_STAGE_WEIGHTS: dict[str, tuple[int, int]] = {
     "risk_warning": (0, 100),
     "closing_chrome": (0, 100),
     "done": (100, 100),
+    "paused": (0, 0),
     "cancelled": (0, 0),
     "hard_stop": (0, 100),
 }
@@ -38,47 +44,60 @@ _SCRAPE_STAGE_MESSAGES: dict[str, str] = {
     "risk_warning": "所有组合均失败，请检查登录、网络或平台提示…",
     "closing_chrome": "正在关闭调试浏览器…",
     "done": "抓取完成",
+    "paused": "运行已暂停",
     "cancelled": "运行已取消",
 }
 
 
 
 
-# 平台专属文案覆盖（B013）：默认字典兼容 BOSS 语义，智联只覆盖登录类文案，
-# 避免智联任务任何路径出现“BOSS 登录”等 BOSS 专属内容。
-_PLATFORM_LABEL_OVERRIDES: dict[str, dict[str, str]] = {
-    "zhilian": {
-        "source_login_required": "智联登录已失效",
-    },
-}
-
-
-_PLATFORM_TAXONOMY_OVERRIDES: dict[str, dict[str, str]] = {
-    "zhilian": {
-        "source_login_required": _MSG_ZHILIAN_LOGIN_REQUIRED,
-    },
-}
-
-
-
 def failed_code_label(code: str, platform: str = "") -> str:
-    """按平台返回 failed_code 的用户可读文案（别名先归一，016）。"""
+    """返回统一 failed_code 用户文案（别名先归一，016）。"""
     resolved = resolve_code(code) if code else code
-    override = _PLATFORM_LABEL_OVERRIDES.get(str(platform or ""), {}).get(resolved)
-    if override:
-        return override
     return _FAILED_CODE_LABELS.get(resolved, resolved or "")
+
+
+def user_visible_failure_reason(
+    code: object, diagnostic: object = "", platform: str = ""
+) -> str:
+    """Return the registry message for canonical source failures.
+
+    Adapter diagnostics remain available for non-source failures, while a
+    registered source code always owns the user-visible reason.
+    """
+    raw_code = str(code or "").strip()
+    resolved = (
+        resolve_code(raw_code)
+        if raw_code.startswith("source_") or raw_code in ALIAS_TO_CODE
+        else raw_code
+    )
+    if ERROR_TAXONOMY.get(resolved, {}).get("category") == "source":
+        return ERROR_USER_MESSAGES.get(resolved, resolved)
+    return str(diagnostic or failed_code_label(raw_code, platform) or "")
 
 
 
 def taxonomy_reason(code: str, platform: str = "", fallback: str = "任务被阻断") -> str:
-    """按平台返回 ERROR_TAXONOMY.reason，缺失时用 fallback（别名先归一，016）。"""
+    """返回统一 ERROR_TAXONOMY.reason，缺失时用 fallback（别名先归一，016）。"""
     resolved = resolve_code(code) if code else code
-    override = _PLATFORM_TAXONOMY_OVERRIDES.get(str(platform or ""), {}).get(resolved)
-    if override:
-        return override
     taxonomy = ERROR_TAXONOMY.get(resolved, {})
     return str(taxonomy.get("reason") or fallback)
+
+
+def classify_preflight_failure(preflight: object) -> dict[str, object]:
+    """Build the shared preflight failure payload and hard-stop decision."""
+    raw_code = getattr(preflight, "failed_code", None)
+    failed_code = str(raw_code or "")
+    message = user_visible_failure_reason(
+        failed_code,
+        getattr(preflight, "failed_reason", ""),
+        getattr(preflight, "platform", ""),
+    )
+    result: dict[str, object] = {"error": message}
+    if raw_code and resolve_code(raw_code) in SYSTEMIC_BLOCK_CODES:
+        result["hard_stop"] = True
+        result["hard_stop_code"] = raw_code
+    return result
 
 
 

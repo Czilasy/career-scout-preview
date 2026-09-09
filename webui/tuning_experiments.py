@@ -41,7 +41,7 @@ class TuningExperimentsMixin:
         """Create the HTTP experiment draft with its proposed input bundle.
 
         T606: 显式冻结 platform、规范城市解析、filter_schema_version、
-        browser_account、cdp_port、profile_key、scope/task digest。
+        browser_account、cdp_port、profile_key、run_id、scope/task digest。
         见 data-model.md 第 230 行：新 experiment 创建时冻结 browser_account、
         cdp_port、profile_key 与 filter_schema_version 到 source scope。
         """
@@ -56,6 +56,7 @@ class TuningExperimentsMixin:
 
     _EXPERIMENT_RUNTIME_FIELDS = (
         "browser_account", "cdp_port", "profile_key", "filter_schema_version",
+        "run_id",
     )
 
     def _freeze_experiment_source_scope(self, source_scope: dict) -> dict:
@@ -66,6 +67,7 @@ class TuningExperimentsMixin:
         - cdp_port 必须与平台默认端口一致
         - profile_key 必须为 '<platform>:<account>' 形式
         - filter_schema_version 必须为正整数
+        - run_id 如提供必须为非空字符串
         - task_input_digest 由 _build_task_input_digest 计算
 
         见 data-model.md 第 230 行。
@@ -97,6 +99,11 @@ class TuningExperimentsMixin:
         filter_schema_version = source_scope.get("filter_schema_version")
         if not isinstance(filter_schema_version, int) or filter_schema_version < 1:
             raise ValueError("filter_schema_version 必须为正整数")
+        run_id = source_scope.get("run_id")
+        if run_id is not None:
+            if not isinstance(run_id, str) or not run_id.strip():
+                raise ValueError("source_scope.run_id 必须为非空字符串")
+            run_id = run_id.strip()
         frozen = dict(source_scope)
         frozen.update({
             "platform": platform,
@@ -105,6 +112,8 @@ class TuningExperimentsMixin:
             "profile_key": profile_key,
             "filter_schema_version": filter_schema_version,
         })
+        if run_id is not None:
+            frozen["run_id"] = run_id
         return frozen
 
     def confirm_input(self, experiment_id: str) -> dict:

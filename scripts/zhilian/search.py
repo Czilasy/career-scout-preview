@@ -35,6 +35,7 @@ from scripts.zhilian.cdp import (
     _connect,
     _evaluate,
     _http_json,
+    _is_zhilian_page_url,
     _navigate,
     _wait_expression,
 )
@@ -197,6 +198,8 @@ def check_login_state_tri(cdp_port: int = DEFAULT_CDP_PORT) -> str:
         except Exception:
             _logger.debug("CDP 会话关闭失败（best-effort 忽略）", exc_info=True)
 
+    if not _is_zhilian_page_url(url):
+        return "unknown"
     low = body.lower()
     if any(m.lower() in low for m in _LOGIN_MARKERS) or _ZHILIAN_PASSPORT_HOST in url:
         return "not_logged_in"
@@ -234,10 +237,20 @@ def preflight(cdp_port: int = DEFAULT_CDP_PORT) -> str | None:
         )
         if not ok:
             body = str(_evaluate(ws, _BODY_TEXT_JS) or "")
-            signal = _risk_signal(body, str(_evaluate(ws, _LOCATION_HREF_JS) or ""))
+            page_url = str(_evaluate(ws, _LOCATION_HREF_JS) or "")
+            if not _is_zhilian_page_url(page_url):
+                return "unreachable"
+            if len(body.strip()) < 40:
+                return "unreachable"
+            signal = _risk_signal(body, page_url)
             return signal or "login_required"
         body = str(_evaluate(ws, _BODY_TEXT_JS) or "")
-        signal = _risk_signal(body, str(_evaluate(ws, _LOCATION_HREF_JS) or ""))
+        page_url = str(_evaluate(ws, _LOCATION_HREF_JS) or "")
+        if not _is_zhilian_page_url(page_url):
+            return "unreachable"
+        if len(body.strip()) < 40:
+            return "unreachable"
+        signal = _risk_signal(body, page_url)
         return {
             "verification": "verification",
             "rate_limited": "rate_limited",

@@ -65,11 +65,6 @@ _MSG_CDP_UNAVAILABLE = "连不上调试浏览器"
 _MSG_IP_RISK_CONTROL = "IP 级风控拦截"
 
 
-_MSG_ZHILIAN_LOGIN_REQUIRED = "智联登录已失效，需重新登录"
-
-
-
-
 def load_advanced_settings(path: str | os.PathLike[str] | None = None) -> dict:
     """读取高级设置，缺字段用默认值补全。"""
     settings_path = Path(path) if path is not None else ADVANCED_SETTINGS_PATH

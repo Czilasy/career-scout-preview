@@ -286,7 +286,7 @@ async function activateAccount(id: string) {
     const next = new Set(pendingRefresh.value);
     next.add(id);
     pendingRefresh.value = next;
-    setLocalNotice({ message: "已设为当前账号，继续暂停任务或新任务将使用它", tone: "success" });
+    setLocalNotice({ message: "已设为当前账号，后续任务将使用它", tone: "success" });
   } catch (error) {
     setLocalNotice({ message: errorMessage(error, "切换当前账号失败"), tone: "error" });
   } finally {
@@ -352,7 +352,7 @@ function platformBadge(account: BrowserAccount, platform: Platform) {
 const lockNotice = computed(() => {
   if (!serverBusy.value) return "";
   if (busyKind.value === "paused") {
-    return "有暂停任务，可切换账号；切换后继续将使用新账号";
+    return "有暂停任务，可切换账号；后续执行将使用新账号";
   }
   const name = lockedAccount.value
     ? accounts.value.find((item) => item.id === lockedAccount.value)?.name || lockedAccount.value

@@ -40,6 +40,7 @@ def build_match_system_prompt(
     profile_summary: str,
     facts_desc: str,
     features_prompt_text: str,
+    hard_fields_text: str | None = None,
 ) -> str:
     """组装精筛 system prompt（B062 删除第四层默认偏好后版本）。
 
@@ -48,9 +49,14 @@ def build_match_system_prompt(
     - 第三层：隐藏画像字段（调用方注入，主观字段带「（默认）」标注时即最大接受度）
     - 判断规则：宽松化 — 主观偏好不自动判不匹配，六类硬条件/高危 flag 照常硬约束
     """
+    field_heading = (
+        "用户已选择的六类字段（薪资/经验/学历/规模/融资/行业）"
+        if not hard_fields_text
+        else f"用户已选择的硬筛选字段（{hard_fields_text}）"
+    )
     return (
         MATCH_OPENING
-        + f"【第一层·筛选条件】用户已选择的六类字段（薪资/经验/学历/规模/融资/行业），"
+        + f"【第一层·筛选条件】{field_heading}，"
         f"最高优先级，绝对硬约束：{criteria_desc}\n"
         + f"【第二层·求职画像】候选人求职画像（用户可编辑，只能放宽未选择的维度，不能推翻已选字段）：{profile_summary}\n"
         + f"【第三层·隐藏画像字段】简历提取的客观事实与主观偏好（未列出的维度一律视为未体现，不得推断；"

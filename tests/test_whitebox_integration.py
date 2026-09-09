@@ -358,6 +358,57 @@ class WhiteboxIntegrationTests(unittest.TestCase):
         result = evidence.finish({"jobs": []}, lifecycle_end="cancelled")
         self.assertEqual(result["integrity"]["conclusion"], "interrupted")
 
+    def test_pause_keeps_same_whitebox_owner_nonterminal_until_resume_finishes(self):
+        """用户暂停只记录 user_paused；同一 owner 继续后才能最终完成。"""
+        owner_id = "pause-resume-same-owner"
+        evidence = ScrapeEvidence(
+            self.store, owner_id, [{"combo_key": "a"}], 1,
+        )
+        evidence.unit_started("a", 1, 1)
+        page = {
+            "page": 1, "returned_count": 1, "new_unique_count": 1,
+            "has_more": False, "resume_page": 2,
+        }
+        evidence.page("a", page, 1)
+
+        paused = evidence.pause({"jobs": [{"platform_job_id": "job-1"}]})
+
+        stored = self.store.get_whitebox_run("scrape", owner_id)
+        self.assertEqual(stored["lifecycle_status"], "paused")
+        self.assertIsNone(stored["conclusion"])
+        self.assertIsNone(stored["finalized_at"])
+        self.assertNotEqual((paused.get("integrity") or {}).get("conclusion"), "interrupted")
+        events = self.store.list_whitebox_events(stored["id"])
+        pause_events = [event for event in events if event["event_type"] == "task_paused"]
+        self.assertEqual(len(pause_events), 1)
+        self.assertEqual(
+            json.loads(pause_events[0]["payload_json"])["stop_reason"],
+            "user_paused",
+        )
+
+        resumed = ScrapeEvidence(
+            self.store, owner_id, [{"combo_key": "a"}], 1,
+        )
+        resumed.unit_started("a", 1, 1)
+        resumed.page("a", page, 1)
+        resumed.completed(
+            "a",
+            SourceOutcome.success(
+                jobs=[{"platform_job_id": "job-1"}],
+                scope_complete=True,
+                source_exhausted=True,
+                page_evidence=[page],
+            ),
+        )
+        result = resumed.finish({"jobs": [{"platform_job_id": "job-1"}]})
+
+        self.assertEqual(result["integrity"]["conclusion"], "succeeded")
+        self.assertEqual(
+            self.store.get_whitebox_run("scrape", owner_id)["lifecycle_status"],
+            "terminal",
+        )
+        self.assertNotEqual(result["integrity"]["conclusion"], "interrupted")
+
     def test_retry_creates_distinct_attempt_and_keeps_recovery_link(self):
         evidence = ScrapeEvidence(self.store, "retry-run", [{"combo_key": "a"}], 1)
         evidence.unit_started("a", 1, 1)

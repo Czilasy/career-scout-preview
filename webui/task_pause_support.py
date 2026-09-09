@@ -14,12 +14,399 @@
 
 from __future__ import annotations
 
+import threading
+
 from flask import jsonify
 
 from webui.constants import _MSG_TASK_NOT_FOUND
 from webui.logging_setup import get_logger
 
 _logger = get_logger("task_pause_support")
+
+
+STOP_MODE_PAUSE = "pause"
+STOP_MODE_CANCEL = "cancel"
+STOP_MODE_FINISH = "finish"
+STOP_MODE_TERMINATE = "terminate"
+
+_STOP_MODE_PRIORITY = {
+    STOP_MODE_PAUSE: 1,
+    STOP_MODE_CANCEL: 2,
+    STOP_MODE_FINISH: 2,
+    STOP_MODE_TERMINATE: 2,
+}
+_STOP_MODE_TIE_BREAK = {
+    STOP_MODE_PAUSE: 0,
+    STOP_MODE_CANCEL: 1,
+    STOP_MODE_TERMINATE: 2,
+    STOP_MODE_FINISH: 3,
+}
+_STOP_MODE_LOCK = threading.RLock()
+
+
+class ScrapeCheckpointReadError(RuntimeError):
+    """Raised when a scrape checkpoint cannot be read safely."""
+
+    error_code = "checkpoint_read_failed"
+    public_reason = "暂停断点读取失败，任务已结束，请重试"
+
+    def __init__(self, *, pause_persisted: bool = False):
+        super().__init__(self.public_reason)
+        self.pause_persisted = bool(pause_persisted)
+
+
+class ScrapeCheckpointWriteError(RuntimeError):
+    """Raised when a scrape checkpoint cannot be durably saved."""
+
+    error_code = "checkpoint_write_failed"
+    public_reason = "暂停断点保存失败，任务已结束，请重试"
+
+    def __init__(self, *, pause_persisted: bool = False):
+        super().__init__(self.public_reason)
+        self.pause_persisted = bool(pause_persisted)
+
+
+def is_user_paused_run(run: dict | None) -> bool:
+    """Return whether a paused run represents an explicit user pause.
+
+    System failures used to be stored as ``paused`` by older workers, so an
+    explicit non-pause code (or failure reason) must not retain the
+    resumable/occupying semantics. A legacy paused row without any error
+    metadata remains conservatively resumable for backward compatibility.
+    """
+    if not isinstance(run, dict) or run.get("status") != "paused":
+        return False
+    error_code = str(run.get("error_code") or "").strip().lower()
+    if error_code:
+        return error_code == "user_paused"
+    reason = str(run.get("error_reason") or "").strip()
+    if reason:
+        return "用户已暂停" in reason or "用户主动暂停" in reason
+    return True
+
+
+def _normalize_stop_mode(mode: object) -> str:
+    value = str(mode or "").strip().lower()
+    if value in _STOP_MODE_PRIORITY:
+        return value
+    return STOP_MODE_CANCEL
+
+
+def _strongest_stop_mode(task: dict | None, stop_event) -> str | None:
+    modes = []
+    task_mode = str((task or {}).get("stop_mode") or "").strip().lower()
+    if task_mode in _STOP_MODE_PRIORITY:
+        modes.append(task_mode)
+    event_mode = str(getattr(stop_event, "stop_mode", "") or "").strip().lower()
+    if event_mode in _STOP_MODE_PRIORITY:
+        modes.append(event_mode)
+    if not modes:
+        return None
+    return max(
+        modes,
+        key=lambda value: (
+            _STOP_MODE_PRIORITY[value],
+            _STOP_MODE_TIE_BREAK[value],
+        ),
+    )
+
+
+def set_stop_mode(task: dict, stop_event, mode: str) -> str:
+    """Record the shared stop reason on both task and stop signal.
+
+    ``pipeline_exec_search`` only receives the event, while runners also have
+    the task snapshot.  Keeping the same small marker in both places makes a
+    stop reason survive either call path without teaching the search loop
+    about a platform or a route.
+    """
+    requested = _normalize_stop_mode(mode)
+    with _STOP_MODE_LOCK:
+        current = _strongest_stop_mode(task, stop_event)
+        normalized = max(
+            (current, requested),
+            key=lambda value: (
+                _STOP_MODE_PRIORITY[value],
+                _STOP_MODE_TIE_BREAK[value],
+            ),
+        ) if current is not None else requested
+        task["stop_mode"] = normalized
+        if stop_event is not None:
+            try:
+                stop_event.stop_mode = normalized
+            except (AttributeError, TypeError):
+                # Event-like test doubles may use slots; the task marker remains
+                # the authoritative value for runners.
+                return normalized
+        return normalized
+
+
+def request_stop(task: dict, stop_event, mode: str) -> str:
+    """Atomically publish a prioritized stop mode and fire its signal.
+
+    Pause is deliberately lower priority than terminal cleanup, finish, and
+    cancel.  Keeping the mode write and ``Event.set`` under one process-local
+    lock prevents an interleaved pause request from changing the reason a
+    worker observes.
+    """
+    with _STOP_MODE_LOCK:
+        normalized = set_stop_mode(task, stop_event, mode)
+        if stop_event is not None:
+            stop_event.set()
+        return normalized
+
+
+def stop_mode_for_event(stop_event, task: dict | None = None) -> str | None:
+    """Return ``pause``/``cancel`` only after an event has actually fired."""
+    if stop_event is None or not stop_event.is_set():
+        return None
+    with _STOP_MODE_LOCK:
+        return _strongest_stop_mode(task, stop_event) or STOP_MODE_CANCEL
+
+
+def continue_task_kind(ctx, run_id: str, run: dict | None = None) -> str:
+    """Resolve the continuation kind, preferring the live task declaration.
+
+    An AI hard-stop can persist ``current_stage='scrape'`` while it is
+    materialising its source snapshot.  The in-memory task kind is the only
+    reliable discriminator in that window; after a restart, the persisted
+    stage remains the compatibility fallback for legacy scrape runs.
+    """
+    with ctx.lock:
+        task = ctx.tasks.get(run_id)
+        live_kind = str((task or {}).get("kind") or "").strip().lower()
+    if live_kind in {"scrape", "ai_screen", "recrawl"}:
+        return live_kind
+    stage = str((run or {}).get("current_stage") or "").strip().lower()
+    if stage.startswith("recrawl_"):
+        return "recrawl"
+    if stage == "scrape":
+        params = (run or {}).get("execution_params") or {}
+        if params.get("scrape_task_id") and not params.get("script_params"):
+            return "ai_screen"
+        return "scrape"
+    return "ai_screen"
+
+
+def _record_checkpoint_read_failure(
+        ctx, run_id: str, *, completed_combos=None, source_count=0,
+        total_scraped=0, error_code=None, reason=None) -> bool:
+    """Persist a failed state without replacing checkpoint data.
+
+    A strict read or write failure is itself a terminal task error.  A
+    corrupt checkpoint row must remain byte-for-byte intact, but the run must
+    not be left as ``running`` or ``paused`` after its worker exits (or after
+    a continue request rejects). All writes here are status/event writes
+    only; no checkpoint save is ever attempted.
+    """
+    error_code = error_code or ScrapeCheckpointReadError.error_code
+    reason = reason or ScrapeCheckpointReadError.public_reason
+    completed = [
+        str(key) for key in (completed_combos or []) if str(key).strip()
+    ]
+    # A continue request may fail before it has an in-memory result.  Keep the
+    # durable counters as a floor so publishing the paused failure cannot make
+    # a refresh look like a brand-new zero-progress run.
+    existing_run = None
+    getter = getattr(ctx.store, "get_screening_run", None)
+    if callable(getter):
+        try:
+            existing_run = getter(run_id)
+        except ctx.operational_errors:
+            existing_run = None
+    existing_run = existing_run or {}
+    processed_count = max(
+        len(completed), int(existing_run.get("processed_count") or 0),
+    )
+    durable_source_count = max(
+        int(source_count or 0), int(existing_run.get("source_count") or 0),
+    )
+    durable_total_scraped = max(
+        int(total_scraped or 0), int(existing_run.get("total_scraped") or 0),
+    )
+    status_persisted = False
+    writer = getattr(ctx, "write_run", None)
+    if callable(writer):
+        try:
+            writer(
+                run_id,
+                status="failed",
+                current_stage="scrape",
+                error_code=error_code,
+                error_reason=reason,
+                processed_count=processed_count,
+                source_count=durable_source_count,
+                total_scraped=durable_total_scraped,
+            )
+            status_persisted = True
+        except Exception as exc:
+            _logger.warning(
+                "scrape checkpoint failed state write failed stage=scrape "
+                "error_type=%s",
+                type(exc).__name__,
+            )
+    payload = {
+        "stage": "scrape",
+        "code": error_code,
+        "error_code": error_code,
+        "completed_combos": len(completed),
+        "checkpoint_read": "failed" if error_code == ScrapeCheckpointReadError.error_code else "ok",
+        "checkpoint_write": "failed" if error_code == ScrapeCheckpointWriteError.error_code else "ok",
+    }
+    try:
+        ctx.store.append_task_event(run_id, "failure", payload)
+    except Exception as exc:
+        _logger.warning(
+            "scrape checkpoint failure event failed stage=scrape error_type=%s",
+            type(exc).__name__,
+        )
+    _logger.error(
+        "scrape checkpoint persistence failed stage=scrape error_code=%s",
+        error_code,
+    )
+    recorder = getattr(ctx, "record_pause_failure", None)
+    if callable(recorder):
+        try:
+            recorder(
+                run_id,
+                "scrape",
+                error_code,
+                reason,
+                processed=len(completed),
+                total=max(durable_source_count, len(completed)),
+                extra={
+                    "checkpoint_stage": "scrape",
+                    "checkpoint_read": error_code == ScrapeCheckpointReadError.error_code,
+                    "checkpoint_write": error_code == ScrapeCheckpointWriteError.error_code,
+                },
+            )
+            with ctx.lock:
+                task = ctx.tasks.get(run_id)
+                if task is not None:
+                    task["status"] = "failed"
+                    task["error"] = reason
+            return status_persisted
+        except Exception as exc:
+            _logger.warning(
+                "scrape checkpoint failure audit failed stage=scrape "
+                "error_type=%s",
+                type(exc).__name__,
+            )
+    try:
+        from webui.diagnostics import record_failure
+
+        record_failure(
+            ctx.store,
+            run_id,
+            stage="scrape",
+            error_code=error_code,
+            reason=reason,
+            correlation_id=run_id,
+            diagnostics={
+                "checkpoint_stage": "scrape",
+                "checkpoint_read": error_code == ScrapeCheckpointReadError.error_code,
+                "checkpoint_write": error_code == ScrapeCheckpointWriteError.error_code,
+            },
+        )
+    except Exception as exc:
+        _logger.warning(
+            "scrape checkpoint failure event failed stage=scrape error_type=%s",
+            type(exc).__name__,
+        )
+    with ctx.lock:
+        task = ctx.tasks.get(run_id)
+        if task is not None:
+            task["status"] = "failed"
+            task["error"] = reason
+    return status_persisted
+
+
+def scrape_checkpoint(ctx, run_id: str, *, completed_combos=None,
+                      skip_combos=None) -> list[str]:
+    """Merge in-memory and durable scrape combo checkpoints.
+
+    The DB checkpoint is authoritative after a worker boundary.  Unioning it
+    with the current result and the resume skip set keeps a pause from
+    regressing a completed combination when the stop arrives between two
+    callbacks or immediately after a continuation starts.
+    """
+    keys = {
+        str(key) for key in (completed_combos or [])
+        if str(key).strip()
+    }
+    keys.update(
+        str(key) for key in (skip_combos or [])
+        if str(key).strip()
+    )
+    try:
+        loader = getattr(ctx.store, "load_checkpoint_strict", None)
+        if not callable(loader):
+            # A lax reader silently turns corrupt JSON into an empty set and
+            # would violate the pause/resume safety boundary.  Treat an
+            # adapter without the strict API as a read failure instead.
+            raise RuntimeError("strict checkpoint reader unavailable")
+        keys.update(str(key) for key in loader(run_id, "scrape"))
+    except ctx.operational_errors:
+        persisted = _record_checkpoint_read_failure(
+            ctx,
+            run_id,
+            completed_combos=keys,
+        )
+        raise ScrapeCheckpointReadError(pause_persisted=persisted) from None
+    return sorted(keys)
+
+
+def mark_scrape_paused(ctx, run_id: str, *, completed_combos=None,
+                       skip_combos=None, source_count=0, total_scraped=0,
+                       reason="用户已暂停，结果已保留") -> list[str]:
+    """Persist a user-requested scrape pause and its public event."""
+    completed = scrape_checkpoint(
+        ctx, run_id, completed_combos=completed_combos,
+        skip_combos=skip_combos,
+    )
+    existing_run = None
+    getter = getattr(ctx.store, "get_screening_run", None)
+    if callable(getter):
+        try:
+            existing_run = getter(run_id)
+        except ctx.operational_errors:
+            existing_run = None
+    existing_run = existing_run or {}
+    ctx.write_run(
+        run_id, status="paused", current_stage="scrape",
+        error_code="user_paused", error_reason=reason,
+        processed_count=max(
+            len(completed), int(existing_run.get("processed_count") or 0),
+        ),
+        source_count=max(
+            int(source_count or 0), int(existing_run.get("source_count") or 0),
+        ),
+        total_scraped=max(
+            int(total_scraped or 0), int(existing_run.get("total_scraped") or 0),
+        ),
+    )
+    try:
+        ctx.store.save_checkpoint(run_id, "scrape", completed)
+    except ctx.operational_errors:
+        persisted = _record_checkpoint_read_failure(
+            ctx,
+            run_id,
+            completed_combos=completed,
+            source_count=source_count,
+            total_scraped=total_scraped,
+            error_code=ScrapeCheckpointWriteError.error_code,
+            reason=ScrapeCheckpointWriteError.public_reason,
+        )
+        raise ScrapeCheckpointWriteError(pause_persisted=persisted) from None
+    ctx.store.append_task_event(run_id, "pause", {
+        "stage": "scrape", "code": "user_paused",
+        "completed_combos": len(completed),
+    })
+    with ctx.lock:
+        task = ctx.tasks.get(run_id)
+        if task is not None:
+            task["status"] = "paused"
+            task["error"] = reason
+    return completed
 
 
 
@@ -50,7 +437,10 @@ class ImmediateOnlyCancelEvent:
 
 
 def pause_with_mode(ctx, run_id: str, mode: str):
-    """暂停 AI 筛选/重抓任务（025：支持 mode=immediate 批中立即停止）。
+    """暂停可恢复任务（抓取、AI 筛选或重抓）。
+
+    平台抓取脚本只由 runner/source 选择，暂停编排保持平台无关。
+    （025：支持 mode=immediate 批中立即停止）。
 
     ``mode`` 取值：
     - ``graceful``（缺省）：现状行为——stop_mode="pause" + stop_event.set()，
@@ -66,10 +456,10 @@ def pause_with_mode(ctx, run_id: str, mode: str):
                 "ok": False, "error": "run_not_found",
                 "message": _MSG_TASK_NOT_FOUND,
             }), 404
-        if task.get("kind") not in ("ai_screen", "recrawl"):
+        if task.get("kind") not in ("ai_screen", "recrawl", "scrape"):
             return jsonify({
                 "ok": False, "error": "not_pausable_task",
-                "message": "只有 AI 筛选或重抓任务可以暂停",
+                "message": "只有可暂停任务可以暂停",
             }), 409
         if task["status"] not in ("queued", "running"):
             if mode == "immediate":
@@ -102,11 +492,10 @@ def pause_with_mode(ctx, run_id: str, mode: str):
             return jsonify({
                 "ok": True, "run_id": run_id, "status": "pausing",
             }), 200
-        task["stop_mode"] = "pause"
         if mode == "immediate":
             task["immediate_stop"] = True
             stop_event.immediate = True  # fetch_job_details 据此作废当前批
-        stop_event.set()
+        request_stop(task, stop_event, STOP_MODE_PAUSE)
     if mode == "immediate":
         # 025：终止活动批子进程 + 清理批次登记（锁外，可能耗时）
         guard = getattr(ctx, "pipeline_guard", None)

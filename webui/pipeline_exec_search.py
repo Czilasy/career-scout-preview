@@ -9,17 +9,25 @@ import random
 import time
 from datetime import datetime
 
-from webui.pipeline_exec_artifacts import _combo_hash, _combo_output_path
+from webui.pipeline_exec_artifacts import _combo_output_path
 from webui.pipeline_exec_filters import expand_combinations
+from webui.platform_input_adapter import resolve_platform_input_adapter
 from webui.pipeline_exec_settings import _PIPELINE_OPERATION_ERRORS
 from webui.pipeline_exec_status import (
     _SCRAPE_STAGE_MESSAGES,
+    classify_preflight_failure,
     _scrape_overall_percent,
     _scrape_page_overall_percent,
     failed_code_label,
+    user_visible_failure_reason,
 )
-from webui.source import PageEventPersistenceError
+from webui.source import PageEventPersistenceError, SourceOutcome
 from webui.browser_recovery import BrowserRecovery
+from webui.frozen_browser_identity import bind_frozen_source_profile
+from webui.task_pause_support import (
+    STOP_MODE_PAUSE,
+    stop_mode_for_event,
+)
 from webui.error_registry import SYSTEMIC_BLOCK_CODES as _HARD_STOP_CODES
 from webui.error_registry import resolve_code
 from webui.whitebox import ScrapeEvidence, WhiteboxWriteError
@@ -38,6 +46,48 @@ _logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 # INTER_COMBO_DELAY 现从 advanced_settings 动态读取（默认 20~40s）。
+
+
+def _canonical_source_code(code: object) -> str | None:
+    raw_code = str(code or "").strip()
+    if not raw_code:
+        return None
+    resolved = resolve_code(raw_code, default="source_unknown_error")
+    return resolved if resolved.startswith("source_") else None
+
+
+def _is_source_hard_stop(code: object) -> bool:
+    resolved = _canonical_source_code(code)
+    return bool(resolved and resolved in _HARD_STOP_CODES)
+
+
+def _record_source_hard_stop_evidence(
+    evidence: ScrapeEvidence,
+    combos: list[dict],
+    code: object,
+    diagnostic: object = "",
+    *,
+    excluded_keys: set[str] | None = None,
+    platform: str = "",
+) -> tuple[str, str] | None:
+    """Project one source block across all not-yet-completed scrape units."""
+    canonical = _canonical_source_code(code)
+    if canonical is None:
+        return None
+    reason = user_visible_failure_reason(canonical, diagnostic, platform)
+    failure = SourceOutcome.failure(
+        failed_code=canonical,
+        failed_reason=reason,
+    )
+    excluded = {str(key) for key in (excluded_keys or set())}
+    for combo in combos:
+        key = str(
+            combo.get("combo_key")
+            or f"{combo.get('keyword', '')}|{combo.get('city', '')}"
+        )
+        if key not in excluded:
+            evidence.failed(key, failure, reason=reason)
+    return canonical, reason
 
 
 def run_search(params: dict, source, *, pages: int = 3,
@@ -79,12 +129,18 @@ def run_search(params: dict, source, *, pages: int = 3,
     "completed_combos": [...]}``.
     """
     from webui import pipeline_exec as _facade
+    platform = str(getattr(source, "platform", "boss") or "boss")
+    plan_adapter = resolve_platform_input_adapter(platform)
     if sleeper is None:
         sleeper = time.sleep
 
+    frozen_binding = None
     if execution_config is not None:
         # SPEC011 T006: 使用任务创建时冻结的配置快照，不读 JSON
         _base_delay = float(execution_config.inter_combo_delay)
+        frozen_binding = bind_frozen_source_profile(
+            source, execution_config, activate=_facade.set_active_cdp_data_dir,
+        )
     else:
         _adv = _facade.load_advanced_settings()
         if pages == 3:  # 调用方未显式指定时用用户配置
@@ -107,6 +163,27 @@ def run_search(params: dict, source, *, pages: int = 3,
                                 "hard_stop": True, "hard_stop_code": "internal_error",
                                 "error": f"任务证据白箱初始化失败（{type(evidence.startup_error).__name__}）"})
     _finish = evidence.finish
+
+    if frozen_binding is not None and not frozen_binding.ok:
+        source_failure = _record_source_hard_stop_evidence(
+            evidence, combos,
+            frozen_binding.error_code or "source_cdp_unavailable",
+            frozen_binding.error,
+            platform=platform,
+        )
+        hard_stop_code = frozen_binding.error_code or "source_cdp_unavailable"
+        if source_failure is not None:
+            hard_stop_code = source_failure[0]
+        return _finish({
+            "ok": False,
+            "jobs": [],
+            "total_scraped": 0,
+            "total_matched": 0,
+            "combinations": len(combos),
+            "hard_stop": True,
+            "hard_stop_code": hard_stop_code,
+            "error": frozen_binding.error,
+        })
 
     def emit(**kw):
         stage = str(kw.get("stage", ""))
@@ -133,29 +210,36 @@ def run_search(params: dict, source, *, pages: int = 3,
     # Auto-launch the debug Chrome if it isn't running, so the user is shown
     # the browser instead of a raw infrastructure error.
     emit(stage="ensure_chrome", message="检查并启动调试浏览器…")
-    platform = str(getattr(source, "platform", "boss") or "boss")
     cdp_port = getattr(source, "cdp_port", None)
     chrome_ok, chrome_err = _facade.ensure_chrome_ready(
         cdp_port, minimize_after_launch=True,
     )
     if not chrome_ok:
+        source_code, source_reason = _record_source_hard_stop_evidence(
+            evidence, combos, "source_cdp_unavailable", chrome_err,
+            platform=platform,
+        )
         return _finish({"ok": False, "jobs": [], "total_scraped": 0,
                 "total_matched": 0, "combinations": len(combos),
-                "error": f"调试浏览器未就绪：{chrome_err}。"
-                         "若始终无法启动，请手动运行 scripts/boss_cdp_raw.py --setup-chrome 后重试。"})
+                "hard_stop": True,
+                "hard_stop_code": source_code,
+                "error": source_reason})
 
-    # Preflight: CDP connection + BOSS login.
-    emit(stage="preflight", message=f"检查 {('BOSS直聘' if platform == 'boss' else '智联招聘')} 登录状态…")
+    # Preflight: CDP connection + current platform login.
+    emit(stage="preflight", message="检查当前平台登录状态…")
     pre = source.preflight()
     if not pre.ok:
-        if pre.failed_code == "source_login_required":
-            msg = ("浏览器已打开，但还未登录 BOSS。请在浏览器中登录 zhipin.com，登录后重新继续。" if platform == "boss"
-                   else "浏览器已打开，但还未登录智联招聘。请在浏览器中登录 zhaopin.com，登录后重新继续。")
-        else:
-            msg = f"预检失败：{pre.failed_code}"
-        return _finish({"ok": False, "jobs": [], "total_scraped": 0,
-                "total_matched": 0, "combinations": len(combos),
-                "error": msg})
+        result = {"ok": False, "jobs": [], "total_scraped": 0,
+                  "total_matched": 0, "combinations": len(combos),
+                  **classify_preflight_failure(pre)}
+        if result.get("hard_stop"):
+            source_failure = _record_source_hard_stop_evidence(
+                evidence, combos, result.get("hard_stop_code"),
+                result.get("error"), platform=platform,
+            )
+            if source_failure is not None:
+                result["hard_stop_code"], result["error"] = source_failure
+        return _finish(result)
 
     merged: dict[str, dict] = {}
     total_scraped = 0
@@ -177,9 +261,14 @@ def run_search(params: dict, source, *, pages: int = 3,
         list_robin = None
 
     for idx, combo in enumerate(combos):
-        if stop_event is not None and stop_event.is_set():
-            emit(stage="cancelled", current=len(completed_combos), total=len(combos),
-                 message="运行已取消")
+        stop_mode = stop_mode_for_event(stop_event)
+        if stop_mode is not None:
+            emit(
+                stage=("paused" if stop_mode == STOP_MODE_PAUSE else "cancelled"),
+                current=len(completed_combos),
+                total=len(combos),
+                message="运行已暂停" if stop_mode == STOP_MODE_PAUSE else "运行已取消",
+            )
             break
 
         kw = combo["keyword"]
@@ -207,49 +296,17 @@ def run_search(params: dict, source, *, pages: int = 3,
              keyword=kw, city=display_city,
              message=f"正在搜索 [{idx + 1}/{len(combos)}] {kw} · {display_city}")
 
-        if platform == "zhilian":
-            from webui.location_scope import build_zhilian_city_snapshot
-            from webui.platforms import resolve_platform_city
-            from webui.source import _zhilian_input_hash
-            city_entry = resolve_platform_city("zhilian", city)
-            if location:
-                city_snapshot = build_zhilian_city_snapshot(location, city_entry)
-                route_city_code = str(location.get("city_code") or city_entry.platform_code)
-            else:
-                city_snapshot = {
-                    "name": city_entry.name,
-                    "label": city_entry.label,
-                    "platform_code": city_entry.platform_code,
-                    "mapping_version": city_entry.mapping_version,
-                }
-                route_city_code = city_entry.platform_code
-            plan_item = {
-                "platform": "zhilian",
-                "keyword": kw,
-                "city": city_snapshot,
-                "combo_key": combo_key,
-                "target_pages": pages,
-                "input_hash": _zhilian_input_hash({
-                    "platform": "zhilian", "keyword": kw,
-                    "city": city_snapshot, "target_pages": pages,
-                    "route_city_code": route_city_code,
-                }),
-                "list_output_path": _combo_output_path(artifact_dir, combo_key),
-                "start_page": resume_page,
-                "existing_jobs": list((resume_jobs or {}).get(combo_key) or []),
-                "route_city_code": route_city_code,
-            }
-        else:
-            plan_item = {
-                "keyword": kw,
-                "city": city,
-                "source_filters": source_filters,
-                "combo_key": combo_key,
-                "target_pages": pages,
-                "input_hash": _combo_hash(kw, city, pages, source_filters=source_filters),
-                "list_output_path": _combo_output_path(artifact_dir, combo_key),
-                "start_page": resume_page,
-            }
+        plan_item = plan_adapter.build_plan_item(
+            keyword=kw,
+            city=city,
+            location=location,
+            combo_key=combo_key,
+            target_pages=pages,
+            start_page=resume_page,
+            list_output_path=_combo_output_path(artifact_dir, combo_key),
+            source_filters=source_filters,
+            existing_jobs=(resume_jobs or {}).get(combo_key),
+        )
         evidence.unit_started(combo_key, pages, resume_page)
         last_page_ratio = 0.0
         page_progress_seen = False
@@ -404,9 +461,11 @@ def run_search(params: dict, source, *, pages: int = 3,
             restart_ok, restart_err = recovery.try_restart()
             if restart_ok:
                 resume_page = max(1, int((resume_pages or {}).get(combo_key, 1)))
-                plan_item["start_page"] = min(resume_page, pages)
-                if platform == "zhilian":
-                    plan_item["existing_jobs"] = list((resume_jobs or {}).get(combo_key) or [])
+                plan_adapter.apply_resume_fields(
+                    plan_item,
+                    start_page=min(resume_page, pages),
+                    existing_jobs=(resume_jobs or {}).get(combo_key),
+                )
                 try:
                     outcome = _fetch_list_once()
                 except PageEventPersistenceError as exc:
@@ -435,32 +494,60 @@ def run_search(params: dict, source, *, pages: int = 3,
                 if outcome.ok:
                     recovery.mark_progress()
                 elif recovery.is_browser_lost(outcome.failed_code):
-                    label = failed_code_label(outcome.failed_code, platform)
+                    source_code, source_reason = _record_source_hard_stop_evidence(
+                        evidence, combos, "source_cdp_unavailable",
+                        outcome.failed_reason or outcome.safe_log or "",
+                        excluded_keys=set(completed_combos), platform=platform,
+                    )
+                    label = failed_code_label(source_code, platform)
                     emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
-                         keyword=kw, city=display_city, failed_code=outcome.failed_code,
+                         keyword=kw, city=display_city, failed_code=source_code,
                          message=f"自动重启后仍失联：{label}，任务暂停")
-                    evidence.incomplete(combo_key, "自动重启后仍失联", "browser_lost")
                     return _finish({"ok": False, "jobs": list(merged.values()),
                             "total_scraped": total_scraped, "total_matched": len(merged),
                             "combinations": len(combos), "completed_combos": completed_combos,
-                            "hard_stop": True, "hard_stop_code": outcome.failed_code,
+                            "hard_stop": True, "hard_stop_code": source_code,
                             "error": f"自动重启后仍失联：{label}，任务暂停"})
             else:
-                label = failed_code_label("source_cdp_unavailable", platform)
+                source_code, cdp_reason = _record_source_hard_stop_evidence(
+                    evidence, combos, "source_cdp_unavailable", restart_err,
+                    excluded_keys=set(completed_combos), platform=platform,
+                )
                 emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
-                     keyword=kw, city=display_city, failed_code="source_cdp_unavailable",
-                     message=f"调试浏览器自动重启失败：{restart_err}")
-                evidence.incomplete(combo_key, "调试浏览器自动重启失败", "source_cdp_unavailable")
+                     keyword=kw, city=display_city, failed_code=source_code,
+                     message=cdp_reason)
                 return _finish({"ok": False, "jobs": list(merged.values()),
                         "total_scraped": total_scraped, "total_matched": len(merged),
                         "combinations": len(combos), "completed_combos": completed_combos,
-                        "hard_stop": True, "hard_stop_code": "source_cdp_unavailable",
-                        "error": f"调试浏览器自动重启失败：{restart_err}，任务暂停"})
+                        "hard_stop": True, "hard_stop_code": source_code,
+                        "error": cdp_reason})
         if not outcome.ok:
-            _failure_reason = outcome.failed_reason or (
-                outcome.safe_log.split("reason=", 1)[1] if outcome.safe_log and "reason=" in outcome.safe_log else ""
-            ) or failed_code_label(outcome.failed_code, platform)
-            evidence.failed(combo_key, outcome, skipped=_skipped_login_combo[0], reason=_failure_reason)
+            _failure_reason = user_visible_failure_reason(
+                outcome.failed_code,
+                outcome.failed_reason or (
+                    outcome.safe_log.split("reason=", 1)[1]
+                    if outcome.safe_log and "reason=" in outcome.safe_log else ""
+                ),
+                platform,
+            )
+            source_hard_stop = (
+                not _skipped_login_combo[0]
+                and _is_source_hard_stop(outcome.failed_code)
+            )
+            if source_hard_stop:
+                source_failure = _record_source_hard_stop_evidence(
+                    evidence, combos, outcome.failed_code, _failure_reason,
+                    excluded_keys=set(completed_combos), platform=platform,
+                )
+                if source_failure is None:
+                    source_hard_stop = False
+                else:
+                    source_code, _source_reason = source_failure
+            if not source_hard_stop:
+                evidence.failed(
+                    combo_key, outcome,
+                    skipped=_skipped_login_combo[0], reason=_failure_reason,
+                )
             # 二次复核确认登录失效：跳过本组合并记录原因，不整场暂停
             if _skipped_login_combo[0]:
                 label = failed_code_label(outcome.failed_code, platform)
@@ -470,6 +557,19 @@ def run_search(params: dict, source, *, pages: int = 3,
                      message=f"已跳过本组合（{label}，二次复核仍登录失效），原因已记录")
                 failed_combos += 1
                 login_skipped += 1
+            elif source_hard_stop:
+                # source hard stop 的主证据已按 canonical code 投影到所有
+                # 未完成组合；顶层文案继续沿用当前阻断提示。
+                label = failed_code_label(source_code, platform)
+                emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
+                     keyword=kw, city=display_city, failed_code=source_code,
+                     combo_key=combo_key,
+                     message=f"系统性阻断：{label}，任务暂停")
+                return _finish({"ok": False, "jobs": list(merged.values()),
+                        "total_scraped": total_scraped, "total_matched": len(merged),
+                        "combinations": len(combos), "completed_combos": completed_combos,
+                        "hard_stop": True, "hard_stop_code": source_code,
+                        "error": f"系统性阻断：{label}"})
             elif (resolve_code(outcome.failed_code) in _HARD_STOP_CODES
                   if outcome.failed_code else False):
                 # 系统性阻断（验证码/IP风控/CDP不可用等）：立即停止，不继续跑其他组合
@@ -485,18 +585,19 @@ def run_search(params: dict, source, *, pages: int = 3,
                         "error": f"系统性阻断：{label}"})
             else:
                 failed_combos += 1
-                # 从 safe_log 提取 reason= 后的可读原因
-                _reason = ""
-                if outcome.safe_log and "reason=" in outcome.safe_log:
-                    _reason = outcome.safe_log.split("reason=", 1)[1]
-                detail = f"（{_reason}）" if _reason else ""
+                # source 失败使用中央用户文案；非 source 失败保留诊断。
                 label = failed_code_label(outcome.failed_code, platform)
+                issue_reason = _failure_reason or label
+                detail = (
+                    f"（{issue_reason}）"
+                    if issue_reason and issue_reason != label else ""
+                )
                 # 016：软失败不暂停，但必须按组合落库留痕（combo_issue 事件），
                 # 供任务详情回查；不写任何账号级持久状态。
                 _notify_combo_issue({
                     "kind": "combo_failed",
                     "failed_code": str(outcome.failed_code or "source_unknown_error"),
-                    "reason": (detail.strip("（）") or label)[:200],
+                    "reason": issue_reason[:200],
                     "ts": datetime.now().isoformat(timespec="milliseconds"),
                 })
                 emit(stage="combo_failed", current=len(completed_combos), total=len(combos),
@@ -550,7 +651,7 @@ def run_search(params: dict, source, *, pages: int = 3,
 
         # Delay between combinations (not after the last one).
         if idx < len(combos) - 1:
-            if stop_event is not None and stop_event.is_set():
+            if stop_mode_for_event(stop_event) is not None:
                 break
             delay = random.uniform(*_delay_range)
             emit(stage="waiting", current=len(completed_combos), total=len(combos),
@@ -571,6 +672,34 @@ def run_search(params: dict, source, *, pages: int = 3,
 
     # 广搜策略：不做本地硬筛选，全量返回，筛选交给后续 AI 步骤。
     all_jobs = list(merged.values())
+
+    final_stop_mode = stop_mode_for_event(stop_event)
+    if final_stop_mode is not None:
+        emit(
+            stage=("paused" if final_stop_mode == STOP_MODE_PAUSE else "cancelled"),
+            current=len(completed_combos),
+            total=len(combos),
+            message=(
+                "运行已暂停，已保存当前断点"
+                if final_stop_mode == STOP_MODE_PAUSE else "运行已取消"
+            ),
+        )
+        stop_payload = {
+            "ok": False,
+            "jobs": all_jobs,
+            "total_scraped": total_scraped,
+            "total_matched": len(all_jobs),
+            "combinations": len(combos),
+            "completed_combos": completed_combos,
+            "stop_mode": final_stop_mode,
+            "error": (
+                "用户已暂停，结果已保留"
+                if final_stop_mode == STOP_MODE_PAUSE else "运行已取消"
+            ),
+        }
+        if final_stop_mode == STOP_MODE_PAUSE:
+            return evidence.pause(stop_payload)
+        return _finish(stop_payload, lifecycle_end="cancelled")
 
     # 哨兵第三层：所有非跳过组合全失败 → 中性提示，不冒充风控
     ran_combos = len(combos) - len(_skip)
@@ -597,4 +726,4 @@ def run_search(params: dict, source, *, pages: int = 3,
     return _finish({"ok": True, "jobs": all_jobs, "total_scraped": total_scraped,
             "total_matched": len(all_jobs), "combinations": len(combos),
             "completed_combos": completed_combos,
-            "error": ""}, lifecycle_end=("cancelled" if stop_event is not None and stop_event.is_set() else None))
+            "error": ""})

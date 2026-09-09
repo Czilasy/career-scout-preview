@@ -15,7 +15,7 @@ class WhiteboxRunRef:
     def __str__(self) -> str: return self.id
     def __getitem__(self, key: str) -> Any: return {'id': self.id, 'run_id': self.id, 'owner_kind': self.owner_kind, 'owner_id': self.owner_id}[key]
 class WhiteboxService:
-    _EVENT_TYPES = {'task_started', 'stage_started', 'unit_started', 'page_started', 'page_completed', 'scope_completed', 'source_exhausted', 'explicit_empty', 'unit_failed', 'unit_incomplete', 'unit_skipped', 'account_switched', 'account_switch', 'account_pool_snapshot', 'account_allocation', 'account_handoff', 'browser_restarted', 'browser_recovered', 'stall_detected', 'retry_started', 'retry_abandoned', 'ai_request_failed', 'ai_keep_all_fallback', 'checkpoint_restored', 'recovery_completed', 'submission_failed', 'whitebox_incomplete', 'emergency_record_imported', 'task_finalized', 'task_interrupted'}
+    _EVENT_TYPES = {'task_started', 'task_paused', 'stage_started', 'unit_started', 'page_started', 'page_completed', 'scope_completed', 'source_exhausted', 'explicit_empty', 'unit_failed', 'unit_incomplete', 'unit_skipped', 'account_switched', 'account_switch', 'account_pool_snapshot', 'account_allocation', 'account_handoff', 'browser_restarted', 'browser_recovered', 'stall_detected', 'retry_started', 'retry_abandoned', 'ai_request_failed', 'ai_keep_all_fallback', 'checkpoint_restored', 'recovery_completed', 'submission_failed', 'whitebox_incomplete', 'emergency_record_imported', 'task_finalized', 'task_interrupted'}
     def __init__(self, store: Any, *, emergency_path: str | Path | None=None, sync_task_state: Any | None=None):
         self.store = store
         self.emergency_path = Path(emergency_path) if emergency_path else self._default_emergency_path(store)
@@ -43,6 +43,26 @@ class WhiteboxService:
             raise WhiteboxWriteError('whitebox begin persistence failed') from exc
         run_id = str(row.get('id') if isinstance(row, dict) else row['id'])
         return WhiteboxRunRef(run_id, str(owner_kind), str(owner_id))
+    def set_lifecycle(self, run_ref: WhiteboxRunRef | str | dict[str, Any], lifecycle_status: str) -> dict[str, Any]:
+        run_id = self._run_id(run_ref)
+        setter = getattr(self.store, 'set_whitebox_lifecycle', None)
+        if not callable(setter):
+            raise WhiteboxWriteError('whitebox lifecycle persistence unavailable')
+        try:
+            return setter(run_id, lifecycle_status)
+        except WhiteboxWriteError:
+            raise
+        except Exception as exc:
+            self._handle_required_write_failure(
+                run_id,
+                {
+                    'idempotency_key': f'lifecycle:{run_id}:{lifecycle_status}',
+                    'event_type': 'whitebox_incomplete',
+                    'stage': 'lifecycle',
+                },
+                exc,
+            )
+            raise WhiteboxWriteError('whitebox lifecycle persistence failed') from exc
     def record(self, run_ref: WhiteboxRunRef | str | dict[str, Any], fact: dict[str, Any]) -> dict[str, Any]:
         run_id = self._run_id(run_ref)
         normalized = self._validate_fact(fact)

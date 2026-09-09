@@ -15,7 +15,7 @@ from webui.constants import _MSG_USER_FINISHED, _MSG_USER_STOPPED_SCRAPE, _MSG_U
 from webui.task_status import _recrawl_overall_percent, _screen_overall_percent
 from webui.browser_support import build_browser_support
 from webui.diagnostics import record_failure
-from webui.error_registry import resolve_code
+from webui.error_registry import ALIAS_TO_CODE, resolve_code
 from webui.pipeline_context import PipelineContext
 from webui.store import SYSTEMIC_BLOCK_CODES, DiscoveryStoreConflictError
 from webui.task_runner_support import _theme_path
@@ -195,14 +195,28 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
 
     def _activate_run_browser(run=None) -> None:
         """Point the shared CDP helper at the selected profile."""
-        from webui.pipeline_exec import resolve_browser_account, set_active_cdp_data_dir
-        from webui.platforms import derive_zhilian_profile_dir, resolve_login_space
-        account = str((run or {}).get('browser_account') or (run or {}).get('execution_params', {}).get('browser_account') or '') or _account_for_run(run)
-        platform = str((run or {}).get('platform') or (run or {}).get('execution_params', {}).get('platform') or 'boss')
-        boss_dir = resolve_browser_account(account, app.config['BROWSER_ACCOUNTS_PATH']) or ''
-        resolve_login_space(platform, account, boss_profile_dir=boss_dir or 'unresolved')
-        profile_dir = boss_dir if platform == 'boss' else derive_zhilian_profile_dir(boss_dir)
-        set_active_cdp_data_dir(profile_dir)
+        from webui import pipeline_exec as _facade
+        from webui.frozen_browser_identity import activate_frozen_browser_run
+        if run is None:
+            # 新建任务在提交前先写入内存冻结身份，再调用无参入口；
+            # 优先绑定该任务的冻结登录空间。
+            with _pipeline_lock:
+                queued = [
+                    item for item in _pipeline_tasks.values()
+                    if item.get('status') in ('queued', 'running')
+                ]
+            candidate = queued[-1] if queued else None
+            if candidate and any(
+                str(candidate.get(key) or '').strip()
+                for key in ('platform', 'browser_account', 'profile_key')
+            ):
+                run = candidate
+        activate_frozen_browser_run(
+            run,
+            accounts_path=app.config['BROWSER_ACCOUNTS_PATH'],
+            fallback_account=_account_for_run,
+            activate=_facade.set_active_cdp_data_dir,
+        )
 
     def _activate_task_browser(task_id: str, *, platform: str | None=None, browser_account: str | None=None) -> None:
         """Bind CDP helpers to a task's frozen browser identity.
@@ -212,18 +226,23 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
         profile last selected by a request or another task.
         """
         with _pipeline_lock:
-            task = _pipeline_tasks.get(task_id) or {}
-            account = str(browser_account or task.get('browser_account') or '')
-        from webui.pipeline_exec import resolve_browser_account, set_active_cdp_data_dir
-        profile_dir = resolve_browser_account(account, app.config['BROWSER_ACCOUNTS_PATH'])
-        if profile_dir:
-            resolved_platform = str(platform or task.get('platform') or 'boss')
-            from webui.platforms import resolve_login_space
-            _ = resolve_login_space(resolved_platform, account or 'a', boss_profile_dir=profile_dir)
-            from webui.platforms import derive_zhilian_profile_dir
-            set_active_cdp_data_dir(profile_dir if resolved_platform == 'boss' else derive_zhilian_profile_dir(profile_dir))
-        else:
-            _activate_run_browser()
+            task = dict(_pipeline_tasks.get(task_id) or {})
+        from webui import pipeline_exec as _facade
+        from webui.frozen_browser_identity import activate_frozen_browser_run
+        task.update({
+            key: value
+            for key, value in {
+                'platform': platform,
+                'browser_account': browser_account,
+            }.items()
+            if value not in (None, '')
+        })
+        activate_frozen_browser_run(
+            task or None,
+            accounts_path=app.config['BROWSER_ACCOUNTS_PATH'],
+            fallback_account=_account_for_run,
+            activate=_facade.set_active_cdp_data_dir,
+        )
 
     def _ensure_scrape_source(scrape_task_id: str) -> dict | None:
         """Return a source snapshot only with a canonical evidence report."""
@@ -287,9 +306,15 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
         """AI 筛选入口消费标记；调用后刷新不再自动重试。"""
         _clear_auto_screen(task_id)
 
-    def _check_resume_block(run: dict) -> tuple[bool, str, str]:
-        """Verify the paused dependency before submitting resumed work."""
-        _activate_run_browser(run)
+    def _check_resume_block(
+            run: dict, *, persist: bool = True, probe_only: bool = False,
+    ) -> tuple[bool, str, str]:
+        """Verify a paused dependency without changing browser state.
+
+        Browser activation belongs to the caller's frozen-identity phase.  A
+        resume check may probe the already-bound source, but it must never
+        select or activate a profile implicitly.
+        """
         checker = app.config.get('RESUME_BLOCK_CHECKER')
         if callable(checker):
             passed, code, reason = checker(run)
@@ -301,15 +326,18 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
             _ai_resume_codes = {'ai_rate_limited', 'ai_quota_exhausted', 'ai_key_invalid', 'ai_network_error'}
             try:
                 if code in SYSTEMIC_BLOCK_CODES and code not in _ai_resume_codes:
-                    from webui.pipeline_exec import ensure_chrome_ready, taxonomy_reason
+                    from webui.pipeline_exec import probe_chrome_ready, taxonomy_reason
+                    from webui.pipeline_exec_status import user_visible_failure_reason
                     _resume_params = run.get('execution_params') or {}
                     _resume_platform = run.get('platform') or _resume_params.get('platform') or 'boss'
-                    chrome_ok, chrome_err = ensure_chrome_ready(_resume_params.get('cdp_port'))
+                    chrome_ok, chrome_err = probe_chrome_ready(_resume_params.get('cdp_port'))
                     if not chrome_ok:
                         passed = False
                         code = 'source_cdp_unavailable'
-                        reason = f'调试浏览器尚未就绪：{chrome_err}'
-                    else:
+                        reason = user_visible_failure_reason(
+                            code, chrome_err, _resume_platform,
+                        )
+                    elif not probe_only:
                         source = _make_cdp_source(platform=_resume_platform, browser_account=_resume_params.get('browser_account'), cdp_port=_resume_params.get('cdp_port'), profile_key=_resume_params.get('profile_key'), run_id=str(run.get('id') or ''))
                         outcome = source.preflight() if source is not None else None
                         if outcome is None or not outcome.ok:
@@ -325,7 +353,7 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
                     if not ai_service.is_ai_available(settings, credential_ref, api_key):
                         passed = False
                         reason = 'AI 配置或额度问题尚未处理，请更新后再继续'
-                    else:
+                    elif not probe_only:
                         capability = ai_service.test_connection(str(settings.get('endpoint_url') or ''), api_key, model=str(settings.get('model') or ''))
                         if not capability.get('ok'):
                             passed = False
@@ -337,14 +365,25 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
                 passed = False
                 code = code or 'internal_error'
                 reason = f'阻断复核失败：{type(exc).__name__}'
-        store.append_task_event(run['id'], 'block_check', {'passed': bool(passed), 'stage': run.get('current_stage'), 'error_code': code, 'reason': reason})
-        if not passed:
-            store.update_screening_run(run['id'], error_code=code or 'internal_error', error_reason=reason or '阻断条件尚未解除')
+        raw_code = str(code or '').strip()
+        if raw_code.startswith('source_') or raw_code in ALIAS_TO_CODE:
+            from webui.pipeline_exec_status import user_visible_failure_reason
+            resume_params = run.get('execution_params') or {}
+            resume_platform = run.get('platform') or resume_params.get('platform') or ''
+            code = resolve_code(raw_code)
+            reason = user_visible_failure_reason(
+                raw_code, reason, str(resume_platform),
+            )
+        if persist or not passed:
+            store.append_task_event(run['id'], 'block_check', {'passed': bool(passed), 'stage': run.get('current_stage'), 'error_code': code, 'reason': reason})
+            if not passed:
+                store.update_screening_run(run['id'], error_code=code or 'internal_error', error_reason=reason or '阻断条件尚未解除')
         return (bool(passed), str(code or ''), str(reason or ''))
 
     def _persist_jd_job_failures(task_run_id: str, jobs: list[dict], *, stage: str, source_run_id: str='', platform: str='') -> None:
         """Persist per-job JD failures before a systemic pause returns."""
         from webui.pipeline_exec import ERROR_TAXONOMY, failed_code_label, taxonomy_reason
+        from webui.pipeline_exec_status import user_visible_failure_reason
         target_run_ids = [str(task_run_id)]
         if source_run_id and str(source_run_id) not in target_run_ids:
             target_run_ids.append(str(source_run_id))
@@ -361,6 +400,7 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
             reason = str(job.get('jd_failed_reason') or '').strip()
             if not reason:
                 reason = taxonomy_reason(taxonomy_code, platform, fallback=failed_code_label(failed_code, platform) or 'JD 抓取失败')
+            reason = user_visible_failure_reason(failed_code, reason, platform)
             for run_id in target_run_ids:
                 existing = store.get_pending_result(run_id, job_id)
                 store.insert_pending_result(run_id, job_id, failure_stage=stage, retryable=bool(taxonomy.get('retryable', True)), attempts=int((existing or {}).get('attempts') or 0) + 1, origin_zone=str((existing or {}).get('origin_zone') or 'kept'), ai_payload_json={'reason': reason, 'evidence': failed_code, 'evidence_detail': str(job.get('jd_failed_evidence') or ''), 'next_action': 'retry_jd'}, failed_code=failed_code, platform=platform)

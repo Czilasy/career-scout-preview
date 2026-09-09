@@ -256,12 +256,16 @@ def register_core_routes(app, ctx):
                 browser_account=account, cdp_port=login_space.cdp_port,
                 profile_key=login_space.profile_key)
             outcome = source.preflight()
+            from webui.pipeline_exec_status import user_visible_failure_reason
+
             return jsonify({
                 "ok": bool(outcome.ok),
                 "platform": check_platform,
                 "connected": bool(outcome.ok),
                 "error_code": outcome.failed_code or "",
-                "error_reason": outcome.failed_reason or "",
+                "error_reason": user_visible_failure_reason(
+                    outcome.failed_code, outcome.failed_reason, check_platform
+                ) or "",
             })
         if ctx.runtime_mode == "exe":
             # 合同 inprocess-runner §6：EXE 模式不 spawn 子进程，复用

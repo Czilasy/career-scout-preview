@@ -31,6 +31,69 @@ from webui.account_round_robin import (
     make_list_robin,
     plan_round_robin,
 )
+from webui.source import SourceOutcome
+
+
+# ---------------------------------------------------------------------------
+# 平台输入哈希适配边界
+# ---------------------------------------------------------------------------
+
+class PlatformInputHashAdapterTests(unittest.TestCase):
+    """轮询调度只调用公开平台适配能力，不维护平台分支。"""
+
+    def test_boss_and_zhilian_hashes_are_preserved_by_public_adapter(self):
+        from webui.platform_input_adapter import resolve_platform_input_adapter
+
+        boss_plan = {
+            "platform": "boss",
+            "keyword": "Python",
+            "city": "上海",
+            "source_filters": {"experience": ["1-3"]},
+        }
+        zhilian_plan = {
+            "platform": "zhilian",
+            "keyword": "Python",
+            "city": {
+                "name": "上海",
+                "platform_code": "310000",
+                "mapping_version": 2,
+            },
+            "route_city_code": "310000",
+        }
+        boss_adapter = resolve_platform_input_adapter("boss")
+        zhilian_adapter = resolve_platform_input_adapter("zhilian")
+
+        self.assertEqual(
+            robin_mod._recompute_input_hash(boss_plan, 2),
+            boss_adapter.compute_input_hash(boss_plan, 2),
+        )
+        self.assertEqual(
+            robin_mod._recompute_input_hash(zhilian_plan, 2),
+            zhilian_adapter.compute_input_hash(zhilian_plan, 2),
+        )
+        self.assertNotEqual(
+            boss_adapter.compute_input_hash(boss_plan, 2),
+            zhilian_adapter.compute_input_hash(zhilian_plan, 2),
+        )
+
+    def test_scheduler_delegates_to_public_adapter_without_private_platform_branch(self):
+        import inspect
+
+        module_source = inspect.getsource(robin_mod)
+        self.assertNotIn('platform == "zhilian"', module_source)
+        self.assertNotIn("_zhilian_input_hash", module_source)
+
+        adapter = mock.Mock()
+        adapter.compute_input_hash.return_value = "adapter-hash"
+        with mock.patch(
+            "webui.platform_input_adapter.resolve_platform_input_adapter",
+            return_value=adapter,
+        ) as resolve_adapter:
+            plan = {"platform": "zhilian", "keyword": "Python"}
+            self.assertEqual(robin_mod._recompute_input_hash(plan, 3), "adapter-hash")
+
+        resolve_adapter.assert_called_once_with("zhilian")
+        adapter.compute_input_hash.assert_called_once_with(plan, 3)
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +205,15 @@ class WallCodeTests(unittest.TestCase):
         self.assertTrue(is_wall_code("source_rate_limited"))
         self.assertTrue(is_wall_code("source_verification_required"))
 
+    def test_explicit_platform_rate_limit_remains_a_wall_signal(self):
+        self.assertTrue(is_wall_code("source_rate_limited"))
+
+    def test_login_required_is_a_public_systemic_wall(self):
+        self.assertTrue(is_wall_code("source_login_required"))
+
+    def test_local_request_cap_is_a_public_systemic_wall(self):
+        self.assertTrue(is_wall_code("source_request_limit_exceeded"))
+
     def test_browser_lost_not_wall(self):
         # 浏览器失联交 BrowserRecovery，不经账号切换
         self.assertFalse(is_wall_code("source_cdp_unavailable"))
@@ -151,6 +223,7 @@ class WallCodeTests(unittest.TestCase):
         self.assertFalse(is_wall_code(""))
         self.assertFalse(is_wall_code(None))
         self.assertFalse(is_wall_code("source_timeout"))
+        self.assertTrue(is_wall_code("source_unreachable"))
 
 
 class CloneSourceTests(unittest.TestCase):
@@ -526,6 +599,30 @@ class ListRobinTests(unittest.TestCase):
         self.assertTrue(out.ok)
         mark.assert_not_called()
 
+    def test_source_unreachable_uses_the_public_wall_lifecycle(self):
+        book = _make_book(("a", "A"), ("b", "B"), r1=25)
+        self.addCleanup(book.cleanup)
+        book.set_path()
+        self.addCleanup(lambda: __import__(
+            "webui.pipeline_exec_accounts", fromlist=["reset_browser_accounts_path"]
+        ).reset_browser_accounts_path())
+
+        source = self._source_in_pool("a", [
+            _FakeOutcome(False, failed_code="source_unreachable"),
+        ])
+        robin = ListRobin(
+            source, robin_mod._engaged_entries(source, "R1"), run_id="run-unreachable",
+        )
+        with mock.patch.object(robin_mod, "mark_account_rate_limited") as mark:
+            outcome = robin.fetch_list(source, {
+                "keyword": "k", "city": "c", "combo_key": "k|c",
+                "start_page": 1, "target_pages": 1, "source_filters": {},
+                "input_hash": "H", "platform": "boss",
+            })
+        self.assertTrue(outcome.ok)
+        self.assertIsNone(outcome.failed_code)
+        mark.assert_called_once_with("a")
+
     def test_all_walled_returns_failure_for_pause(self):
         # 全撞完 → 返回失败 outcome 交既有暂停路径（FR-013）
         book = _make_book(("a", "A"), ("b", "B"), r1=25)
@@ -552,6 +649,58 @@ class ListRobinTests(unittest.TestCase):
         # 全撞完返回最后一个真实失败 outcome（b 的 source_verification_required），
         # 交既有暂停路径处理（FR-013：系统性阻断走现有"暂停"，不新增报错字段）
         self.assertEqual(out.failed_code, "source_verification_required")
+
+
+class SharedPipelineOrchestrationTests(unittest.TestCase):
+    """两个平台适配器都必须进入同一个 run_search → ListRobin 入口。"""
+
+    def test_boss_and_zhilian_use_the_same_public_search_orchestration(self):
+        from webui.pipeline_exec_search import run_search
+
+        observed: list[tuple[str, str]] = []
+
+        class _SharedListRobin:
+            def fetch_list(self, source, plan_item, *, on_page_completed=None):
+                observed.append((str(source.platform), str(plan_item.get("platform") or "boss")))
+                return SourceOutcome.success(
+                    jobs=[{
+                        "platform": source.platform,
+                        "platform_job_id": f"{source.platform}-job",
+                    }],
+                    scope_complete=True,
+                    source_exhausted=True,
+                )
+
+        class _Adapter:
+            def __init__(self, platform: str, cdp_port: int):
+                self.platform = platform
+                self.cdp_port = cdp_port
+
+            def preflight(self):
+                return SourceOutcome.success()
+
+        with tempfile.TemporaryDirectory(prefix="cs_shared_pipeline_") as artifact_dir, \
+                mock.patch.object(
+                    robin_mod,
+                    "make_list_robin",
+                    side_effect=lambda source, **_: _SharedListRobin(),
+                ), mock.patch(
+                    "webui.pipeline_exec.ensure_chrome_ready",
+                    return_value=(True, ""),
+                ), mock.patch(
+                    "webui.pipeline_exec.close_debug_chrome",
+                ):
+            for platform, port in (("boss", 9222), ("zhilian", 9223)):
+                result = run_search(
+                    {"keyword": "Python", "city": ["全国"]},
+                    _Adapter(platform, port),
+                    pages=1,
+                    artifact_dir=artifact_dir,
+                    sleeper=lambda _seconds: None,
+                )
+                self.assertTrue(result["ok"], platform)
+
+        self.assertEqual(observed, [("boss", "boss"), ("zhilian", "zhilian")])
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +970,15 @@ class WiringTests(unittest.TestCase):
             src.index("list_robin = make_list_robin"),
             src.index("for idx, combo in enumerate(combos)"),
         )
+
+    def test_search_plan_shape_is_owned_by_platform_adapter(self):
+        import inspect
+        from webui import pipeline_exec_search
+        src = inspect.getsource(pipeline_exec_search.run_search)
+        self.assertNotIn('platform == "zhilian"', src)
+        self.assertNotIn("build_zhilian_city_snapshot", src)
+        self.assertNotIn("_zhilian_input_hash", src)
+        self.assertIn("plan_adapter.build_plan_item", src)
 
     def test_detail_wiring_uses_resume_identity_switch_events(self):
         import inspect

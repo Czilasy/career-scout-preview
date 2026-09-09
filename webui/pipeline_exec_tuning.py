@@ -98,6 +98,64 @@ class TuningRoundRunner:
             return None
         return MappingProxyType(transport_limits)
 
+    @staticmethod
+    def _frozen_runtime(manifest: dict, artifact_manifest: dict) -> dict:
+        """Read and cross-check the complete runtime frozen for this round.
+
+        The workload artifact is the persisted source of account identity.  A
+        round must never silently fill missing account/port/profile values from
+        current UI state or platform defaults.  ``task_id`` is only the
+        compatibility fallback for old manifests that did not persist a
+        separate source run id.
+        """
+        fixed = manifest.get("fixed_fields") or {}
+        if not isinstance(fixed, dict):
+            raise ValueError("轮次 fixed_fields 不可读")
+        if not isinstance(artifact_manifest, dict):
+            raise ValueError("冻结 artifact manifest 不可读")
+
+        runtime = {}
+        for key in ("platform", "browser_account", "cdp_port", "profile_key"):
+            artifact_value = artifact_manifest.get(key)
+            fixed_value = fixed.get(key)
+            if (
+                artifact_value is not None
+                and fixed_value is not None
+                and str(artifact_value) != str(fixed_value)
+            ):
+                raise ValueError(f"冻结 runtime.{key} 与 fixed_fields 不一致")
+            runtime[key] = artifact_value if artifact_value is not None else fixed_value
+
+        platform = str(runtime.get("platform") or "").strip()
+        if platform not in {"boss", "zhilian"}:
+            raise ValueError("冻结 runtime 缺少有效 platform")
+        account = str(runtime.get("browser_account") or "").strip()
+        if not account:
+            raise ValueError("冻结 runtime 缺少 browser_account")
+        try:
+            cdp_port = int(runtime.get("cdp_port"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("冻结 runtime 缺少有效 cdp_port") from exc
+        profile_key = str(runtime.get("profile_key") or "").strip()
+        if not profile_key:
+            raise ValueError("冻结 runtime 缺少 profile_key")
+        run_id = str(
+            artifact_manifest.get("run_id")
+            or manifest.get("run_id")
+            or manifest.get("task_id")
+            or manifest.get("round_id")
+            or ""
+        ).strip()
+        if not run_id:
+            raise ValueError("冻结 runtime 缺少 run_id")
+        return {
+            "platform": platform,
+            "browser_account": account,
+            "cdp_port": cdp_port,
+            "profile_key": profile_key,
+            "run_id": run_id,
+        }
+
     def execute(self, manifest: dict, *, measurement_callback=None) -> dict:
         from webui import pipeline_exec as _facade
         from webui.ai import match_jds, screen_jobs
@@ -131,10 +189,12 @@ class TuningRoundRunner:
         quality_context = base_context.get("quality_context")
         if not isinstance(quality_context, dict):
             raise ValueError("冻结输入产物缺少 quality_context")
+        runtime = self._frozen_runtime(manifest, base_context)
+        params["platform"] = runtime["platform"]
         source = (
             self.source_factory(
                 artifact_root=artifact_dir,
-                platform=manifest.get("fixed_fields", {}).get("platform"),
+                **runtime,
             )
             if kind in {"list", "detail", "end_to_end"}
             else None
@@ -193,6 +253,7 @@ class TuningRoundRunner:
                 emit_kept_terminal=(kind == "rough"),
                 measurement_input_count=base_input_count,
                 retry_limits=retry_limits,
+                platform=runtime["platform"],
             )
             kept = set(rough["kept"])
             jobs = [job for job in jobs if str(job.get("job_id", "")) in kept]
@@ -221,6 +282,7 @@ class TuningRoundRunner:
                 retry_limits=self._retry_limits_from_manifest(manifest),
                 criteria=quality_context.get("screening_fields"),
                 profile_facts=quality_context.get("profile_facts"),
+                platform=runtime["platform"],
             )
             return {"round_kind": kind, "jobs": jobs, **fine}
         raise ValueError(f"轮次 {kind} 未产生结果")

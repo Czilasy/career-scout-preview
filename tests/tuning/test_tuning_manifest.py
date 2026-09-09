@@ -1317,6 +1317,11 @@ class TuningRoundRunnerTests(unittest.TestCase):
                 "profile_summary": "Python developer",
                 "profile_ref": "user-confirmed:test",
             },
+            "platform": "boss",
+            "browser_account": "account-a",
+            "cdp_port": 9222,
+            "profile_key": "boss:account-a",
+            "run_id": "tuning-run-1",
         }, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8")
         self.context_digest = "sha256:" + hashlib.sha256(
             context_file.read_bytes()).hexdigest()
@@ -1401,6 +1406,8 @@ class TuningRoundRunnerTests(unittest.TestCase):
             self.assertEqual(detail_stage.call_count, 2)
             self.assertEqual(rough_stage.call_count, 2)
             self.assertEqual(fine_stage.call_count, 2)
+            self.assertEqual(rough_stage.call_args_list[0].kwargs["platform"], "boss")
+            self.assertEqual(fine_stage.call_args_list[0].kwargs["platform"], "boss")
             close_stage.assert_called_once_with()
 
     def test_unknown_round_kind_blocks(self):
@@ -1492,6 +1499,10 @@ class TuningRoundRunnerTests(unittest.TestCase):
             (self.root / "tuning" / "exp-run" / "artifacts" / "round-list").resolve(),
         )
         self.assertEqual(captured.get("platform"), "boss")
+        self.assertEqual(captured.get("browser_account"), "account-a")
+        self.assertEqual(captured.get("cdp_port"), 9222)
+        self.assertEqual(captured.get("profile_key"), "boss:account-a")
+        self.assertEqual(captured.get("run_id"), "tuning-run-1")
 
     def test_tampered_source_artifact_blocks_before_stage_execution(self):
         from webui.pipeline_exec import TuningRoundRunner

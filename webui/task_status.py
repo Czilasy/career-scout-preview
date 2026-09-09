@@ -33,7 +33,7 @@ def _public_task_status(status: str, interruption_kind: str | None = None) -> st
             "process_restart", "operator_stop"):
         return "interrupted"
     if status == "interrupted" and interruption_kind == "user_finished":
-        return "cancelled"
+        return "completed_with_pending"
     return mapping.get(status, status or "failed")
 
 
@@ -48,7 +48,9 @@ def _public_status_for_integrity(
         return _public_task_status(lifecycle, interruption_kind)
     conclusion = str((integrity or {}).get("conclusion") or "")
     if conclusion == "interrupted":
-        if interruption_kind in {"user_finished", "user_cancelled"}:
+        if interruption_kind == "user_finished":
+            return "completed_with_pending"
+        if interruption_kind == "user_cancelled":
             return "cancelled"
         return "interrupted"
     return {

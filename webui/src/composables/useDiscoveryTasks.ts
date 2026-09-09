@@ -47,6 +47,11 @@ export function useDiscoveryTasks(state: DiscoveryState, deps: TasksNeeds) {
   const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, activeTaskRestored, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, executionSelection, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, historyStore, interruptedRunId, isScrapedOnly, taskCompletedToast, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resumeAnalysis, schemaLoader, scopePreview, scopePreviewBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform, unfinishedWorkflowRestored } = state;
   const { cancelScrape, clearLatestResult, clearWorkflowState, continueAiScreen, enterScreenStep, fetchMergedLatestResult, finishPausedTask, isLoginErrorCode, jobId, loadLatestResult, notify, restoreRunningTask, setPipelineResult, showLoginGuide, startAiScreen } = deps;
 
+  function clearScrapeRecoveryMarkers(): void {
+    pausedRunId.value = "";
+    interruptedRunId.value = "";
+  }
+
 
 async function pollTask(taskId: string, kind: "scrape" | "screen") {
   try {
@@ -88,10 +93,14 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
     if (["unverifiable", "failed", "interrupted"].includes(integrityConclusion)) {
       if (kind === "scrape") {
         scrapeBusy.value = false;
+        clearScrapeRecoveryMarkers();
         scrapeSnapshot.value = data;
       } else {
         screenBusy.value = false;
         pausingScreen.value = false;
+        // AI 错误/完整性异常只保留事实快照，不继续占用公共任务槽。
+        pausedRunId.value = "";
+        interruptedRunId.value = "";
         screenSnapshot.value = data;
       }
       deps.notify(
@@ -180,12 +189,18 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       if (kind === "scrape") scrapeBusy.value = false;
       else screenBusy.value = false;
       if (kind === "screen") pausingScreen.value = false;
+      pausedRunId.value = "";
+      interruptedRunId.value = "";
       // 不弹 error 通知：deps.cancelScrape 已经弹过了；这里是轮询兜底（如刷新后接回的取消态）
       return;
     }
     if (data.status === "paused") {
       pollRetryCount.value = 0;
-      if (kind === "scrape") scrapeBusy.value = false;
+      if (kind === "scrape") {
+        scrapeBusy.value = false;
+        pausedRunId.value = taskId;
+        scrapeSnapshot.value = data;
+      }
       else screenBusy.value = false;
       if (kind === "screen") {
         pausingScreen.value = false;
@@ -198,8 +213,14 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
     if (data.status === "failed") {
       pollRetryCount.value = 0;
       restoredTaskHint.value = "";
-      if (kind === "scrape") scrapeBusy.value = false;
-      else screenBusy.value = false;
+      if (kind === "scrape") {
+        scrapeBusy.value = false;
+        clearScrapeRecoveryMarkers();
+      } else {
+        screenBusy.value = false;
+        pausedRunId.value = "";
+        interruptedRunId.value = "";
+      }
       if (kind === "screen") pausingScreen.value = false;
       deps.notify(data.error || "任务执行失败", "error");
       // D7：任务因未登录失败时给出账号级登录引导。
@@ -211,14 +232,18 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
     if (data.status === "interrupted") {
       // 服务重启打断：工作线程已死，不能继续轮询；停止 busy 并回到可操作的中断态。
       pollRetryCount.value = 0;
-      interruptedRunId.value = taskId;
       if (kind === "scrape") {
         scrapeBusy.value = false;
+        clearScrapeRecoveryMarkers();
         scrapeTaskId.value = taskId;
         analysisReady.value = true;
         activeStep.value = "search";
         restoredTaskHint.value = "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取";
       } else {
+        // 服务中断属于错误终态：保留快照和查看入口，但不把它登记为
+        // 可恢复占用，避免切平台/新任务被旧 AI 任务卡住。
+        pausedRunId.value = "";
+        interruptedRunId.value = "";
         screenBusy.value = false;
         screenTaskId.value = taskId;
         pausingScreen.value = false;
@@ -239,6 +264,11 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       pollRetryCount.value = 0;
       if (kind === "scrape") scrapeBusy.value = false;
       else screenBusy.value = false;
+      if (kind === "scrape") clearScrapeRecoveryMarkers();
+      else {
+        pausedRunId.value = "";
+        interruptedRunId.value = "";
+      }
       const failed: TaskSnapshot = {
         status: "failed",
         progress: { message: "任务执行失败" },
@@ -600,8 +630,9 @@ async function pollRecrawl(taskId: string) {
     if (["unverifiable", "failed", "interrupted"].includes(integrityConclusion)) {
       recrawlRetryCount.value = 0;
       recrawlBusy.value = false;
+      pausedRunId.value = "";
+      interruptedRunId.value = "";
       if (integrityConclusion === "interrupted") {
-        interruptedRunId.value = taskId;
         recrawlTaskId.value = taskId;
         restoredTaskHint.value = "上次补抓因服务重启被中断；可结束保存已有结果";
       }
@@ -633,6 +664,8 @@ async function pollRecrawl(taskId: string) {
     if (data.status === "cancelled") {
       recrawlRetryCount.value = 0;
       recrawlBusy.value = false;
+      pausedRunId.value = "";
+      interruptedRunId.value = "";
       deps.notify("已停止重抓", "warning");
       window.setTimeout(() => { recrawlSnapshot.value = null; }, 3000);
       return;
@@ -640,12 +673,15 @@ async function pollRecrawl(taskId: string) {
     if (data.status === "paused") {
       recrawlRetryCount.value = 0;
       recrawlBusy.value = false;
+      pausedRunId.value = taskId;
       deps.notify(data.error || "重抓已暂停，请处理后点继续", "warning");
       return;
     }
     if (data.status === "failed") {
       recrawlRetryCount.value = 0;
       recrawlBusy.value = false;
+      pausedRunId.value = "";
+      interruptedRunId.value = "";
       deps.notify(data.error || "重抓失败", "error");
       window.setTimeout(() => { recrawlSnapshot.value = null; }, 5000);
       return;
@@ -653,7 +689,8 @@ async function pollRecrawl(taskId: string) {
     if (data.status === "interrupted") {
       recrawlRetryCount.value = 0;
       recrawlBusy.value = false;
-      interruptedRunId.value = taskId;
+      pausedRunId.value = "";
+      interruptedRunId.value = "";
       recrawlTaskId.value = taskId;
       restoredTaskHint.value = "上次补抓因服务重启被中断；可结束保存已有结果";
       data.progress = { ...(data.progress || {}), message: "任务因服务重启被中断，已保存进度" };
@@ -666,6 +703,8 @@ async function pollRecrawl(taskId: string) {
     if (recrawlRetryCount.value > POLL_MAX_RETRIES) {
       recrawlRetryCount.value = 0;
       recrawlBusy.value = false;
+      pausedRunId.value = "";
+      interruptedRunId.value = "";
       recrawlSnapshot.value = {
         status: "failed",
         progress: { message: "重抓进度获取连续失败" },

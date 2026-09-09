@@ -55,7 +55,7 @@ class ScrapeOnlyStoreTests(unittest.TestCase):
         self.assertEqual(run["status"], "scraped_only")
         self.assertEqual(run["record_kind"], "result_snapshot")
         self.assertEqual(run["total_scraped"], 2)
-        self.assertEqual(run["total_kept"], 2)
+        self.assertEqual(run["total_kept"], 0)
         self.assertEqual(run["match_count"], 0)
         self.assertEqual(run["execution_params"].get("scrape_task_id"), "scrape-1")
 

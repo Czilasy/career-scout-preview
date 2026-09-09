@@ -106,7 +106,8 @@ def run_fine_stage(ctx, task_id, enriched, profile_summary, criteria,
                 progress=_fine_progress,
                 on_batch_done=_fine_batch_done,
                 execution_config=execution_config,
-                correlation_id=task_id)
+                correlation_id=task_id,
+                platform=frozen_platform)
             if match_result.get("degraded"):
                 reasons = [str(reason or "ai_request_failed")
                            for reason in (match_result.get("fallback_reasons") or [])]

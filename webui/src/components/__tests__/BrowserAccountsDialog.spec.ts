@@ -256,6 +256,7 @@ describe("BrowserAccountsDialog", () => {
     expect(wrapper.get('[data-testid="delete-b"]').attributes("disabled")).toBeUndefined();
     const notice = wrapper.get(".browser-account-notice");
     expect(notice.text()).toContain("有暂停任务，可切换账号");
+    expect(notice.text()).not.toContain("切换后继续");
     expect(notice.text()).not.toContain("请先结束任务");
   });
 

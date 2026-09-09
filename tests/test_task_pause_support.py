@@ -1,0 +1,457 @@
+"""Safety contracts for the shared scrape pause helpers."""
+
+from __future__ import annotations
+
+import threading
+import json
+import tempfile
+import unittest
+from types import SimpleNamespace
+from unittest import mock
+
+from webui.constants import _OPERATIONAL_ERRORS
+from webui.browser_support import build_browser_support
+from webui.diagnostics import record_failure
+from webui.runners.pipeline_task import run_pipeline_task
+from webui.store import TaskStore
+from webui.task_pause_support import (
+    STOP_MODE_CANCEL,
+    STOP_MODE_FINISH,
+    STOP_MODE_PAUSE,
+    STOP_MODE_TERMINATE,
+    ScrapeCheckpointReadError,
+    ScrapeCheckpointWriteError,
+    mark_scrape_paused,
+    request_stop,
+    stop_mode_for_event,
+)
+
+
+class ScrapeCheckpointPauseSafetyTests(unittest.TestCase):
+    def test_strict_reader_accepts_missing_and_empty_but_rejects_corrupt_payload(self):
+        """Pause-only checkpoint reads distinguish legal empty from corruption."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "strict-checkpoint-read"
+            store.create_screening_run(run_id, source_count=1)
+
+            self.assertEqual(
+                store.load_checkpoint_strict(run_id, "scrape"), set())
+            store.save_checkpoint(run_id, "scrape", [])
+            self.assertEqual(
+                store.load_checkpoint_strict(run_id, "scrape"), set())
+
+            with store._connection() as conn:
+                conn.execute(
+                    "UPDATE pipeline_checkpoints SET completed_keys_json = ? "
+                    "WHERE run_id = ? AND stage = 'scrape'",
+                    ("{not-json", run_id),
+                )
+            with self.assertRaises(ValueError):
+                store.load_checkpoint_strict(run_id, "scrape")
+
+    def test_checkpoint_read_failure_keeps_durable_checkpoint_and_is_visible(self):
+        """A failed read must not overwrite the last durable checkpoint."""
+
+        class FailingCheckpointStore:
+            def __init__(self):
+                self.durable = {"already-saved|city"}
+                self.save_calls = []
+                self.events = []
+
+            def load_checkpoint(self, _run_id, _stage):
+                raise RuntimeError("credential-secret must not be logged")
+
+            def load_checkpoint_strict(self, _run_id, _stage):
+                raise RuntimeError("credential-secret must not be logged")
+
+            def save_checkpoint(self, _run_id, _stage, keys):
+                self.save_calls.append(set(keys))
+                self.durable = set(keys)
+
+            def append_task_event(self, _run_id, event_type, payload):
+                self.events.append((event_type, payload))
+
+        store = FailingCheckpointStore()
+        failure_calls = []
+        ctx = SimpleNamespace(
+            store=store,
+            operational_errors=(RuntimeError,),
+            write_run=mock.Mock(),
+            lock=threading.RLock(),
+            tasks={},
+            record_pause_failure=lambda *args, **kwargs: failure_calls.append(
+                (args, kwargs)
+            ),
+        )
+
+        with self.assertLogs("career_scout.task_pause_support", level="ERROR") as logs:
+            with self.assertRaises(ScrapeCheckpointReadError) as raised:
+                mark_scrape_paused(
+                    ctx,
+                    "run-checkpoint-read-failure",
+                    completed_combos=["new|city"],
+                    skip_combos=["skipped|city"],
+                )
+
+        self.assertEqual(raised.exception.error_code, "checkpoint_read_failed")
+        self.assertEqual(store.durable, {"already-saved|city"})
+        self.assertEqual(store.save_calls, [])
+        ctx.write_run.assert_called_once()
+        self.assertEqual(ctx.write_run.call_args.kwargs["status"], "failed")
+        self.assertEqual(
+            ctx.write_run.call_args.kwargs["error_code"], "checkpoint_read_failed",
+        )
+        self.assertTrue(failure_calls)
+        self.assertEqual(failure_calls[0][0][2], "checkpoint_read_failed")
+        self.assertTrue(any("checkpoint_read_failed" in line for line in logs.output))
+        self.assertNotIn("credential-secret", "\n".join(logs.output))
+
+    def test_real_db_corrupt_checkpoint_records_failure_without_overwrite(self):
+        """A corrupt JSON checkpoint preserves its exact durable bytes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "real-corrupt-checkpoint"
+            store.create_screening_run(run_id, source_count=2)
+            store.update_screening_run(run_id, status="running")
+            store.save_checkpoint(run_id, "scrape", ["already|saved"])
+            corrupt = '{"credential":"credential-secret"'
+            with store._connection() as conn:
+                conn.execute(
+                    "UPDATE pipeline_checkpoints SET completed_keys_json = ? "
+                    "WHERE run_id = ? AND stage = 'scrape'",
+                    (corrupt, run_id),
+                )
+
+            def _record_failure(run, stage, code, reason, **kwargs):
+                return record_failure(
+                    store, run, stage=stage, error_code=code, reason=reason,
+                    correlation_id=run, diagnostics=kwargs,
+                )
+
+            ctx = SimpleNamespace(
+                store=store,
+                operational_errors=_OPERATIONAL_ERRORS,
+                write_run=mock.Mock(),
+                lock=threading.RLock(),
+                tasks={},
+                record_pause_failure=_record_failure,
+            )
+
+            with self.assertLogs(
+                    "career_scout.task_pause_support", level="ERROR") as logs:
+                with self.assertRaises(ScrapeCheckpointReadError):
+                    mark_scrape_paused(
+                        ctx, run_id,
+                        completed_combos=["new|city"],
+                        reason="用户暂停",
+                    )
+
+            with store._connection() as conn:
+                row = conn.execute(
+                    "SELECT completed_keys_json FROM pipeline_checkpoints "
+                    "WHERE run_id = ? AND stage = 'scrape'", (run_id,),
+                ).fetchone()
+            self.assertEqual(row["completed_keys_json"], corrupt)
+            ctx.write_run.assert_called_once()
+            self.assertEqual(ctx.write_run.call_args.kwargs["status"], "failed")
+            self.assertEqual(
+                ctx.write_run.call_args.kwargs["error_code"], "checkpoint_read_failed",
+            )
+            failures = [
+                event for event in store.list_task_events(run_id)
+                if event["type"] == "failure"
+            ]
+            self.assertTrue(failures)
+            self.assertEqual(
+                failures[-1]["payload"]["error_code"], "checkpoint_read_failed")
+            self.assertNotIn(
+                "credential-secret",
+                json.dumps(failures[-1]["payload"], ensure_ascii=False),
+            )
+            self.assertNotIn("credential-secret", "\n".join(logs.output))
+
+    def test_corrupt_checkpoint_marks_run_failed_before_worker_exits(self):
+        """严格读取失败也必须把真实 run 固定为 failed，而不是 running。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "real-corrupt-checkpoint-paused"
+            store.create_screening_run(run_id, source_count=2)
+            store.update_screening_run(run_id, status="running", current_stage="scrape")
+            store.save_checkpoint(run_id, "scrape", ["already|saved"])
+            corrupt = '{"credential":"credential-secret"'
+            with store._connection() as conn:
+                conn.execute(
+                    "UPDATE pipeline_checkpoints SET completed_keys_json = ? "
+                    "WHERE run_id = ? AND stage = 'scrape'",
+                    (corrupt, run_id),
+                )
+
+            ctx = SimpleNamespace(
+                store=store,
+                operational_errors=_OPERATIONAL_ERRORS,
+                write_run=lambda current_id, **kwargs: store.update_screening_run(
+                    current_id, **kwargs),
+                lock=threading.RLock(),
+                tasks={},
+                record_pause_failure=lambda current_id, stage, code, reason, **kwargs: record_failure(
+                    store, current_id, stage=stage, error_code=code,
+                    reason=reason, correlation_id=current_id,
+                    diagnostics=kwargs,
+                ),
+            )
+
+            with self.assertRaises(ScrapeCheckpointReadError):
+                mark_scrape_paused(
+                    ctx, run_id, completed_combos=["new|city"], reason="用户暂停",
+                )
+
+            run = store.get_screening_run(run_id)
+            self.assertEqual(run["status"], "failed")
+            self.assertEqual(run["error_code"], "checkpoint_read_failed")
+            self.assertEqual(run["source_count"], 2)
+            with store._connection() as conn:
+                row = conn.execute(
+                    "SELECT completed_keys_json FROM pipeline_checkpoints "
+                    "WHERE run_id = ? AND stage = 'scrape'", (run_id,),
+                ).fetchone()
+            self.assertEqual(row["completed_keys_json"], corrupt)
+            failures = [
+                event for event in store.list_task_events(run_id)
+                if event["type"] == "failure"
+            ]
+            self.assertTrue(failures)
+            self.assertEqual(
+                failures[-1]["payload"]["error_code"], "checkpoint_read_failed",
+            )
+
+    def test_checkpoint_save_failure_marks_run_failed_and_records_failure(self):
+        """断点保存失败时 runner 结束也不能把 durable run 留在 running。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "checkpoint-save-failure-paused"
+            store.create_screening_run(run_id, source_count=2)
+            store.update_screening_run(run_id, status="running", current_stage="scrape")
+            ctx = SimpleNamespace(
+                store=store,
+                operational_errors=_OPERATIONAL_ERRORS,
+                write_run=lambda current_id, **kwargs: store.update_screening_run(
+                    current_id, **kwargs),
+                lock=threading.RLock(),
+                tasks={},
+                record_pause_failure=lambda current_id, stage, code, reason, **kwargs: record_failure(
+                    store, current_id, stage=stage, error_code=code,
+                    reason=reason, correlation_id=current_id,
+                    diagnostics=kwargs,
+                ),
+            )
+
+            with mock.patch.object(
+                    store, "save_checkpoint",
+                    side_effect=RuntimeError("checkpoint write unavailable")):
+                with self.assertRaises(ScrapeCheckpointWriteError):
+                    mark_scrape_paused(
+                        ctx, run_id, completed_combos=["new|city"], reason="用户暂停",
+                    )
+
+            run = store.get_screening_run(run_id)
+            self.assertEqual(run["status"], "failed")
+            self.assertEqual(run["error_code"], "checkpoint_write_failed")
+            self.assertEqual(run["source_count"], 2)
+            failures = [
+                event for event in store.list_task_events(run_id)
+                if event["type"] == "failure"
+            ]
+            self.assertTrue(failures)
+            self.assertEqual(
+                failures[-1]["payload"]["error_code"], "checkpoint_write_failed",
+            )
+
+
+class StopModePriorityTests(unittest.TestCase):
+    def test_pause_cannot_overwrite_terminal_mode_in_either_order(self):
+        """Terminal cleanup/finish/cancel always wins over a pause request."""
+        for terminal_mode in (
+            STOP_MODE_FINISH,
+            STOP_MODE_CANCEL,
+            STOP_MODE_TERMINATE,
+        ):
+            for first_mode, second_mode in (
+                (terminal_mode, STOP_MODE_PAUSE),
+                (STOP_MODE_PAUSE, terminal_mode),
+            ):
+                task = {}
+                stop_event = threading.Event()
+                request_stop(task, stop_event, first_mode)
+                request_stop(task, stop_event, second_mode)
+
+                self.assertEqual(task["stop_mode"], terminal_mode)
+                self.assertEqual(
+                    getattr(stop_event, "stop_mode", None), terminal_mode
+                )
+                self.assertEqual(
+                    stop_mode_for_event(stop_event, task), terminal_mode
+                )
+
+    def test_concurrent_pause_and_terminal_stop_never_leaves_pause(self):
+        """A terminal request wins even when pause and finish/cancel race."""
+        for terminal_mode in (
+                STOP_MODE_CANCEL, STOP_MODE_FINISH, STOP_MODE_TERMINATE):
+            for _ in range(25):
+                task = {}
+                stop_event = threading.Event()
+                start = threading.Barrier(2)
+
+                def _request(mode):
+                    start.wait()
+                    request_stop(task, stop_event, mode)
+
+                pause_thread = threading.Thread(
+                    target=_request, args=(STOP_MODE_PAUSE,))
+                terminal_thread = threading.Thread(
+                    target=_request, args=(terminal_mode,))
+                pause_thread.start()
+                terminal_thread.start()
+                pause_thread.join(timeout=2)
+                terminal_thread.join(timeout=2)
+                self.assertFalse(pause_thread.is_alive())
+                self.assertFalse(terminal_thread.is_alive())
+                self.assertEqual(task["stop_mode"], terminal_mode)
+                self.assertEqual(stop_mode_for_event(stop_event, task), terminal_mode)
+
+
+class ScrapeFailureLifecycleTests(unittest.TestCase):
+    def _context_for_run(self, store, run_id, *, activate=None):
+        task = {
+            "kind": "scrape", "status": "queued", "progress": {},
+            "logs": [], "result": None, "error": "",
+            "started_at": 1, "finished_at": None,
+            "stop_event": threading.Event(),
+        }
+        return SimpleNamespace(
+            store=store,
+            operational_errors=_OPERATIONAL_ERRORS,
+            lock=threading.RLock(),
+            tasks={run_id: task},
+            app=SimpleNamespace(config={"RESULT_DIR": tempfile.gettempdir()}),
+            is_user_finished=lambda _run_id: False,
+            activate_task_browser=activate or mock.Mock(),
+            release_worker_resume_claims=mock.Mock(),
+            schedule_pipeline_task_cleanup=mock.Mock(),
+            clear_auto_screen=mock.Mock(),
+            write_run=lambda current_id, **kwargs: store.update_screening_run(
+                current_id, **kwargs),
+            record_pause_failure=mock.Mock(),
+        )
+
+    def test_checkpoint_error_finishes_failed_and_releases_browser_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "checkpoint-error-failed"
+            store.create_screening_run(run_id, source_count=1)
+            store.update_screening_run(run_id, status="running", current_stage="scrape")
+            ctx = SimpleNamespace(
+                store=store,
+                operational_errors=_OPERATIONAL_ERRORS,
+                write_run=lambda current_id, **kwargs: store.update_screening_run(
+                    current_id, **kwargs),
+                lock=threading.RLock(),
+                tasks={},
+                record_pause_failure=lambda current_id, stage, code, reason, **kwargs: record_failure(
+                    store, current_id, stage=stage, error_code=code,
+                    reason=reason, correlation_id=current_id,
+                    diagnostics=kwargs,
+                ),
+            )
+            store.save_checkpoint(run_id, "scrape", ["saved|city"])
+            with store._connection() as conn:
+                conn.execute(
+                    "UPDATE pipeline_checkpoints SET completed_keys_json = ? "
+                    "WHERE run_id = ? AND stage = 'scrape'",
+                    ("{broken", run_id),
+                )
+
+            with self.assertRaises(ScrapeCheckpointReadError):
+                mark_scrape_paused(ctx, run_id, completed_combos=["new|city"])
+
+            run = store.get_screening_run(run_id)
+            self.assertEqual(run["status"], "failed")
+            self.assertEqual(run["error_code"], "checkpoint_read_failed")
+            support = build_browser_support(
+                store, {}, threading.RLock(), lambda _run: "a", mock.Mock(),
+            )
+            self.assertFalse(support[1]())
+
+    def test_system_error_paused_row_does_not_hold_browser_but_user_pause_does(self):
+        for error_code, expected_busy in (
+                ("source_cdp_unavailable", False),
+                ("user_paused", True)):
+            with self.subTest(error_code=error_code), tempfile.TemporaryDirectory() as tmp:
+                store = TaskStore(f"{tmp}/test/webui.db")
+                run_id = f"paused-{error_code}"
+                store.create_screening_run(
+                    run_id, source_count=1,
+                    execution_params={"browser_account": "a", "platform": "boss"},
+                )
+                store.update_screening_run(run_id, status="running")
+                store.update_screening_run(
+                    run_id, status="paused", error_code=error_code,
+                    error_reason="test reason",
+                )
+                support = build_browser_support(
+                    store, {}, threading.RLock(), lambda _run: "a", mock.Mock(),
+                )
+                self.assertEqual(support[1](), expected_busy)
+
+    def test_activate_task_browser_failure_converges_to_failed_without_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "activation-error-failed"
+            store.create_screening_run(run_id, source_count=1)
+            activation = mock.Mock(side_effect=RuntimeError("bind failed"))
+            ctx = self._context_for_run(store, run_id, activate=activation)
+
+            try:
+                run_pipeline_task(
+                    ctx, run_id,
+                    {"keyword": "kw", "city": ["city"], "pages": 1},
+                )
+            except RuntimeError as exc:
+                self.fail(f"activation failure escaped the lifecycle boundary: {exc}")
+
+            self.assertEqual(store.get_screening_run(run_id)["status"], "failed")
+            self.assertEqual(ctx.tasks[run_id]["status"], "failed")
+            ctx.schedule_pipeline_task_cleanup.assert_called_once_with(run_id)
+            ctx.release_worker_resume_claims.assert_called_once()
+
+    def test_hard_stop_finishes_failed_and_does_not_hold_browser(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "hard-stop-failed"
+            store.create_screening_run(run_id, source_count=1)
+            ctx = self._context_for_run(store, run_id)
+            ctx.make_cdp_source = mock.Mock(return_value=object())
+
+            result = {
+                "ok": False, "jobs": [], "total_scraped": 0,
+                "total_matched": 0, "combinations": 1,
+                "completed_combos": [], "hard_stop": True,
+                "hard_stop_code": "source_cdp_unavailable",
+                "error": "系统性阻断：浏览器不可用",
+            }
+            with mock.patch("webui.pipeline_exec.run_search", return_value=result):
+                run_pipeline_task(
+                    ctx, run_id,
+                    {"keyword": "kw", "city": ["city"], "pages": 1},
+                )
+
+            self.assertEqual(store.get_screening_run(run_id)["status"], "failed")
+            self.assertEqual(ctx.tasks[run_id]["status"], "failed")
+            support = build_browser_support(
+                store, ctx.tasks, ctx.lock, lambda _run: "a", mock.Mock(),
+            )
+            self.assertFalse(support[1]())
+
+
+if __name__ == "__main__":
+    unittest.main()

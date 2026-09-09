@@ -185,6 +185,23 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
     return False, "等待 CDP 就绪超时（90s）。Chrome 进程仍在运行但未开放调试端口。"
 
 
+def probe_chrome_ready(cdp_port: int | None = None) -> tuple[bool, str]:
+    """Check the already-bound CDP endpoint without changing browser state.
+
+    Resume block checks run after the caller has explicitly activated the
+    frozen identity.  They must not launch Chrome, close another profile, or
+    select a profile as a hidden side effect; use :func:`ensure_chrome_ready`
+    only at an execution boundary that is allowed to manage the browser.
+    """
+    port = cdp_port or boss.DEFAULT_CDP_PORT
+    if not boss.is_cdp_ready(port):
+        return False, "调试浏览器尚未就绪"
+    kernel_error = _kernel_check_error(port)
+    if kernel_error:
+        return False, kernel_error
+    return True, ""
+
+
 
 
 def _read_chrome_stderr_tail(cdp_data_dir: str, max_chars: int = 800) -> str:

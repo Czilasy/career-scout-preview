@@ -9,6 +9,12 @@ export type ScreenPrimaryAction =
   | { kind: "continue-recrawl"; label: "继续重抓" }
   | { kind: "none" };
 
+/** 抓取任务沿用 ScreenRoundActions 的公共动作外观，但文案不带 AI/筛选语义。 */
+export type ScrapePrimaryAction =
+  | { kind: "pause-scrape"; label: "暂停" }
+  | { kind: "continue-scrape"; label: "继续" }
+  | { kind: "none" };
+
 export interface ScreenRoundState {
   /** AI 筛选 run 状态：running/queued/paused/failed/interrupted/partial/succeeded/scraped_only。 */
   screenStatus: string;
@@ -26,7 +32,7 @@ export function isResumableStatus(status?: string): boolean {
   return Boolean(status && RESUME_STATUSES.has(status));
 }
 
-/** 用户已「结束并保存结果」的轮次：round_context 持久化为非可续终态。 */
+/** 已保存为非可续终态的轮次：round_context 持久化后不再自动恢复。 */
 export function isRoundClosedSaved(
   ctx: Pick<RoundContext, "status" | "resumable"> | null | undefined,
 ): boolean {

@@ -215,6 +215,35 @@ class WebUIAppTests(unittest.TestCase):
         self.assertFalse(payload["connected"])
         self.assertEqual(payload["returncode"], 1)
 
+    def test_zhilian_check_uses_registry_message_over_diagnostic(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+
+        outcome = mock.Mock(
+            ok=False,
+            failed_code="source_cdp_unavailable",
+            failed_reason="智联 CDP 端口不可用或 Chrome 未启动",
+        )
+        source = mock.Mock()
+        source.preflight.return_value = outcome
+        login_space = mock.Mock(cdp_port=9223, profile_key="zhilian:a")
+        with mock.patch(
+            "webui.pipeline_exec.resolve_browser_account",
+            return_value="C:\\profiles\\a",
+        ), mock.patch(
+            "webui.platforms.resolve_login_space",
+            return_value=login_space,
+        ), mock.patch(
+            "webui.source.ZhilianCdpSource",
+            return_value=source,
+        ):
+            response = self.client.get("/api/check?platform=zhilian")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json()["error_reason"],
+            ERROR_USER_MESSAGES["source_cdp_unavailable"],
+        )
+
     def test_profile_is_normalized_and_persisted(self):
         response = self.client.put("/api/profile", json={
             "target_titles": "后端工程师, Python 后端",
@@ -820,9 +849,9 @@ class SourceErrorClassificationTests(unittest.TestCase):
     def test_failed_code_label_zhilian_login_has_no_boss(self):
         from webui.pipeline_exec import failed_code_label, taxonomy_reason
         self.assertEqual(
-            failed_code_label("source_login_required", "zhilian"), "智联登录已失效")
+            failed_code_label("source_login_required", "zhilian"), "登录已失效，需重新登录")
         self.assertNotIn("BOSS", failed_code_label("login_expired", "zhilian"))
-        self.assertIn("智联", taxonomy_reason("login_expired", "zhilian"))
+        self.assertNotIn("智联", taxonomy_reason("login_expired", "zhilian"))
 
 
 if __name__ == "__main__":
