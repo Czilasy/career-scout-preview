@@ -77,11 +77,62 @@ class SourceOutcomeSuccessTests(unittest.TestCase):
         self.assertEqual(outcome.jobs, [])
         self.assertEqual(outcome.failed_code, "source_invalid_output")
 
-    def test_success_empty_jobs_requires_scope_completion(self):
+    def test_success_empty_jobs_passes_with_empty_flag_only(self):
+        """报告空只需显式 empty_result；证据与范围完成由编排层确认负责。"""
+        outcome = SourceOutcome.success(jobs=[], empty_result=True)
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.jobs, [])
+        self.assertTrue(outcome.empty_result)
+        self.assertIsNone(outcome.empty_evidence)
+
+    def test_empty_flag_with_non_empty_jobs_is_rejected(self):
+        """声明 empty 却带着岗位（自相矛盾）不得返回成功。"""
+        outcome = SourceOutcome.success(jobs=[{"job_id": "a"}], empty_result=True)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_invalid_empty_evidence_is_rejected(self):
+        """提供了 empty_evidence 但格式非法仍判失败。"""
         outcome = SourceOutcome.success(
             jobs=[], empty_result=True,
             empty_evidence={"kind": "explicit_empty_state"},
         )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+
+class SourceOutcomeReportedEmptyTests(unittest.TestCase):
+    """平台"报告空"合同：ok/jobs/empty_result 固定，其余字段透传。"""
+
+    def test_reported_empty_is_ok_without_evidence(self):
+        outcome = SourceOutcome.reported_empty(
+            safe_log="empty", input_hash="h", scope_complete=True,
+            source_exhausted=True, stop_reason="explicit_empty",
+            page_evidence=[{"page": 1}],
+        )
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.jobs, [])
+        self.assertTrue(outcome.empty_result)
+        self.assertIsNone(outcome.empty_evidence)
+        self.assertEqual(outcome.input_hash, "h")
+        self.assertTrue(outcome.scope_complete)
+        self.assertTrue(outcome.source_exhausted)
+        self.assertEqual(outcome.stop_reason, "explicit_empty")
+        self.assertEqual(outcome.page_evidence, [{"page": 1}])
+
+    def test_reported_empty_passes_valid_evidence_through(self):
+        evidence = {
+            "kind": "confirmed_empty",
+            "fixture_version": "empty-confirm-v1",
+            "marker": "double_probe_empty",
+        }
+        outcome = SourceOutcome.reported_empty(empty_evidence=evidence)
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.empty_evidence, evidence)
+
+    def test_reported_empty_with_invalid_evidence_is_rejected(self):
+        outcome = SourceOutcome.reported_empty(
+            empty_evidence={"kind": "explicit_empty_state"})
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.failed_code, "source_invalid_output")
 
@@ -719,8 +770,8 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         self.assertIn("empty_batch_no_events_cdp_lost", outcome.safe_log)
         m_signal.assert_called_once_with("source_cdp_unavailable")
 
-    def test_list_empty_with_page_event_without_empty_evidence_is_unverifiable(self):
-        """只有页事件不能证明空结果；必须另有明确空结果事实。"""
+    def test_list_empty_with_page_event_reports_empty(self):
+        """平台明确空（有页事件、无 explicit_empty）：上报报告空，由编排确认。"""
         source = self._make_source()
         list_path = str(self.artifact_root / "list_empty_ok.json")
         plan_item = {
@@ -750,9 +801,48 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
                                side_effect=fake_run):
             outcome = source.fetch_list(plan_item)
 
-        self.assertFalse(outcome.ok)
-        self.assertEqual(outcome.failed_code, "source_invalid_output")
+        self.assertTrue(outcome.ok, outcome.safe_log)
+        self.assertTrue(outcome.empty_result)
         self.assertEqual(outcome.jobs, [])
+        self.assertIsNone(outcome.failed_code)
+
+    def test_list_empty_with_explicit_empty_event_carries_evidence(self):
+        """有 explicit_empty 事件时报告空并携带空状态证据。"""
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_empty_explicit.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海", "source_filters": {},
+            "target_pages": 1,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+            "list_output_path": list_path,
+        }
+
+        def fake_run(**kwargs):
+            self._write_json(kwargs["output_path"], {"jobs": []})
+            events_path = kwargs.get("list_events_output")
+            if events_path:
+                pathlib.Path(events_path).write_text(
+                    _json_for_inprocess.dumps({
+                        "kind": "explicit_empty", "combo_key": "AI|上海",
+                        "keyword": "AI", "city": "上海", "page": 1,
+                        "target_pages": 1, "jobs_delta": 0, "jobs_count": 0,
+                        "scope_complete": True, "source_exhausted": True,
+                        "stop_reason": "source_exhausted",
+                        "fixture_version": "boss-list-v2", "marker": "explicit-empty",
+                    }) + "\n", encoding="utf-8")
+            return {"list_data": {"jobs": []}, "details": None}
+
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic",
+                               side_effect=fake_run):
+            outcome = source.fetch_list(plan_item)
+
+        self.assertTrue(outcome.ok, outcome.safe_log)
+        self.assertTrue(outcome.empty_result)
+        self.assertEqual(outcome.empty_evidence["kind"], "explicit_empty")
+        self.assertTrue(outcome.scope_complete)
 
     def test_detail_batch_empty_without_events_not_mapped_to_cdp_lost(self):
         """B050：JD 批次退出码 0 + 0 结果 + 0 事件不再判为浏览器失联。"""

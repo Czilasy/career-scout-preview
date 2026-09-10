@@ -1116,6 +1116,89 @@ class LoginRecheckTests(unittest.TestCase):
         )
 
 
+class EmptyConfirmTests(unittest.TestCase):
+    """平台报告空 → 通用流程二次确认。
+
+    空+空=组合完成且结论 empty、失败计数 0；空+数据=采用第二次结果；
+    空+报错=组合失败（异常照旧）。
+    """
+
+    class _Source:
+        platform = "boss"
+
+        def __init__(self, outcomes):
+            self.outcomes = list(outcomes)
+            self.fetch_calls = 0
+
+        def preflight(self):
+            from webui.source import SourceOutcome
+            return SourceOutcome.success()
+
+        def fetch_list(self, plan_item, *, on_page_completed=None):
+            self.fetch_calls += 1
+            idx = min(self.fetch_calls - 1, len(self.outcomes) - 1)
+            return self.outcomes[idx]
+
+    @staticmethod
+    def _run(outcomes):
+        from webui.pipeline_exec import run_search
+        source = EmptyConfirmTests._Source(outcomes)
+        issues = []
+        wakes = []
+        with mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                        return_value=(True, "")), \
+             mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            result = run_search(
+                {"keyword": "A", "city": ["上海"]},
+                source, pages=1, sleeper=lambda s: wakes.append(s),
+                on_issue=lambda combo, entry: issues.append((combo, dict(entry))),
+                close_chrome_on_success=False,
+            )
+        return source, result, issues, wakes
+
+    def test_empty_then_empty_completes_combo_without_failure(self):
+        from webui.source import SourceOutcome
+        source, result, issues, wakes = self._run([
+            SourceOutcome.reported_empty(safe_log="first", input_hash="h1"),
+            SourceOutcome.reported_empty(safe_log="second", input_hash="h2"),
+        ])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["total_scraped"], 0)
+        self.assertEqual(result["completed_combos"], ["A|上海"])
+        self.assertEqual(result["integrity"]["conclusion"], "empty")
+        self.assertEqual(source.fetch_calls, 2)
+        empties = [entry for _combo, entry in issues if entry.get("kind") == "combo_empty"]
+        self.assertEqual(len(empties), 1)
+        self.assertEqual(empties[0]["reason"], "未搜到岗位")
+        self.assertIn(3.0, wakes)
+
+    def test_empty_then_data_uses_second_result(self):
+        from webui.source import SourceOutcome
+        source, result, issues, _wakes = self._run([
+            SourceOutcome.reported_empty(safe_log="first"),
+            SourceOutcome.success(
+                jobs=[{"job_id": "j1", "source_url": "u1"}], scope_complete=True),
+        ])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["total_scraped"], 1)
+        self.assertEqual(source.fetch_calls, 2)
+        self.assertFalse(
+            any(entry.get("kind") == "combo_empty" for _combo, entry in issues))
+
+    def test_empty_then_error_fails_combo(self):
+        from webui.source import SourceOutcome
+        source, result, issues, _wakes = self._run([
+            SourceOutcome.reported_empty(safe_log="first"),
+            SourceOutcome.failure(
+                failed_code="source_invalid_output", safe_log="retry_broken"),
+        ])
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(source.fetch_calls, 2)
+        failed = [entry for _combo, entry in issues if entry.get("kind") == "combo_failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["failed_code"], "source_invalid_output")
+
+
 class ScrapeWhiteboxHardStopTests(unittest.TestCase):
     """抓取硬阻断必须在白箱完整性中保留 source 主错误。"""
 

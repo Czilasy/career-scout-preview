@@ -37,6 +37,9 @@ from webui.logging_setup import get_logger
 
 _logger = get_logger(__name__)
 
+# 平台明确报告空后，等待该秒数再做一次独立复核确认。
+_EMPTY_CONFIRM_DELAY_SECONDS = 3.0
+
 
 
 
@@ -444,10 +447,41 @@ def run_search(params: dict, source, *, pages: int = 3,
             _skipped_login_combo[0] = True
             return outcome
 
+        def _confirm_empty(original):
+            """平台报告为空：等待后独立复核一次，确认空则按空结果定稿。
+
+            第一次为空只是"平台报告"，不构成证据；复核后仍为空才归入
+            ``empty_success``（认证空）。复核报错或复核出数据都按原语义
+            继续走失败/成功路径。"""
+            emit(stage="searching", current=len(completed_combos), total=len(combos),
+                 keyword=kw, city=display_city,
+                 message=f"{kw} · {display_city}：未搜到岗位，正在复核确认…")
+            sleeper(_EMPTY_CONFIRM_DELAY_SECONDS)
+            retry = _fetch_list_once()
+            if not retry.ok:
+                return retry
+            if not retry.empty_result and retry.jobs:
+                return retry
+            return SourceOutcome.empty_success(
+                empty_evidence={
+                    "kind": "confirmed_empty",
+                    "fixture_version": "empty-confirm-v1",
+                    "marker": "double_probe_empty",
+                },
+                scope_complete=True,
+                stop_reason="explicit_empty",
+                safe_log=(retry.safe_log or original.safe_log
+                          or "platform=unknown stage=list confirmed_empty=1"),
+                input_hash=(retry.input_hash or original.input_hash),
+                page_evidence=(retry.page_evidence or original.page_evidence),
+            )
+
         try:
             outcome = _fetch_list_once()
             if not outcome.ok and outcome.failed_code == "source_login_required":
                 outcome = _recheck_login_combo(outcome)
+            if outcome.ok and outcome.empty_result:
+                outcome = _confirm_empty(outcome)
         except PageEventPersistenceError as exc:
             evidence.incomplete(combo_key, "页级快照持久化失败")
             return _finish({
@@ -619,6 +653,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                      **({"page_progress": last_page_ratio} if page_progress_seen else {}),
                      message=f"组合失败：{label}{detail}")
         else:
+            combo_is_empty = bool(outcome.empty_result)
             total_scraped += len(outcome.jobs)
             evidence.completed(combo_key, outcome)
             completed_combos.append(combo_key)
@@ -626,6 +661,13 @@ def run_search(params: dict, source, *, pages: int = 3,
                 jid = (job.get("platform_job_id") or job.get("job_id") or job.get("source_url") or "")
                 if jid and jid not in merged:
                     merged[jid] = job
+            if combo_is_empty:
+                # 空结果留在成功路径：只做中性留痕，不计入失败、不写 combo_failed。
+                _notify_combo_issue({
+                    "kind": "combo_empty",
+                    "reason": "未搜到岗位",
+                    "ts": datetime.now().isoformat(timespec="milliseconds"),
+                })
             if on_combo_done is not None:
                 try:
                     on_combo_done(combo_key, list(outcome.jobs), list(completed_combos), outcome=outcome)
@@ -651,7 +693,11 @@ def run_search(params: dict, source, *, pages: int = 3,
                  keyword=kw, city=display_city, scraped=len(outcome.jobs),
                  **({"page_progress": 0} if page_progress_seen else {}),
                  merged=len(merged),
-                 message=f"完成 {kw} · {display_city}：本页 {len(outcome.jobs)} 条，累计去重 {len(merged)} 条")
+                 message=(
+                     f"完成 {kw} · {display_city}：未搜到岗位"
+                     if combo_is_empty else
+                     f"完成 {kw} · {display_city}：本页 {len(outcome.jobs)} 条，累计去重 {len(merged)} 条"
+                 ))
             # T018: 记录 batch 事件（combo 输入输出数量）
             if measurement_callback is not None:
                 try:

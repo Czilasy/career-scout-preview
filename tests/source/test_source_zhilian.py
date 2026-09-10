@@ -1723,10 +1723,53 @@ class ZhilianCdpSourceOutcomeContractTests(_LoginCacheIsolated):
         self.assertIsNone(outcome.page_evidence[0]["has_more"])
         self.assertEqual(outcome.page_evidence[0]["new_unique_count"], 3)
 
-    def test_ok_empty_list_without_empty_evidence_is_rejected(self):
+    def test_ok_empty_list_reports_empty(self):
+        """接口明确返回 0 条：上报报告空，不再定性为解析失败。"""
         source = ZhilianCdpSource(
             browser_account="a", cdp_port=9223,
             list_runner=lambda item: _fake_list(signal="ok", jobs=[]),
+        )
+        item = {
+            "platform": "zhilian", "keyword": "Python",
+            "city": {"name": "全国", "platform_code": "jl0", "mapping_version": 1},
+            "target_pages": 1,
+            "input_hash": _zhilian_input_hash({
+                "platform": "zhilian", "keyword": "Python",
+                "city": {"name": "全国", "platform_code": "jl0", "mapping_version": 1},
+                "target_pages": 1,
+            }),
+        }
+        outcome = source.fetch_list(item)
+        self.assertTrue(outcome.ok, outcome.safe_log)
+        self.assertTrue(outcome.empty_result)
+        self.assertEqual(outcome.jobs, [])
+        self.assertIsNone(outcome.failed_code)
+
+    def test_empty_signal_reports_empty(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            list_runner=lambda item: _fake_list(signal="empty"),
+        )
+        item = {
+            "platform": "zhilian", "keyword": "Python",
+            "city": {"name": "全国", "platform_code": "jl0", "mapping_version": 1},
+            "target_pages": 1,
+            "input_hash": _zhilian_input_hash({
+                "platform": "zhilian", "keyword": "Python",
+                "city": {"name": "全国", "platform_code": "jl0", "mapping_version": 1},
+                "target_pages": 1,
+            }),
+        }
+        outcome = source.fetch_list(item)
+        self.assertTrue(outcome.ok, outcome.safe_log)
+        self.assertTrue(outcome.empty_result)
+        self.assertEqual(outcome.jobs, [])
+
+    def test_invalid_output_signal_still_fails(self):
+        """解析/结构异常仍按错误码上报，不得被当成报告空。"""
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            list_runner=lambda item: _fake_list(signal="invalid_output"),
         )
         item = {
             "platform": "zhilian", "keyword": "Python",

@@ -368,10 +368,10 @@ def register_task_state_routes(app, ctx):
         _platform_label = str((run or {}).get("platform") or (live or {}).get("platform") or "")
         for _event in reversed(task_events):
             _payload = _event.get("payload") or {}
-            if (
-                _event.get("type") == "combo_issue"
-                and _payload.get("kind") == "combo_failed"
-            ):
+            if _event.get("type") != "combo_issue":
+                continue
+            _kind = _payload.get("kind")
+            if _kind == "combo_failed":
                 _code = resolve_code(
                     str(_payload.get("failed_code") or "source_unknown_error"))
                 combo_issues.append({
@@ -381,6 +381,17 @@ def register_task_state_routes(app, ctx):
                     "reason": str(_payload.get("reason") or ""),
                     "ts": _payload.get("ts") or _event.get("at") or "",
                 })
+            elif _kind == "combo_empty":
+                # 未搜到岗位是中性留痕，不是失败：只展示口径，不计入失败数。
+                combo_issues.append({
+                    "combo_key": str(_payload.get("combo_key") or ""),
+                    "code": "combo_empty",
+                    "code_text": "未搜到岗位",
+                    "reason": "",
+                    "ts": _payload.get("ts") or _event.get("at") or "",
+                })
+            else:
+                continue
             if len(combo_issues) >= 20:
                 break
         return jsonify({

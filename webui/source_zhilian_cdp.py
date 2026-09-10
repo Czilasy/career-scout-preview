@@ -77,7 +77,7 @@ _ZHILIAN_DETAIL_SIGNAL_MAP = build_zhilian_detail_signal_map(
 )
 _ZHILIAN_LIST_SIGNAL_MAP = {
     "ok": None,
-    "empty": None,  # 真实空结果走 empty_success 路径，由 marker fixture 解锁
+    "empty": None,  # 平台明确空走 reported_empty，由编排层二次确认
     "login_required": "source_login_required",
     "verification": "source_verification_required",
     "rate_limited": "source_rate_limited",
@@ -298,7 +298,8 @@ class ZhilianCdpSource:
     ) -> SourceOutcome:
         """抓取智联岗位列表页。
         只接收关键词、规范城市解析快照和页数；真实 API 结果统一字段。
-        runner 返回 empty signal 时必须携带 empty_evidence，否则按失败处理。
+        runner 明确返回 0 条（ok 空列表或 empty signal）时上报"报告空"，
+        由通用编排层二次确认；解析异常、超时、登录、风控等错误信号不变。
         ``on_page_completed``：每完成一页回调结构化页级事件。"""
         ok, reason = _validate_zhilian_plan_item(plan_item)
         if not ok:
@@ -337,13 +338,17 @@ class ZhilianCdpSource:
         signal = str(signal or "invalid_output")
         if signal == "ok":
             if not jobs:
-                return SourceOutcome.failure(
-                    failed_code="source_invalid_output",
+                # 平台接口明确为空：如实上报"报告空"，由编排层二次确认。
+                return SourceOutcome.reported_empty(
                     safe_log=_zhilian_safe_log(
-                        stage="list", failed_code="source_invalid_output",
-                        counts={"reason": "empty_evidence_missing"},
+                        stage="list", counts={"empty_result": 1},
                     ),
-                    failed_reason="空结果证据缺失，不得返回成功",
+                    input_hash=str(plan_item.get("input_hash") or ""),
+                    scope_complete=(page_evidence[-1].get("scope_complete") if page_evidence else None),
+                    source_exhausted=(
+                        page_evidence[-1].get("has_more") is False if page_evidence else None),
+                    stop_reason=(page_evidence[-1].get("stop_reason") if page_evidence else None),
+                    page_evidence=page_evidence,
                 )
             return SourceOutcome.success(
                 jobs=list(jobs or []),
@@ -360,16 +365,8 @@ class ZhilianCdpSource:
                 page_evidence=page_evidence,
             )
         if signal == "empty":
-            if not isinstance(empty_evidence, dict) or not empty_evidence:
-                return SourceOutcome.failure(
-                    failed_code="source_invalid_output",
-                    safe_log=_zhilian_safe_log(
-                        stage="list", failed_code="source_invalid_output",
-                        counts={"reason": "empty_evidence_missing"},
-                    ),
-                    failed_reason="空结果证据缺失，不得返回 empty_success",
-                )
-            return SourceOutcome.empty_success(
+            # 平台明确空：上报"报告空"（不再要求 marker fixture）。
+            return SourceOutcome.reported_empty(
                 empty_evidence=empty_evidence,
                 safe_log=_zhilian_safe_log(
                     stage="list", counts={"empty_result": 1},

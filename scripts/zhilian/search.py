@@ -2,13 +2,14 @@
 """智联列表域（031 B6 自 scripts/zhilian_cdp_raw.py 物理搬运）。
 
 登录态探测（``check_login_state_tri``）、抓取前检查（``preflight``）、
-列表抓取（``fetch_list``）、空结果 marker 确认，以及三者共用的风险信号
-判定（``_risk_signal``）与岗位字段归一（``_normalize_job``）。
+列表抓取（``fetch_list``），以及三者共用的风险信号判定（``_risk_signal``）
+与岗位字段归一（``_normalize_job``）。
 
 signal 字符串约定（与 webui/source.py ``_ZHILIAN_PREFLIGHT_SIGNAL_MAP`` 一致）：
   "ok" / "cdp_unavailable" / "login_required" / "verification" /
   "rate_limited" / "blocked" / "unreachable" / "timeout"
-fetch_list: ("ok", jobs) / ("empty", [], evidence) / (signal, [])
+fetch_list: ("ok", jobs) / ("empty", [], None) / (signal, [])
+0 条时如实返回 "empty"（平台报告空），是否成立由通用编排二次确认。
 """
 
 from __future__ import annotations
@@ -286,7 +287,6 @@ def fetch_list(plan_item: dict, *, on_page_completed=None) -> tuple[str | None, 
     city = plan_item.get("city") or {}
     keyword = str(plan_item.get("keyword") or "").strip()
     city_code = str(city.get("platform_code") or "").strip()
-    route_city_code = str(plan_item.get("route_city_code") or city.get("route_city_code") or "").strip()
     target_pages = int(plan_item.get("target_pages") or 1)
     start_page = max(1, int(plan_item.get("start_page") or 1))
     if not keyword or not city_code:
@@ -345,15 +345,9 @@ def fetch_list(plan_item: dict, *, on_page_completed=None) -> tuple[str | None, 
             time.sleep(random.uniform(0.8, 1.6))
         if merged:
             return "ok", list(merged.values()), None
-        # 真实空结果：必须能由当前页面明确空状态 marker 解释。
-        if _has_empty_marker(ws, route_city_code or city_code, keyword):
-            evidence = {
-                "kind": "explicit_empty_state",
-                "fixture_version": "zhilian-list-v1",
-                "marker": "normalized-empty-state",
-            }
-            return "empty", [], evidence
-        return "invalid_output", [], None
+        # 0 条：平台接口明确返回空列表，如实上报"报告空"；
+        # 是否真正成立由通用编排层的二次确认负责。
+        return "empty", [], None
     except TimeoutError:
         return "timeout", [], None
     except Exception:
@@ -363,39 +357,3 @@ def fetch_list(plan_item: dict, *, on_page_completed=None) -> tuple[str | None, 
             ws.close()
         except Exception:
             _logger.debug("CDP 会话关闭失败（best-effort 忽略）", exc_info=True)
-
-
-def _has_empty_marker(ws: Any, city_code: str, keyword: str) -> bool:
-    """导航到搜索页并用页面搜索框确认空状态 marker。"""
-    route_city = "jl0" if city_code == "jl0" else f"jl{city_code}"
-    url = f"https://www.zhaopin.com/sou/{route_city}/kw/p1"
-    try:
-        _navigate(ws, url)
-        _wait_expression(ws, "document.querySelector('.query-search__content-input')!==null", timeout=20)
-        expression = (
-            "(async()=>{"
-            "const i=document.querySelector('.query-search__content-input');"
-            "const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;"
-            "setter.call(i," + json.dumps(keyword, ensure_ascii=False) + ");"
-            "i.dispatchEvent(new Event('input',{bubbles:true}));"
-            "i.dispatchEvent(new Event('change',{bubbles:true}));"
-            "await new Promise(r=>setTimeout(r,600));"
-            "const b=document.querySelector('.query-search__content-button');"
-            "if(b){b.click();}return true;})()"
-        )
-        _evaluate(ws, expression)
-        ok = _wait_expression(
-            ws,
-            "document.body.innerText.includes('很抱歉，您搜索的职位找不到！') || "
-            "document.querySelectorAll('div.joblist-box__item').length>0",
-            timeout=20,
-        )
-        if not ok:
-            return False
-        return bool(_evaluate(
-            ws,
-            "document.body.innerText.includes('很抱歉，您搜索的职位找不到！') && "
-            "document.querySelectorAll('div.joblist-box__item').length===0",
-        ))
-    except Exception:
-        return False

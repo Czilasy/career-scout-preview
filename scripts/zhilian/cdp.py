@@ -72,10 +72,6 @@ _BLOCK_MARKERS = (
     "访问被拒绝", "禁止访问", "已被封禁",
     "403 forbidden", "http 403", "error 403",
 )
-_EMPTY_MARKERS = (
-    "很抱歉，您搜索的职位找不到！",
-    "换个条件试试吧",
-)
 
 # background tab 的 document.hidden 为 true，若平台据此判定非真人浏览会
 # 拒绝渲染；导航前注入覆盖属性（对齐 BOSS _scrape_one_detail 的做法）。

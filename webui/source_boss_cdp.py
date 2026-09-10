@@ -272,12 +272,22 @@ class BossCdpSource(_BossCdpDetailMixin):
             return SourceOutcome.failure(failed_code='source_cdp_unavailable', safe_log=f'{safe_log} empty_batch_no_events_cdp_lost')
         if not normalized_jobs:
             empty_event = next((event for event in page_events if isinstance(event, dict) and (event.get('event_type') == 'explicit_empty' or event.get('kind') == 'explicit_empty' or event.get('empty_result') is True or (event.get('explicit_empty') is True))), None)
-            if empty_event is None:
-                return SourceOutcome.failure(failed_code='source_invalid_output', safe_log=f'{safe_log} empty_evidence_missing', failed_reason='空结果证据缺失，不得返回成功')
-            evidence = {'kind': str(empty_event.get('kind') or 'explicit_empty_state'), 'fixture_version': str(empty_event.get('fixture_version') or 'boss-list-v2'), 'marker': str(empty_event.get('marker') or 'explicit-empty')}
-            empty_scope = empty_event.get('scope_complete') if 'scope_complete' in empty_event else scope_event.get('scope_complete') if scope_event is not None else page_events[-1].get('scope_complete') if page_events else None
+            empty_evidence = None
+            if empty_event is not None:
+                empty_evidence = {'kind': str(empty_event.get('kind') or 'explicit_empty_state'), 'fixture_version': str(empty_event.get('fixture_version') or 'boss-list-v2'), 'marker': str(empty_event.get('marker') or 'explicit-empty')}
+                empty_scope = empty_event.get('scope_complete') if 'scope_complete' in empty_event else scope_event.get('scope_complete') if scope_event is not None else page_events[-1].get('scope_complete') if page_events else None
+                empty_stop = empty_event.get('stop_reason')
+                empty_exhausted = empty_event.get('source_exhausted') if 'source_exhausted' in empty_event else None
+            else:
+                reference = scope_event if scope_event is not None else (page_events[-1] if page_events else {})
+                empty_scope = reference.get('scope_complete')
+                empty_stop = reference.get('stop_reason')
+                empty_exhausted = (reference.get('source_exhausted') if 'source_exhausted' in reference
+                                   else (reference.get('has_more') is False if reference else None))
+            # 平台明确为空（有/无 explicit_empty 事件都算报告空）：如实上报，
+            # 由通用编排层二次确认，不再就地定性为解析失败。
             self.breaker.record_success()
-            return SourceOutcome.empty_success(empty_evidence=evidence, safe_log=f'{safe_log} empty_result=1', input_hash=actual_hash, scope_complete=empty_scope, source_exhausted=empty_event.get('source_exhausted') if 'source_exhausted' in empty_event else None, stop_reason=empty_event.get('stop_reason'), page_evidence=page_events)
+            return SourceOutcome.reported_empty(empty_evidence=empty_evidence, safe_log=f'{safe_log} empty_result=1', input_hash=actual_hash, scope_complete=empty_scope, source_exhausted=empty_exhausted, stop_reason=empty_stop, page_evidence=page_events)
         self.breaker.record_success()
         if normalized_jobs:
             _record_success_signal(self.browser_account, 'boss')

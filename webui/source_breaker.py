@@ -44,12 +44,14 @@ class SourceOutcome:
         ok: whether the fetch produced usable data
         jobs: list of job dicts (list fetch) or single detail dict (detail fetch)
         detail: detail payload when fetching detail
-        empty_result: only for list fetch; True when the search genuinely
-            returned zero jobs with explicit empty-state evidence. ``ok=True``
-            and ``jobs=[]`` is only allowed when ``empty_result=True``.
-        empty_evidence: required when ``empty_result=True``; must contain
-            ``kind``, ``fixture_version`` and ``marker`` (脱敏). Must be
-            ``None`` for non-empty success and all failures.
+        empty_result: only for list fetch; True when the source reports zero
+            jobs. ``ok=True`` and ``jobs=[]`` is only allowed when
+            ``empty_result=True``; 平台"报告空"未经二次确认，是否成立由
+            编排层负责（confirm 后可复用 ``empty_success`` 落认证空）。
+        empty_evidence: optional for reported empty. When supplied it must
+            contain ``kind``, ``fixture_version`` and ``marker`` (脱敏) —
+            格式非法仍判失败。Must be ``None`` for non-empty success and all
+            failures.
         failed_code: safe failure code when ``ok`` is False; one of
             ``source_unreachable`` / ``source_blocked`` / ``source_not_found``
             / ``source_invalid_output`` / ``source_input_drift``.
@@ -97,15 +99,21 @@ class SourceOutcome:
         explicit_jobs = jobs is not _UNSET_JOBS
         if self.ok and (bool(empty_result)
                         or (explicit_jobs and isinstance(jobs, list) and not jobs)):
-            has_empty_evidence = bool(
-                explicit_jobs and isinstance(jobs, list) and not jobs
-                and empty_result and _valid_empty_evidence(empty_evidence)
-                and scope_complete is True
+            # 平台报告为空只要求显式声明 ``empty_result=True``；证据与范围
+            # 完成不再强制（是否成立由编排层二次确认负责）。纪律保留：
+            # 空列表未声明 empty、声明 empty 却带着岗位、或提供了格式非法
+            # 的 empty_evidence，一律判失败。
+            jobs_non_empty = bool(
+                explicit_jobs and isinstance(jobs, list) and jobs
             )
-            if not has_empty_evidence:
+            if not empty_result or jobs_non_empty:
                 self.ok = False
                 failed_code = failed_code or "source_invalid_output"
-                failed_reason = failed_reason or "空结果证据缺失，不得返回成功"
+                failed_reason = failed_reason or "空列表未声明 empty_result，不得返回成功"
+            elif empty_evidence is not None and not _valid_empty_evidence(empty_evidence):
+                self.ok = False
+                failed_code = failed_code or "source_invalid_output"
+                failed_reason = failed_reason or "空结果证据格式非法，不得返回成功"
         self.jobs = [] if jobs is _UNSET_JOBS or jobs is None else list(jobs)
         self.detail = detail or {}
         self.empty_result = bool(empty_result)
@@ -124,23 +132,44 @@ class SourceOutcome:
     @classmethod
     def success(cls, *, jobs: list[dict] | None | object = _UNSET_JOBS, detail: dict | None = None,
                 safe_log: str = "", input_hash: str | None = None, **evidence) -> SourceOutcome:
-        # An explicitly supplied empty list must be an explicit empty result;
-        # omitted jobs remains valid for preflight/detail outcomes.
-        if jobs is not _UNSET_JOBS and not jobs:
-            empty = (evidence.get("empty_result")
-                     and _valid_empty_evidence(evidence.get("empty_evidence"))
-                     and evidence.get("scope_complete") is True)
-            if not empty:
-                return cls.failure(failed_code="source_invalid_output",
-                                   safe_log="empty_evidence_missing",
-                                   failed_reason="空结果证据缺失，不得返回成功")
+        # An explicitly supplied empty list must declare empty_result; omitted
+        # jobs remains valid for preflight/detail outcomes. 平台报告空不要求
+        # 证据与范围完成（由编排层二次确认）。
+        if jobs is not _UNSET_JOBS and not jobs and not evidence.get("empty_result"):
+            return cls.failure(failed_code="source_invalid_output",
+                               safe_log="empty_result_flag_missing",
+                               failed_reason="空列表未声明 empty_result，不得返回成功")
         return cls(ok=True, jobs=jobs, detail=detail, safe_log=safe_log,
                    input_hash=input_hash, **evidence)
 
     @classmethod
+    def reported_empty(cls, *, safe_log: str = "", input_hash: str | None = None,
+                       scope_complete: bool | None = None,
+                       source_exhausted: bool | None = None,
+                       stop_reason: str | None = None,
+                       page_evidence: list[dict] | None = None,
+                       empty_evidence: dict | None = None,
+                       failed_reason: str = "") -> SourceOutcome:
+        """平台报告为空，未经验证。
+
+        这是 source 如实上报的"平台明确返回空"信号（``ok=True``、
+        ``jobs=[]``、``empty_result=True``）；是否真正成立由编排层二次确认
+        负责，确认完成后改用 ``empty_success`` 落认证空。
+
+        ``empty_evidence`` 可选：提供了则仍校验 ``kind`` /
+        ``fixture_version`` / ``marker`` 三字段格式，非法仍判失败。
+        """
+        return cls(
+            ok=True, jobs=[], empty_result=True, empty_evidence=empty_evidence,
+            safe_log=safe_log, input_hash=input_hash, failed_reason=failed_reason,
+            scope_complete=scope_complete, source_exhausted=source_exhausted,
+            stop_reason=stop_reason, page_evidence=page_evidence,
+        )
+
+    @classmethod
     def empty_success(cls, *, empty_evidence: dict, safe_log: str = "", input_hash: str | None = None,
                        **evidence) -> SourceOutcome:
-        """真实空结果：须有空状态、范围完成证据与 jobs=[] 才能 ok=True。
+        """认证空结果（编排确认后复用）：须有空状态、范围完成证据与 jobs=[]。
 
         empty_evidence 必须包含 ``kind``、``fixture_version`` 和 ``marker``；
         只含脱敏标记，不含页面正文、Cookie、JD 或本地路径。

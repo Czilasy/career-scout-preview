@@ -380,6 +380,33 @@ class StatusMappingTests(unittest.TestCase):
         self.assertEqual(data["progress"]["current"], 1)
         self.assertEqual(data["total"], 6)
 
+    def test_task_state_scrape_combo_empty_is_neutral_issue(self):
+        """未搜到岗位是中性留痕：combo_issues 展示，但不计入失败数。"""
+        run_id = "test_scrape_combo_empty"
+        self.store.create_screening_run(run_id, source_count=6)
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape",
+        )
+        self.store.append_task_event(
+            run_id,
+            "combo_issue",
+            {"kind": "combo_empty", "combo_key": "前端|上海", "reason": "未搜到岗位"},
+        )
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "running", "progress": {},
+            "logs": [], "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+        }
+
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+
+        self.assertEqual(data["fail_count"], 0)
+        issues = data["combo_issues"]
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["code_text"], "未搜到岗位")
+        self.assertEqual(issues[0]["reason"], "")
+        self.assertEqual(issues[0]["combo_key"], "前端|上海")
+
     def test_task_state_interrupted_maps_to_cancelled(self):
         """T410: interrupted DB 状态 → cancelled 任务状态。"""
         run_id = "test_interrupted_mapping"
