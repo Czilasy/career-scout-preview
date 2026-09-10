@@ -12,6 +12,9 @@ from webui.updater import _summarize_release_notes
 _ROOT = Path(__file__).resolve().parents[1]
 _CHANGELOG = _ROOT / "CHANGELOG.md"
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# 更新说明每条必须一行说清（口径约 25 字）；这里留少量余量做硬把关，
+# 超长说明写细了，发布前必须改短（见 AGENTS.md 更新说明写作规范）。
+_MAX_ITEM_CHARS = 30
 
 
 def _changelog_body(version: str) -> str:
@@ -27,6 +30,16 @@ def _changelog_body(version: str) -> str:
     return "\n".join(lines[start + 1:end])
 
 
+def _reject_overlong_items(items: list[str]) -> None:
+    """拦下写得太细的更新条目：一句话说不清就说明该改短，不是补细节。"""
+    overlong = [item for item in items if len(item) > _MAX_ITEM_CHARS]
+    if overlong:
+        detail = "；".join(f"「{item}」共{len(item)}字" for item in overlong)
+        raise ValueError(
+            f"更新条目超过 {_MAX_ITEM_CHARS} 字，写得太细，请改短后再发布：{detail}"
+        )
+
+
 def build_release_summary(version: str) -> dict[str, object]:
     """返回镜像清单需要的版本绑定摘要。"""
     version = str(version or "").strip().lstrip("vV")
@@ -35,6 +48,7 @@ def build_release_summary(version: str) -> dict[str, object]:
     items = _summarize_release_notes(_changelog_body(version), version) or []
     if not 3 <= len(items) <= 8:
         raise ValueError(f"版本 {version} 的有效更新摘要应为 3～8 条，当前 {len(items)} 条")
+    _reject_overlong_items(items)
     return {"version": version, "release_items": items}
 
 
