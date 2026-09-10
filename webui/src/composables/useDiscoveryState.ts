@@ -359,6 +359,8 @@ const resultPlatformFilter = ref<"all" | "boss" | "zhilian">("all");
 // specs/004：结果加载代次。pipelineResult 被新 run 结果替换时递增，
 // JobWorkspace 据此重置列表筛选/排序（切分类/切平台不重置，contracts §6 D3）。
 const resultEpoch = ref(0);
+// 新一轮代次：重置开始即失效旧轮的异步请求，避免旧轮结果在清空后回写。
+const workflowEpoch = ref(0);
 // B074：重抓胶囊「暂不处理」隐藏态（会话内共享，组件卸载重建不丢）。
 // 仅按 resultEpoch（新结果重载）复位，不按 count 归零复位——
 // 平台/页签切换导致的待确认数抖动不会让胶囊重弹。
@@ -999,6 +1001,7 @@ return {
   pipelineResultRunId,
   resultPlatformFilter,
   resultEpoch,
+  workflowEpoch,
   recrawlCapsuleDismissed,
   dismissRecrawlCapsule,
   resultRunIds,

@@ -106,6 +106,24 @@ describe("ResultHistoryDrawer", () => {
     expect(statuses[2].text()).toBe("已抓取，未筛选");
   });
 
+  it("shows the total scraped jobs after every history status", () => {
+    const wrapper = mountDrawer({
+      items: [
+        item({ run_id: "h1", status: "done", total_scraped: 54, total_kept: 47, total_dropped: 7 }),
+        item({ run_id: "h2", status: "partial", total_scraped: 19, total_kept: 12 }),
+        item({ run_id: "h3", status: "scraped_only", total_scraped: 238, total_kept: 0 }),
+      ],
+    });
+
+    const totals = wrapper.findAll('[data-testid="history-round-total"]');
+    expect(totals).toHaveLength(3);
+    expect(totals.map((total) => total.text())).toEqual([
+      "共 54 个岗位",
+      "共 19 个岗位",
+      "共 238 个岗位",
+    ]);
+  });
+
   it("keeps latest badge immediately after the time", () => {
     const source = readFileSync(path.join(__dirname, "../../components/ResultHistoryDrawer.vue"), "utf8");
     const head = source.match(/\.history-round-head\s*\{[^}]*\}/s)?.[0] || "";

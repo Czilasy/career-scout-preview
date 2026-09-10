@@ -4940,6 +4940,31 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
     wrapper.unmount();
   });
 
+  it("T031: 完成态 session 快照残留时也只进入新一轮 01 页", async () => {
+    sessionStorage.setItem("career-scout-workflow:profile-b078-g", JSON.stringify({
+      version: 1, unfinished: true, activeStep: "results", analysisReady: true,
+      scrapeTaskId: "scrape-done", screenTaskId: "screen-done", scrapeCompleted: true,
+      scrapeSnapshot: { status: "completed", progress: {}, logs: [] },
+      screenSnapshot: { status: "completed", progress: {}, logs: [] },
+      pipelineResult: {
+        ok: true,
+        jobs: [{ job_id: "old-session", title: "旧快照结果" }],
+        dropped: [], total_kept: 1, total_dropped: 0,
+      },
+      pipelineResultRunId: "completed-run", currentRoundStatus: "screened",
+      resultLoaded: true, resultsPageSeen: false,
+    }));
+    const fetchMock = baseFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-b078-g" } });
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="custom-keyword"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("旧快照结果");
+    wrapper.unmount();
+  });
+
   it("T028: 完成态启动 B——latest-running-task 返回已完成终态任务 → 同样自动新一轮", async () => {
     const fetchMock = baseFetch({
       latestTask: {

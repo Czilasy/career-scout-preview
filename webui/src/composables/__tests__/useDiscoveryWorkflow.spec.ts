@@ -156,4 +156,30 @@ describe("useDiscoveryWorkflow（026 B078）", () => {
     expect(state.unfinishedWorkflowRestored.value).toBe(false);
     expect(state.resultsPageSeen.value).toBe(true);
   });
+
+  it("T003i: 完成态终端快照即使标记 unfinished=true 也不恢复旧结果", () => {
+    sessionStorage.setItem(WORKFLOW_KEY, JSON.stringify({
+      version: 1, unfinished: true, resultsPageSeen: false,
+      activeStep: "results", analysisReady: true,
+      scrapeTaskId: "scrape-done", screenTaskId: "screen-done", scrapeCompleted: true,
+      scrapeSnapshot: { status: "completed", progress: {}, logs: [] },
+      screenSnapshot: { status: "completed", progress: {}, logs: [] },
+      pipelineResult: {
+        ok: true,
+        jobs: [{ job_id: "old", title: "旧快照结果" }],
+        dropped: [], total_kept: 1, total_dropped: 0,
+      },
+      pipelineResultRunId: "completed-run", currentRoundStatus: "screened",
+      resultLoaded: true,
+    }));
+    const state = makeState();
+    const workflow = useDiscoveryWorkflow(state, makeDeps());
+
+    workflow.restoreWorkflowState();
+
+    expect(state.activeStep.value).toBe("upload");
+    expect(state.pipelineResult.value).toBeNull();
+    expect(state.unfinishedWorkflowRestored.value).toBe(false);
+    expect(sessionStorage.getItem(WORKFLOW_KEY)).toBeNull();
+  });
 });

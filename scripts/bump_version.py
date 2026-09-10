@@ -11,9 +11,9 @@
 
 规则（见根目录 AGENTS.md「版本与发布」）：
 
-- patch（2.7.0 -> 2.7.1）：小修小补（bug 修复、文案、样式）
-- minor（2.7.x -> 2.8.0）：新功能（向后兼容）
-- major（2.x.y -> 3.0.0）：重构 / 超大功能 / 纪念性版本
+- patch（2.7.0 -> 2.7.1）：Bug 修复、文案、样式或小型兼容功能
+- minor（2.7.x -> 2.8.0）：独立且明显扩展产品能力的兼容功能
+- major（2.x.y -> 3.0.0）：破坏兼容性的变更、重大重构或里程碑
 
 同步更新的版本位置：
 
@@ -199,7 +199,7 @@ def main() -> int:
     parser.add_argument("-m", "--message", default="常规发布", help="CHANGELOG 条目描述（一行）")
     parser.add_argument("--check", action="store_true", help="只校验版本一致性，不修改文件")
     parser.add_argument("--set", dest="exact_version", metavar="VERSION", help="直接设置版本号，例如 1.7.10")
-    parser.add_argument("--allow-downgrade", action="store_true", help="允许设置低于当前版本的显式版本号（纪念性版本）")
+    parser.add_argument("--allow-downgrade", action="store_true", help="允许设置低于当前版本的显式版本号（重新发布等场景）")
     parser.add_argument("--expect", metavar="VERSION", help="与 --check 一起使用，按指定版本校验文件一致性")
     args = parser.parse_args()
 

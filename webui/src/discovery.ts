@@ -17,6 +17,8 @@ import { buildLocationPayload } from "./location";
 
 export interface PipelineResult {
   ok?: boolean;
+  /** 运行时结果身份；后端快照以外层 platform 返回，前端合并时回填。 */
+  platform?: Platform;
   jobs?: JobItem[];
   dropped?: JobItem[];
   total_scraped?: number;

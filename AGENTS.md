@@ -66,7 +66,7 @@
 ## 版本与发布
 
 - 版本提升必须用 `scripts/bump_version.py`（`patch|minor|major` 或用户指定 `--set x.y.z`），同步：`pyproject.toml`、`webui/package.json`、`webui/package-lock.json`、`uv.lock`、`scripts/boss_cdp_raw.py`、`tests/test_desktop_shell.py`、`README.md` 标题，并生成 CHANGELOG 条目。
-- 语义：patch=bug 修复/文案/样式等小改动；minor=新功能且向后兼容；major=重构/大功能/里程碑。
+- 语义：patch=Bug 修复、文案、样式或小型兼容功能；minor=独立且明显扩展产品能力的兼容功能；major=破坏兼容性的变更、重大重构或里程碑。
 - 构建产物命名 `CareerScout-v<version>.*`；`.release/` 已有同名产物时，`packaging/build_exe.ps1` 必须显式传 `-Force` 才允许覆盖。
 - 在用户分别授权上传 Windows EXE 和推送 `v*` tag 后，按项目流程触发 `.github/workflows/release-macos.yml` 构建 dmg；发布后核对该 tag 的 Release 上 EXE、DMG 及各自 `.sha256` 均已挂载。
 

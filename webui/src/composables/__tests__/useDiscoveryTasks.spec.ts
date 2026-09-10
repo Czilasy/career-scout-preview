@@ -132,6 +132,26 @@ describe("useDiscoveryTasks.maybeAutoStartNewRound（026 B078）", () => {
     expect(deps.loadLatestResult).toHaveBeenCalled();
     expect(deps.clearLatestResult).not.toHaveBeenCalled();
   });
+
+  it.each(["completed_with_pending", "partial"])(
+    "待确认状态 %s → 恢复结果，不自动开始新一轮",
+    async (status) => {
+      const state = makeState();
+      const deps = makeDeps({
+        fetchMergedLatestResult: vi.fn(async () => ({
+          merged: { ok: true, jobs: [] },
+          newer: { platform: "zhilian" as const, data: { status } },
+          platformStatuses: { zhilian: status },
+        })),
+      });
+      const tasks = useDiscoveryTasks(state, deps);
+
+      await tasks.maybeAutoStartNewRound();
+
+      expect(deps.loadLatestResult).toHaveBeenCalled();
+      expect(deps.clearLatestResult).not.toHaveBeenCalled();
+    },
+  );
 });
 // 035：未结束任务保护（B086）与后台跑完历史冒泡（B087）
 describe("useDiscoveryTasks.maybeAutoStartNewRound（035 未结束任务保护）", () => {
@@ -178,6 +198,35 @@ describe("useDiscoveryTasks.maybeAutoStartNewRound（035 未结束任务保护�
     expect(deps.clearLatestResult).not.toHaveBeenCalled();
     expect(deps.loadLatestResult).not.toHaveBeenCalled();
   });
+
+  it("T003d: 新一轮开始后，旧轮晚到的完成响应不再回写结果", async () => {
+    const state = makeState({
+      screenTaskId: ref("old-screen"),
+      screenBusy: ref(true),
+      screenSnapshot: ref({ status: "running", progress: {}, logs: [] }),
+    });
+    let resolveTaskState!: (snapshot: unknown) => void;
+    const taskState = new Promise((resolve) => { resolveTaskState = resolve; });
+    apiRequestMock.mockImplementation(async (url: string) => {
+      if (url === "/api/task-state/old-screen") return taskState;
+      return { ok: true, has_task: false };
+    });
+    const deps = makeDeps();
+    const tasks = useDiscoveryTasks(state, deps);
+    const pollPromise = tasks.pollTask("old-screen", "screen");
+
+    await Promise.resolve();
+    const resetPromise = tasks.resetWorkflow();
+    resolveTaskState({
+      status: "completed", progress: {}, logs: [],
+      result: { ok: true, jobs: [{ job_id: "old", title: "旧轮结果" }], dropped: [] },
+    });
+    await Promise.all([pollPromise, resetPromise]);
+
+    expect(state.activeStep.value).toBe("upload");
+    expect(state.pipelineResult.value).toBeNull();
+    expect(deps.setPipelineResult).not.toHaveBeenCalled();
+  });
 });
 
 describe("useDiscoveryTasks.pollTask（035 后台跑完历史冒泡）", () => {
@@ -221,6 +270,27 @@ describe("useDiscoveryTasks.pollTask（035 后台跑完历史冒泡）", () => {
     await tasks.pollTask("run-1", "screen");
 
     expect(state.taskCompletedToast.value.visible).toBe(false);
+    expect(state.activeStep.value).toBe("results");
+  });
+
+  it("完成响应内联兜底时沿用外层任务平台", async () => {
+    const state = makeState({ screenTaskId: ref("run-inline-zhilian") });
+    const deps = makeDeps({ fetchMergedLatestResult: vi.fn(async () => null) });
+    const tasks = useDiscoveryTasks(state, deps);
+    apiRequestMock.mockResolvedValue({
+      status: "completed",
+      platform: "zhilian",
+      progress: {},
+      logs: [],
+      result: { jobs: [{ job_id: "j1", title: "智联岗位" }], dropped: [] },
+    });
+
+    await tasks.pollTask("run-inline-zhilian", "screen");
+
+    expect(deps.setPipelineResult).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "zhilian",
+      jobs: [{ job_id: "j1", title: "智联岗位" }],
+    }));
     expect(state.activeStep.value).toBe("results");
   });
 });
@@ -283,6 +353,35 @@ describe("useDiscoveryTasks.pollTask 错误态不阻塞新任务", () => {
       expect(state.pipelineBusy.value).toBe(false);
     },
   );
+
+  it("新一轮开始后，旧重抓轮询的完成响应不再回写", async () => {
+    const state = makeState({
+      recrawlBusy: ref(true),
+      activeStep: ref("screen"),
+      recrawlSnapshot: ref({ status: "running", progress: {}, logs: [] }),
+    });
+    let resolveTaskState!: (snapshot: unknown) => void;
+    const taskState = new Promise((resolve) => { resolveTaskState = resolve; });
+    apiRequestMock.mockReturnValue(taskState);
+    const deps = makeDeps();
+    const tasks = useDiscoveryTasks(state, deps);
+    const pollPromise = tasks.pollRecrawl("old-recrawl");
+
+    await Promise.resolve();
+    state.workflowEpoch.value += 1;
+    resolveTaskState({
+      status: "completed",
+      progress: {},
+      logs: [],
+      result: { updates: { old: { verdict: "match" } } },
+    });
+    await pollPromise;
+
+    expect(state.recrawlSnapshot.value?.status).toBe("running");
+    expect(state.recrawlBusy.value).toBe(true);
+    expect(state.activeStep.value).toBe("screen");
+    expect(deps.notify).not.toHaveBeenCalled();
+  });
 });
 
 describe("useDiscoveryTasks.abandonRound", () => {

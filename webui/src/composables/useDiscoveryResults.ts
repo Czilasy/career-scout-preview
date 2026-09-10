@@ -56,7 +56,7 @@ import type { MergedLatestResult } from "./useDiscoveryState";
 import { liveTaskStep } from "./useDiscoveryState";
 
 export function useDiscoveryResults(state: DiscoveryState, deps: ResultsNeeds) {
-  const { activeCategory, activeStep, analysisReady, archiveHistoryLatest, currentRoundStatus, draftPlatform, exportBusy, feedbackBusyIds, groups, hideHistory, historyBackToLatest, historyMode, historyOpen, historyRound, interruptedRunId, isScrapedOnly, jdBusyIds, lifecycleDialogJob, lifecycleDialogOpen, locationDraft, pausedRunId, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, rejectedIds, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, returningFromHistory, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, showHistory, unfinishedWorkflowRestored } = state;
+  const { activeCategory, activeStep, analysisReady, archiveHistoryLatest, currentRoundStatus, draftPlatform, exportBusy, feedbackBusyIds, groups, hideHistory, historyBackToLatest, historyMode, historyOpen, historyRound, interruptedRunId, isScrapedOnly, jdBusyIds, lifecycleDialogJob, lifecycleDialogOpen, locationDraft, pausedRunId, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, rejectedIds, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, returningFromHistory, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, showHistory, unfinishedWorkflowRestored, workflowEpoch } = state;
   const { notify, pollRecrawl, pollTask, setDraftPlatform } = deps;
 
 
@@ -66,6 +66,11 @@ function setPipelineResult(result: PipelineResult) {
   // 后端权威优先；即时 finish 响应或旧快照缺 platform 时按结果级平台回填。
   const platform = (result as PipelineResult & { platform?: string }).platform || "";
   if (platform) {
+    if (platform === "boss" || platform === "zhilian") {
+      // 结果主题必须跟随当前结果快照，不读取新任务草稿平台。
+      platformState.setResultPlatform(platform);
+      setThemePlatform(platform);
+    }
     for (const list of [result.jobs, result.dropped]) {
       if (!Array.isArray(list)) continue;
       for (const job of list) {
@@ -107,7 +112,9 @@ async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean }) {
   // 暂停/中断任务未结束，不得把暂停时保存的安全网快照当作结果加载，
   // 否则 resultLoaded 被误置 true、04 结果页对用户开放造成「任务还在跑」误解。
   if (interruptedRunId.value || pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
+  const requestEpoch = workflowEpoch.value;
   const fetched = await fetchMergedLatestResult();
+  if (requestEpoch !== workflowEpoch.value) return;
   if (!fetched) return;
   const { newer } = fetched;
   if (hasLiveTaskState() && newer.data.scrape_task_id && scrapeTaskId.value && newer.data.scrape_task_id !== scrapeTaskId.value) return;
@@ -170,14 +177,14 @@ function applyFetchedLatestResult(
   screenSnapshot.value.pending_count = snapshotStatus === "completed_with_pending" ? uncertainCount : 0;
 }
 
-// 双平台合并加载：拉两个平台的 /api/latest-pipeline-result 并合并。
-// 刷新路径（loadLatestResult）与实时任务完成路径（deps.pollTask）共用，
-// 保证两条路径行为一致（R2：实时路径只 set 单平台结果导致切平台显示 0）。
+// 最新结果加载：分别读取两个平台的最新快照并保留现有合并展示；
+// 以时间更新的一轮作为结果身份，用于主题与状态投影。
 
 
 async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
   try {
-    // 分别拉两个平台各自的最近结果，合并展示（后端 T409 按平台查询）。
+    const requestEpoch = workflowEpoch.value;
+    // 分别拉两个平台各自的最近结果并合并展示；较新轮次决定结果身份。
     const base = deps.props.profileId ? `&profile_id=${encodeURIComponent(deps.props.profileId)}` : "";
     const fetchOne = (platform: "boss" | "zhilian") => apiRequest<{
       has_result?: boolean;
@@ -192,6 +199,7 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
       integrity?: PipelineResult["integrity"];
     }>(`/api/latest-pipeline-result?platform=${platform}${base}`).catch(() => null);
     const [bossData, zhilianData] = await Promise.all([fetchOne("boss"), fetchOne("zhilian")]);
+    if (requestEpoch !== workflowEpoch.value) return null;
     if (interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return null;
 
     const parts = [
@@ -204,6 +212,12 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
         return !activeScrapeTaskId || !part.data.scrape_task_id || part.data.scrape_task_id === activeScrapeTaskId;
       });
     if (!parts.length) return null;
+
+    // 以更新时间较新的一份为主干（profile_summary / 状态投影 / 默认 run）。
+    let newer = parts[0];
+    if (parts.length > 1 && Number(parts[1].data.started_at || 0) > Number(parts[0].data.started_at || 0)) {
+      newer = parts[1];
+    }
 
     // 每个岗位标记来源 run（单岗位补抓/单 JD 动作需要定位来源）。
     for (const part of parts) {
@@ -223,16 +237,12 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
         }
       }
     }
-    // 以更新时间较新的一份为主干（profile_summary / 状态投影 / 默认 run）。
-    let newer = parts[0];
-    if (parts.length > 1 && Number(parts[1].data.started_at || 0) > Number(parts[0].data.started_at || 0)) {
-      newer = parts[1];
-    }
 
     const sum = (key: "total_scraped" | "total_matched" | "total_kept" | "total_dropped") =>
       parts.reduce((acc, part) => acc + Number((part.data.result as Record<string, unknown> | undefined)?.[key] || 0), 0);
     const merged: PipelineResult = {
       ...(newer.data.result as PipelineResult),
+      platform: newer.platform,
       jobs: parts.flatMap((part) => (Array.isArray(part.data.result?.jobs) ? part.data.result!.jobs : [])),
       dropped: parts.flatMap((part) => (Array.isArray(part.data.result?.dropped) ? part.data.result!.dropped : [])),
       total_scraped: sum("total_scraped"),
@@ -331,6 +341,7 @@ function enterHistoryRound(detail: HistoryRoundDetail) {
   resultRunIds.value[detail.platform] = detail.source_run_id || "";
   resultPlatformFilter.value = detail.platform;
   // 历史轮次与顶部平台开关/品牌色绑定：BOSS 历史进 BOSS 模式，智联历史进智联模式。
+  platformState.setResultPlatform(detail.platform);
   platformState.setDraftPlatform(detail.platform);
   draftPlatform.value = detail.platform;
   setThemePlatform(detail.platform);
@@ -359,14 +370,16 @@ async function returnToLatest() {
     pipelineResult.value = null;
     pipelineResultRunId.value = "";
     resultLoaded.value = false;
+    platformState.setResultPlatform(null);
     resultRunIds.value = { boss: "", zhilian: "" };
     resultEpoch.value += 1;
     currentRoundStatus.value = "";
     if (restorePlatform) {
       platformState.setDraftPlatform(restorePlatform);
       draftPlatform.value = restorePlatform;
-      setThemePlatform(restorePlatform);
     }
+    // 没有可恢复结果时也要回到当前草稿平台，不能把历史轮的品牌色留在新轮页面。
+    setThemePlatform(restorePlatform || draftPlatform.value);
 
     if (liveStep) {
       scrapeCompleted.value = liveStep === "screen";

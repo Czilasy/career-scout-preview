@@ -216,6 +216,11 @@ describe("DiscoveryView history mode", () => {
     expect(wrapper.find('[data-testid="platform-current-zhilian"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("aria-selected")).toBe("true");
 
+    await wrapper.get('[data-testid="back-to-latest"]').trigger("click");
+    await flushPromises();
+    expect(document.documentElement.getAttribute("data-platform")).toBe("boss");
+    expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(true);
+
     wrapper.unmount();
     vi.unstubAllGlobals();
   });

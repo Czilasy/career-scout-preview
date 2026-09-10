@@ -21,6 +21,25 @@ import type {
 import type { StepId } from "./useDiscoveryState";
 import type { WorkflowNeeds } from "./discoveryDeps";
 
+const LIVE_SAVED_TASK_STATUSES = new Set(["running", "queued", "paused", "pausing", "interrupted"]);
+const TERMINAL_SAVED_TASK_STATUSES = new Set([
+  "done", "completed", "completed_with_pending", "partial", "succeeded", "scraped_only",
+]);
+
+function isCompletedWorkflowSnapshot(saved: Record<string, any>): boolean {
+  // 只有已经展示过结果页、且快照带有结果，才把 sessionStorage 的 unfinished
+  // 标记视为过期的完成态快照；02/03 页的半截现场仍按未完成流程恢复。
+  if (saved.activeStep !== "results" || saved.resultLoaded === false) return false;
+  if (!saved.pipelineResult || typeof saved.pipelineResult !== "object") return false;
+  if (saved.pausedRunId || saved.interruptedRunId) return false;
+
+  const statuses = [saved.scrapeSnapshot?.status, saved.screenSnapshot?.status, saved.recrawlSnapshot?.status]
+    .map((status) => String(status || ""))
+    .filter(Boolean);
+  if (statuses.some((status) => LIVE_SAVED_TASK_STATUSES.has(status))) return false;
+  return statuses.every((status) => TERMINAL_SAVED_TASK_STATUSES.has(status));
+}
+
 export function useDiscoveryWorkflow(state: DiscoveryState, deps: WorkflowNeeds) {
   const { WORKFLOW_STATE_VERSION, activeStep, advancedPanelsOpen, analysisReady, cityText, currentRoundStatus, enabledSteps, filterValues, finishedPartial, historyMode, interruptedRunId, keywords, pausedRunId, pipelineResult, pipelineResultRunId, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, restoredWorkflowSnapshot, resultLoaded, resultsPageSeen, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, unfinishedWorkflowRestored, workflowStateKey, workflowStateRestored } = state;
 
@@ -94,12 +113,24 @@ function workflowIsFinished(): boolean {
 
 function persistWorkflowState(): void {
   if (!workflowStateRestored.value) return;
-  const unfinished = !workflowIsFinished() && Boolean(
-    analysisReady.value || scrapeTaskId.value || screenTaskId.value || pausedRunId.value || interruptedRunId.value
-    || scrapeBusy.value || screenBusy.value
-    || [scrapeSnapshot.value?.status, screenSnapshot.value?.status].some((status) =>
-      ["running", "queued", "paused", "interrupted"].includes(String(status))),
-  );
+  const snapshot = {
+    activeStep: activeStep.value,
+    resultLoaded: resultLoaded.value,
+    pipelineResult: pipelineResult.value,
+    pausedRunId: pausedRunId.value,
+    interruptedRunId: interruptedRunId.value,
+    scrapeSnapshot: scrapeSnapshot.value,
+    screenSnapshot: screenSnapshot.value,
+    recrawlSnapshot: recrawlSnapshot.value,
+  };
+  const unfinished = !workflowIsFinished()
+    && !isCompletedWorkflowSnapshot(snapshot)
+    && Boolean(
+      analysisReady.value || scrapeTaskId.value || screenTaskId.value || pausedRunId.value || interruptedRunId.value
+      || scrapeBusy.value || screenBusy.value
+      || [scrapeSnapshot.value?.status, screenSnapshot.value?.status].some((status) =>
+        ["running", "queued", "paused", "interrupted"].includes(String(status))),
+    );
   if (!unfinished) {
     clearWorkflowState();
     return;
@@ -144,6 +175,14 @@ function restoreWorkflowState(): void {
   if (finished.finishedPartial) finishedPartial.value = true;
   const saved = readWorkflowState();
   if (!saved?.unfinished) {
+    workflowStateRestored.value = true;
+    return;
+  }
+  // 完成态也可能因页面关闭时序残留 unfinished 快照（例如 activeStep 已切到
+  // 04 页但结束事实尚未来得及写入）。它不是可恢复现场，清掉后交给启动流程
+  // 的 maybeAutoStartNewRound 识别并回到干净 01 页。
+  if (isCompletedWorkflowSnapshot(saved)) {
+    clearWorkflowState();
     workflowStateRestored.value = true;
     return;
   }

@@ -191,6 +191,9 @@ const countParts = (item: HistoryRoundItem) => [
                 <span class="history-round-status" :data-status="item.status">
                   {{ historyStatusLabel(item.status, item.total_kept) }}
                 </span>
+                <span class="history-round-total" data-testid="history-round-total">
+                  共 {{ item.total_scraped }} 个岗位
+                </span>
                 <span class="history-round-meta" data-testid="history-round-meta">
                   <template v-for="part in countParts(item)" :key="part.label">
                     <span class="history-metric" :data-tone="part.tone">
@@ -464,6 +467,12 @@ const countParts = (item: HistoryRoundItem) => [
 
 .history-round-status {
   font-weight: 600;
+}
+
+.history-round-total {
+  color: var(--text-soft);
+  font-size: 0.75rem;
+  font-weight: 400;
 }
 
 .history-round-meta {

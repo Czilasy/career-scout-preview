@@ -1948,13 +1948,18 @@ button:disabled {
 /* 岗位详情面板：打开时淡入 */
 }.job-detail-pane {
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   padding: 0;
   border: 1px solid var(--hair);
   border-radius: 12px;
   background: var(--panel);
   animation: panel-in .22s ease both;
+}.job-detail-fixed {
+  flex: 0 0 auto;
+  min-width: 0;
 }.job-detail-header {
   display: flex;
   align-items: flex-start;
@@ -2224,8 +2229,13 @@ button:disabled {
   color: var(--unsure);
 }.jd-content {
   position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
   margin-top: 16px;
-  padding: 22px 28px 16px;
+  padding: 22px 28px 0;
   border-bottom: 1px solid var(--hair-2);
   --divider-accent: var(--boss-accent);
 }
@@ -2249,6 +2259,7 @@ button:disabled {
 }
 .jd-content h3 {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 8px;
   margin: 0;
@@ -2258,9 +2269,20 @@ button:disabled {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: .16em;
+}.jd-scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  margin-top: 7px;
+  padding: 12px 14px 16px;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: var(--panel-2, var(--panel));
 }.jd-content p {
   max-width: 76ch;
-  margin: 7px 0 0;
+  margin: 0;
   color: var(--ink-2);
   font-size: 14px;
   line-height: 1.62;
@@ -2464,10 +2486,13 @@ body,
     min-height: 0;
     flex-direction: column;
     overflow: hidden;
-  }.results-view .job-list,
-.results-view .job-detail-pane {
+  }.results-view .job-list {
     min-height: 0;
     overflow-y: auto;
+    overscroll-behavior: contain;
+  }.results-view .job-detail-pane {
+    min-height: 0;
+    overflow: hidden;
     overscroll-behavior: contain;
   }.results-view .job-list {
     flex: 1;
@@ -2653,6 +2678,17 @@ body,
   .jd-content {
     padding-left: 0;
     padding-right: 0;
+  }.job-detail-pane .jd-content {
+    display: block;
+    min-height: 0;
+    overflow: visible;
+    padding-bottom: 16px;
+  }.job-detail-pane .jd-scroll {
+    overflow: visible;
+    margin-top: 7px;
+    padding: 0;
+    border: 0;
+    background: transparent;
   }.job-detail-facts {
     margin-left: 0;
     margin-right: 0;

@@ -115,8 +115,8 @@ const listEl = ref<HTMLElement | null>(null);
 const showBackToTop = ref(false);
 let observer: IntersectionObserver | undefined;
 
-// 右侧详情面板的滚动容器 ref：切换岗位时用于把 scrollTop 归零
-const detailEl = ref<HTMLElement | null>(null);
+// JD 内层滚动容器：详情头部、事实和操作区固定，切换岗位时只重置 JD 滚动位置。
+const jdScrollEl = ref<HTMLElement | null>(null);
 
 function onScroll() {
   const y = window.scrollY || document.documentElement.scrollTop || 0;
@@ -206,11 +206,10 @@ function selectJob(job: JobItem) {
   localSelectedId.value = jobKey(job);
   detailOpen.value = true;
   userSelectedDetail.value = true;
-  // 切换岗位后把右侧详情面板滚回顶部，避免停留在上一个岗位的滚动位置
-  // （如已滚到底部收藏/不感兴趣按钮区）。容器元素不变，nextTick 后归零即可。
+  // 切换岗位后只把 JD 小窗滚回顶部，避免沿用上一个岗位的阅读位置。
   nextTick(() => {
-    if (typeof detailEl.value?.scrollTo === "function") {
-      detailEl.value.scrollTo({ top: 0 });
+    if (typeof jdScrollEl.value?.scrollTo === "function") {
+      jdScrollEl.value.scrollTo({ top: 0 });
     }
   });
 }
@@ -447,7 +446,6 @@ function clearFilters() {
 
     <aside
       v-if="selectedJob && detailOpen"
-      ref="detailEl"
       class="job-detail-pane"
       data-testid="job-detail"
       aria-label="岗位详情"
@@ -484,6 +482,7 @@ function clearFilters() {
         </div>
       </header>
 
+      <div class="job-detail-fixed">
       <div class="job-detail-facts">
         <span><strong>{{ selectedJob.salary || "薪资面议" }}</strong></span>
         <span><MapPin :size="16" aria-hidden="true" />{{ cleanJobLocation(selectedJob.location) || "地点待确认" }}</span>
@@ -553,10 +552,13 @@ function clearFilters() {
           >岗位链接 <ArrowUpRight :size="14" aria-hidden="true" /></a>
         </div>
       </section>
+      </div>
 
       <section class="jd-content" :data-platform="selectedJob.platform || 'boss'">
         <h3><span class="sec-mk" aria-hidden="true"></span>职位描述</h3>
-        <p>{{ selectedJob.jd || selectedJob.jd_excerpt || "尚未获取职位描述。" }}</p>
+        <div ref="jdScrollEl" class="jd-scroll" data-testid="job-detail-jd-scroll">
+          <p>{{ selectedJob.jd || selectedJob.jd_excerpt || "尚未获取职位描述。" }}</p>
+        </div>
       </section>
 
       <div class="job-detail-actions">

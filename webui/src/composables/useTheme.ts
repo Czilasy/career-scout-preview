@@ -3,7 +3,7 @@
 //
 // 两个独立维度：
 //   - mode: light | dark  （明暗主题，用户偏好，localStorage 持久化）
-//   - platform: boss | zhilian （平台品牌色，跟随当前任务/草稿平台）
+//   - platform: boss | zhilian （平台品牌色，跟随当前任务、草稿或结果平台）
 //
 // 两者正交：boss+暗 / boss+浅 / zhilian+暗 / zhilian+浅 四态自由组合。
 // 切换平台时暗色偏好保留；切换暗色时平台不变。

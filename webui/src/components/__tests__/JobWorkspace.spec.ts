@@ -110,3 +110,24 @@ describe("JobWorkspace company insight buttons (B058/B065)", () => {
     expect(wrapper.get(".job-detail-facts").findAll(".company-insight-button").map((button) => button.text())).toEqual(["AI 判断说明"]);
   });
 });
+
+describe("JobWorkspace detail scroll boundary", () => {
+  it("keeps the detail shell fixed and places only the JD in its scroll window", () => {
+    const wrapper = mount(JobWorkspace, {
+      props: {
+        jobs: [job({ jd: "职责一\n职责二" })],
+        emptyMessage: "暂无岗位",
+      },
+    });
+
+    const detail = wrapper.get('[data-testid="job-detail"]');
+    const jdScroll = detail.get('[data-testid="job-detail-jd-scroll"]');
+
+    expect(detail.get(".job-detail-fixed").text()).toContain("测试公司");
+    expect(jdScroll.text()).toContain("职责一");
+    expect(jdScroll.find(".job-detail-header").exists()).toBe(false);
+    expect(jdScroll.find(".job-detail-actions").exists()).toBe(false);
+    expect(detail.get(".job-detail-header").element.parentElement).toBe(detail.element);
+    expect(detail.get(".job-detail-actions").element.parentElement).toBe(detail.element);
+  });
+});
