@@ -182,7 +182,17 @@ class WhiteboxService:
                     unit for unit in all_units
                     if str(unit.get('unit_key') or '') == unit_key
                 ]
-                if not matching:
+                if not matching and str(normalized.get('unit_kind') or '') == 'account_pool':
+                    # Account round-robin facts are run-level bookkeeping, not
+                    # scrape work units.  When the frozen plan declares no
+                    # account-pool unit, keep the event only: binding it to a
+                    # work unit rewrote that unit into a fresh ``planned``
+                    # attempt and hid its real terminal state, so a run with a
+                    # single failed combo was reported as missing evidence.
+                    normalized.pop('unit_key', None)
+                    normalized.pop('attempt_no', None)
+                    unit_key = ''
+                if not matching and unit_key:
                     # Diagnostics may know the failing stage but not the
                     # runner's internal unit key.  Never create an orphan
                     # projection such as ``ai_screen`` that the frozen plan

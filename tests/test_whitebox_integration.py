@@ -179,6 +179,55 @@ class WhiteboxIntegrationTests(unittest.TestCase):
             "ai_rough", "jd_detail", "ai_fine",
         })
 
+    def test_account_pool_facts_never_hide_a_failed_scrape_unit(self):
+        """038 调度流水不得改写抓取单元：只失败一组时结论应为“部分完成”。"""
+        ref = self.service.begin("scrape", "round-robin-failed", {
+            "stages": ["scrape_list"],
+            "units": [
+                {"unit_key": "kw|ok", "unit_kind": "keyword_city", "stage": "scrape_list"},
+                {"unit_key": "kw|bad", "unit_kind": "keyword_city", "stage": "scrape_list"},
+            ],
+        })
+        self.service.record(ref, {
+            "idempotency_key": "scope-ok", "event_type": "scope_completed",
+            "occurred_at": "2026-09-11T00:00:00+08:00", "stage": "scrape_list",
+            "unit_kind": "keyword_city", "unit_key": "kw|ok", "attempt_no": 1,
+            "required_evidence": True,
+            "payload": {"scope_complete": True, "stop_reason": "target_reached",
+                        "returned_total_count": 10, "unit_unique_count": 10},
+        })
+        self.service.record(ref, {
+            "idempotency_key": "fail-bad", "event_type": "unit_failed",
+            "occurred_at": "2026-09-11T00:00:00+08:00", "stage": "scrape_list",
+            "unit_kind": "keyword_city", "unit_key": "kw|bad", "attempt_no": 1,
+            "required_evidence": True, "severity": "error",
+            "payload": {"error_code": "source_invalid_output",
+                        "error_reason": "输入校验失败或页面解析异常"},
+        })
+        for segment in (1, 2):
+            self.assertTrue(self.service.record_for_owner("scrape", "round-robin-failed", {
+                "idempotency_key": f"account:round-robin-failed:R1:account_allocation:{segment}",
+                "event_type": "account_allocation",
+                "occurred_at": "2026-09-11T00:00:01+08:00",
+                "stage": "R1", "unit_kind": "account_pool", "unit_key": "R1",
+                "attempt_no": 1, "required_evidence": False,
+                "payload": {"phase": "R1", "account_id": "a", "segment": segment,
+                            "count": 1, "remaining": 0},
+            }))
+        run = self.store.get_whitebox_run("scrape", "round-robin-failed")
+        units = self.store.list_whitebox_units(run["id"])
+        self.assertEqual(
+            [(unit["unit_key"], unit["attempt_no"], unit["status"]) for unit in units],
+            [("kw|bad", 1, "failed"), ("kw|ok", 1, "succeeded")],
+        )
+        events = self.store.list_whitebox_events(run["id"])
+        self.assertEqual(
+            sum(event["event_type"] == "account_allocation" for event in events), 2)
+        result = self.service.finalize(ref)
+        self.assertEqual(result["conclusion"], "partial")
+        self.assertEqual(result["primary_code"], "source_invalid_output")
+        self.assertEqual(result["summary"]["completed_units"], 1)
+
     def test_repeated_finalize_preserves_interrupted_conclusion(self):
         ref = self.service.begin("scrape", "interrupted-once", {
             "stages": ["scrape_list"], "units": [{"unit_key": "a"}],
