@@ -375,7 +375,7 @@ def _reset_detail_session(ws, sid, sleeper, tab_label, event_callback=None):
     与列表翻页相同的策略：导航回 BOSS 首页 + 等待 + 滚动，
     让 BOSS 的 session 级请求计数归零，避免连续自动化访问触发拦截。
     """
-    print(f"[{tab_label}] ⟳ session 重置：导航回首页...")
+    print(f"[{tab_label}] session 重置：导航回首页...")
     _emit_runtime_safe_event(
         event_callback, "detail_session_reset", safe_hint="详情抓取 session 重置",
     )
@@ -386,7 +386,7 @@ def _reset_detail_session(ws, sid, sleeper, tab_label, event_callback=None):
     sleeper(random.uniform(2, 4), label="session_reset_scroll")
     ws.eval_js("window.scrollBy(0, -200); void(0);", sid)
     sleeper(random.uniform(1, 2), label="session_reset_scroll2")
-    print(f"[{tab_label}] ⟳ session 重置完成")
+    print(f"[{tab_label}] session 重置完成")
 
 
 def _tab_worker(cdp_port, session_factory, work_queue, total, *,

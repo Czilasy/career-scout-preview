@@ -1064,6 +1064,29 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
         results = source.fetch_details_batch(jobs, tab_pool_size=2)
         self.assertEqual(results["j0"].failed_code, "source_cdp_unavailable")
 
+    def test_batch_parallel_worker_incomplete_maps_detail_incomplete(self):
+        """批次未跑完：如实报「详情抓取中断」，不伪装成平台状态不明。"""
+        def batch_runner(list_data, **kw):
+            jobs = list_data.get("jobs", [])
+            return ([("ok", {"jd": "jd"})] + [("skipped", {})] * (len(jobs) - 1),
+                    "worker_incomplete")
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(2)
+        ]
+        results = source.fetch_details_batch(jobs, tab_pool_size=2)
+        self.assertTrue(results["j0"].ok)
+        self.assertEqual(results["j1"].failed_code, "detail_incomplete")
+        self.assertEqual(
+            results["j1"].failed_reason, "详情抓取中断，未抓到的岗位可补抓",
+        )
+
     def test_batch_parallel_runner_exception_maps_unreachable(self):
         """runner 抛临时异常：整批 source_unreachable，不污染账号限流状态。"""
         def batch_runner(list_data, **kw):
@@ -1510,6 +1533,146 @@ class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
         self.assertIsNone(degrade)
         self.assertEqual([sig for sig, _ in per_item], ["ok", "ok", "ok"],
                          "默认 sleeper 路径下全部任务必须完成，无线程崩溃")
+
+    # ------------------------------------------------------------------
+    # 回归：进度打印异常杀线程（真实故障根因）
+    # ------------------------------------------------------------------
+
+    class _GBKConsole:
+        """模拟中文 Windows 控制台：编码为 gbk，无法表示时抛 UnicodeEncodeError。"""
+
+        encoding = "gbk"
+
+        def write(self, text):
+            text.encode("gbk")
+            return len(text)
+
+        def flush(self):
+            pass
+
+    def test_safe_print_survives_console_encoding_failure(self):
+        """根因回归：控制台编码表示不了的进度行，_safe_print 不得抛出。
+
+        真实故障：进度行含 GBK 无法编码的符号，``print`` 抛
+        UnicodeEncodeError；worker 无兜底 → 标签线程当场死亡。
+        """
+        import scripts.zhilian.detail as detail
+
+        with mock.patch("sys.stdout", self._GBKConsole()):
+            detail._safe_print("[tab1] \u27f3 session 重置：导航回首页...")
+
+    def test_worker_survives_console_encoding_failure(self):
+        """根因回归：打印失败时标签线程不得死亡、不得丢批。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        waits, sleeper = self._make_waits()
+        with mock.patch("sys.stdout", self._GBKConsole()), \
+             mock.patch("scripts.zhilian.detail._scrape_detail_on_ws",
+                        side_effect=lambda ws, job, *, sleeper=None: ("ok", {"jd": "jd"})):
+            per_item, degrade = zha.scrape_details_batch(
+                {"jobs": self._jobs(3)}, tab_pool_size=1, reset_every=1,
+                sleeper=sleeper, connector=self._connector([]),
+            )
+        self.assertIsNone(degrade)
+        self.assertEqual([sig for sig, _ in per_item], ["ok"] * 3,
+                         "控制台编码失败不得导致丢批（reset_every=1 必然触发重置）")
+
+    # ------------------------------------------------------------------
+    # 回归：标签线程死亡必须留痕、如实归类
+    # ------------------------------------------------------------------
+
+    def test_reset_failure_does_not_kill_worker(self):
+        """会话重置只是防频率手段：失败只降级记录，不得报废整条标签线程。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        waits, sleeper = self._make_waits()
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws",
+                        side_effect=lambda ws, job, *, sleeper=None: ("ok", {"jd": "jd"})), \
+             mock.patch("scripts.zhilian.detail._reset_detail_session",
+                        side_effect=RuntimeError("cdp evaluate failed")):
+            per_item, degrade = zha.scrape_details_batch(
+                {"jobs": self._jobs(3)}, tab_pool_size=1, reset_every=1,
+                sleeper=sleeper, connector=self._connector([]),
+            )
+        self.assertIsNone(degrade)
+        self.assertEqual([sig for sig, _ in per_item], ["ok"] * 3,
+                         "重置失败后剩余岗位仍必须被继续抓取")
+
+    def test_worker_crash_reports_incomplete_not_silent(self):
+        """worker 意外死亡导致批次未跑完：报 worker_incomplete 且必须留痕。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        def failing_sleeper(seconds, label=None):
+            raise RuntimeError("worker 线程意外死亡")
+
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws",
+                        side_effect=lambda ws, job, *, sleeper=None: ("ok", {"jd": "jd"})), \
+             mock.patch("scripts.zhilian.detail._logger") as logger_mock:
+            per_item, degrade = zha.scrape_details_batch(
+                {"jobs": self._jobs(5)}, tab_pool_size=1, reset_every=999,
+                sleeper=failing_sleeper, connector=self._connector([]),
+            )
+        self.assertEqual(degrade, "worker_incomplete",
+                         "批次没跑完又没有平台级信号：必须给出明确的中断信号")
+        self.assertGreaterEqual(per_item.count(("skipped", {})), 1,
+                                "未处理任务仍以 skipped 占位，由上层映射失败码")
+        self.assertLess(sum(1 for sig, _ in per_item if sig == "ok"), 5,
+                        "线程死亡后剩余任务不得被当作已处理")
+        self.assertTrue(logger_mock.error.called, "worker 异常必须留痕，不得静默")
+
+    def test_worker_crash_recovers_missing_jobs_by_rerun(self):
+        """标签线程意外死亡后补跑拿回未出结果的任务：死过也不能丢批。
+
+        这是「抓取中断」的修因而非归类：旧实现里线程一死，它领走/未领的
+        任务永久消失，整批剩余岗位直接进待确认（历史每批丢 11 条）。
+        """
+        import threading
+
+        import scripts.zhilian_cdp_raw as zha
+
+        lock = threading.Lock()
+        state = {"calls": 0}
+
+        def flaky_sleeper(seconds, label=None):
+            with lock:
+                state["calls"] += 1
+                first = state["calls"] == 1
+            if first:
+                raise RuntimeError("偶发线程故障")
+
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws",
+                        side_effect=lambda ws, job, *, sleeper=None: ("ok", {"jd": "jd"})), \
+             mock.patch("scripts.zhilian.detail._reset_detail_session"):
+            per_item, degrade = zha.scrape_details_batch(
+                {"jobs": self._jobs(4)}, tab_pool_size=1, reset_every=999,
+                sleeper=flaky_sleeper, connector=self._connector([]),
+            )
+        self.assertIsNone(degrade, "补跑拿回全部结果后不得报中断")
+        self.assertEqual([sig for sig, _ in per_item], ["ok"] * 4,
+                         "线程死过也必须把岗位抓回来")
+
+    def test_cancelled_batch_is_not_reported_as_incomplete(self):
+        """用户取消导致的未处理不算抓取中断（上层按取消语义收场）。"""
+        import threading
+
+        import scripts.zhilian_cdp_raw as zha
+
+        cancel_event = threading.Event()
+        jobs = self._jobs(4)
+
+        def fake_scrape(ws, job, *, sleeper=None):
+            cancel_event.set()  # 第 1 条抓完即模拟用户立即停止
+            return "ok", {"jd": "jd"}
+
+        waits, sleeper = self._make_waits()
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws", side_effect=fake_scrape):
+            per_item, degrade = zha.scrape_details_batch(
+                {"jobs": jobs}, tab_pool_size=1, reset_every=999,
+                sleeper=sleeper, connector=self._connector([]),
+                cancel_event=cancel_event,
+            )
+        self.assertIsNone(degrade, "取消不冒充抓取失败")
+        self.assertGreaterEqual(per_item.count(("skipped", {})), 1)
 
 
 class ZhilianCdpSourceOutcomeContractTests(_LoginCacheIsolated):

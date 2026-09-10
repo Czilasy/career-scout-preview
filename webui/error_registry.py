@@ -198,6 +198,12 @@ _TAXONOMY_CODES: dict[str, dict[str, Any]] = {
         user_message="详情结构无效（登录墙/导航壳/空壳）",
         resume_condition="可单条补抓",
     ),
+    "detail_incomplete": _entry(
+        "detail_incomplete", "job",
+        retryable=True,
+        user_message="详情抓取中断，未抓到的岗位可补抓",
+        resume_condition="可单条补抓重试",
+    ),
     "ai_missing_job": _entry(
         "ai_missing_job", "ai",
         retryable=True,

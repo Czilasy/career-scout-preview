@@ -12,6 +12,9 @@ from typing import Any
 
 _ZHILIAN_DETAIL_SIGNAL_ADDITIONS: Mapping[str, str] = {
     "cdp_unavailable": "source_cdp_unavailable",
+    # 批次未跑完（worker 异常退出等）且无平台级信号：如实归类为「抓取中断」，
+    # 不再兜底成 source_status_unclear（那会把「我们没抓」说成「平台状态不明」）。
+    "worker_incomplete": "detail_incomplete",
 }
 
 
