@@ -59,6 +59,12 @@ import { liveTaskStep } from "./useDiscoveryState";
 export function useDiscoveryResults(state: DiscoveryState, deps: ResultsNeeds) {
   const { activeCategory, activeStep, analysisReady, archiveHistoryLatest, currentRoundStatus, draftPlatform, exportBusy, feedbackBusyIds, groups, hideHistory, historyBackToLatest, historyMode, historyOpen, historyRound, interruptedRunId, isScrapedOnly, jdBusyIds, lifecycleDialogJob, lifecycleDialogOpen, locationDraft, pausedRunId, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, rejectedIds, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, returningFromHistory, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, showHistory, unfinishedWorkflowRestored, workflowEpoch } = state;
   const { notify, pollRecrawl, pollTask, setDraftPlatform } = deps;
+  // 首屏对齐：第一次拿到最近结果时，把新任务草稿平台（顶部滑块）带到结果
+  // 平台，避免「品牌色是智联、滑块停在 BOSS」要用户手动切一次才一致。
+  // 只做一次：之后切平台或再加载结果都不再改写草稿（契约首屏例外见
+  // specs/001 .../contracts/platform-schema.md「最近结果加载」）。
+  // setDraftPlatform 在草稿已是该平台时直接返回，不会清任何现场。
+  let draftAlignedToResult = false;
 
 
 function setPipelineResult(result: PipelineResult) {
@@ -131,6 +137,17 @@ function applyFetchedLatestResult(
   const { merged, newer } = fetched;
   pipelineResultRunId.value = newer.data.source_run_id || "";
   setPipelineResult(merged);
+  // 首屏对齐：只在这条「启动/刷新加载最近结果」路径、且无活动任务时做一次。
+  // 不放在 setPipelineResult——任务跑完的补拉也走那里，切草稿会清掉现场。
+  // setDraftPlatform 会顺带按新平台重载 schema/城市（否则提交会带旧平台的
+  // filter_schema_version 触发后端 409）；草稿已是该平台时它直接返回。
+  if (!live && !historyMode.value && !draftAlignedToResult) {
+    const platform = (merged as PipelineResult & { platform?: string }).platform || "";
+    if (platform === "boss" || platform === "zhilian") {
+      draftAlignedToResult = true;
+      setDraftPlatform(platform);
+    }
+  }
   // B038：最新轮可能是"已抓取，未筛选"，原样透传驱动展示模式。
   currentRoundStatus.value = newer.data.status === "scraped_only" ? "scraped_only" : "screened";
   if (isScrapedOnly.value) activeCategory.value = "matched";

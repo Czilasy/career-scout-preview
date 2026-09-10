@@ -95,4 +95,41 @@ describe("useDiscoveryResults latest platform identity", () => {
     expect(state.platformState.result).toBe("zhilian");
     expect(document.documentElement.getAttribute("data-platform")).toBe("zhilian");
   });
+
+  it("aligns the draft platform switch to the newest result platform on first load", async () => {
+    const boss = { ...result("boss", "boss-old"), started_at: 1_000 };
+    const zhilian = result("zhilian", "zhilian-latest");
+    apiRequestMock.mockImplementation(async (url: string) => {
+      if (url.includes("platform=boss")) return boss;
+      return zhilian;
+    });
+
+    const state = useDiscoveryState({ profileId: "align-test" }, () => {});
+    const deps = makeDeps();
+    const results = useDiscoveryResults(state, deps);
+
+    await results.loadLatestResult();
+
+    // 首屏对齐：滑块跟到结果平台，避免「颜色智联 / 滑块 BOSS」
+    expect(deps.setDraftPlatform).toHaveBeenCalledWith("zhilian");
+    expect(deps.setDraftPlatform).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not keep rewriting the draft platform on later result loads", async () => {
+    const boss = { ...result("boss", "boss-old"), started_at: 1_000 };
+    const zhilian = result("zhilian", "zhilian-latest");
+    apiRequestMock.mockImplementation(async (url: string) => {
+      if (url.includes("platform=boss")) return boss;
+      return zhilian;
+    });
+
+    const state = useDiscoveryState({ profileId: "align-once" }, () => {});
+    const deps = makeDeps();
+    const results = useDiscoveryResults(state, deps);
+
+    await results.loadLatestResult();
+    await results.loadLatestResult();
+
+    expect(deps.setDraftPlatform).toHaveBeenCalledTimes(1);
+  });
 });
