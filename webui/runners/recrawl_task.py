@@ -15,6 +15,22 @@ import time
 from webui.diagnostics import record_failure
 from webui.workbench import normalize_job_link_for_platform
 
+# 明确判定：只有这三类才是"有结论"，uncertain 仍属待确认。
+_RESOLVED_RECRAWL_VERDICTS = ("match", "not_match", "mismatch")
+
+
+def recrawl_target_resolved(update):
+    """本次重抓的岗位是否已拿到结果：抓到 JD，或得到明确判定。
+
+    只带回一句失败原因（既没 JD 也没判定）的岗位不算完成。此前这种岗位被
+    记成已完成，导致任务结论与实际不符。
+    """
+    if not isinstance(update, dict):
+        return False
+    if str(update.get("jd") or "").strip():
+        return True
+    return str(update.get("verdict") or "") in _RESOLVED_RECRAWL_VERDICTS
+
 
 def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                       completed_job_ids=None, profile_facts=None,
@@ -676,24 +692,16 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
             ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
             return
 
-        recrawl_status = "succeeded"
-        recount = None
-        remaining_uncertain = 0
+        # 本次重抓的成败只看本次目标：抓到 JD 或拿到明确判定才算解决。
+        # 整轮其余待确认岗位（另一平台、别的批次）不参与本次成败判定，
+        # 否则"没有全部完成就算失败"会让人误以为重抓白做。
+        remaining_uncertain = sum(
+            1 for job in targets
+            if not recrawl_target_resolved(updates.get(ctx.recrawl_job_key(job)))
+        )
+        recrawl_status = "partial" if remaining_uncertain else "succeeded"
         if run_id:
-            recount = ctx.store.recount_pipeline_result(run_id)
-            try:
-                latest_payload = ctx.store.load_latest_pipeline_result(run_id) or {}
-                latest_jobs = ((latest_payload.get("result") or {}).get("jobs") or [])
-                remaining_uncertain = sum(
-                    1 for job in latest_jobs
-                    if isinstance(job, dict)
-                    and str(job.get("verdict") or "")
-                    not in ("match", "not_match", "mismatch")
-                )
-            except ctx.operational_errors:
-                remaining_uncertain = int((recount or {}).get("pending_count") or 0)
-            if remaining_uncertain > 0:
-                recrawl_status = "partial"
+            ctx.store.recount_pipeline_result(run_id)
         emit(
             stage="done", current=total, total=total,
             message=(

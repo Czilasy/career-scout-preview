@@ -216,8 +216,13 @@ def reduce_conclusion(
                                            if str(item.get("status") or "") in {"succeeded", "empty"}
                                            and _unit_evidence_complete(item)))
 
-    if str(lifecycle_end or "").strip().lower() == "failed":
-        item = failed_items[0] if failed_items else {}
+    # A ``failed`` lifecycle is only conclusive when at least one required unit
+    # actually failed.  Without it the flag contradicts every observed fact
+    # (all units succeeded) and used to produce a self-contradicting
+    # "failed / 任务完成证据不足" conclusion, so fall through and let the
+    # unit facts decide instead.
+    if str(lifecycle_end or "").strip().lower() == "failed" and failed_items:
+        item = failed_items[0]
         code = str(item.get("error_code") or item.get("primary_code") or "task_failed")
         return _result(
             "failed", False, degraded, code,

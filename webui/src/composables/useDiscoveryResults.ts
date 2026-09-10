@@ -19,6 +19,7 @@ import type {
   RoundContext,
   TaskSnapshot as ApiTaskSnapshot,
 } from "../types";
+import { currentHistoryIntent } from "../composables/resultHistory";
 import type { HistoryRoundDetail } from "../composables/resultHistory";
 import JobWorkspace from "../components/JobWorkspace.vue";
 import type { PipelineResult, RoundStatusPayload } from "../discovery";
@@ -361,7 +362,11 @@ async function returnToLatest() {
     // pipelineResult 被置空后渲染出一个数字全为 0 的临时 04 页面。
     // 035：未结束任务存在时不请求结果，直接回到任务真实进度页。
     const liveStep = liveTaskStep(state);
+    const intent = currentHistoryIntent();
     const fetched = liveStep ? null : await fetchMergedLatestResult();
+    // 等结果期间用户又点了一轮历史（或又发起一次回最新）：放弃本次，
+    // 迟到的「最新」不允许覆盖用户后来选中的轮次。
+    if (currentHistoryIntent() !== intent) return;
 
     platformBeforeHistory.value = null;
     historyRound.value = null;

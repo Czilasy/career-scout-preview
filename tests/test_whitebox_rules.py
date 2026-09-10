@@ -71,6 +71,19 @@ class WhiteboxRuleTests(unittest.TestCase):
         self.assertEqual(result["conclusion"], "failed")
         self.assertEqual(result["primary_code"], "ai_persist_failed")
 
+    def test_failed_lifecycle_without_failed_units_is_not_failed(self):
+        """B098：单元全成功时，失败的收尾标记不得产出「执行失败」的矛盾结论。
+
+        回归：重抓曾有 11 个单元全部成功、0 失败、0 未知，结论却是
+        「执行失败 · 任务完成证据不足」。
+        """
+        result = reduce_conclusion(
+            _plan("a", "b"), [_unit("a"), _unit("b")], lifecycle_end="failed"
+        )
+        self.assertEqual(result["conclusion"], "succeeded")
+        self.assertEqual(result["summary"]["failed_units"], 0)
+        self.assertEqual(result["summary"]["unknown_units"], 0)
+
     def test_failed_unit_with_results_is_partial(self):
         result = reduce_conclusion(
             _plan("a", "b"), [_unit("a"), _unit("b", "failed", output=0, error_code="combo_failed")]

@@ -11,7 +11,7 @@ import threading
 import unittest
 from unittest import mock
 
-from webui.runners.recrawl_task import run_recrawl_task
+from webui.runners.recrawl_task import recrawl_target_resolved, run_recrawl_task
 
 TARGET_URL = "https://www.zhipin.com/job_detail/026b080.html"
 
@@ -199,6 +199,85 @@ class RecrawlJdPassThroughTests(unittest.TestCase):
         self.assertEqual(judged.get("job_id"), "J1")
         self.assertEqual(judged.get("jd"), "JD1 文本")
         self.assertEqual(len(match_calls[0]), 1)
+
+
+class RecrawlTargetResolvedTests(unittest.TestCase):
+    """B098：什么算「本次重抓已拿到结果」。"""
+
+    def test_jd_or_definite_verdict_counts_as_resolved(self):
+        self.assertTrue(recrawl_target_resolved({"jd": "JD 文本"}))
+        self.assertTrue(recrawl_target_resolved({"verdict": "match"}))
+        self.assertTrue(recrawl_target_resolved({"verdict": "not_match"}))
+        self.assertTrue(recrawl_target_resolved({"verdict": "mismatch"}))
+
+    def test_reason_only_or_uncertain_is_not_resolved(self):
+        self.assertFalse(recrawl_target_resolved(None))
+        self.assertFalse(recrawl_target_resolved({}))
+        self.assertFalse(recrawl_target_resolved({"verdict": "uncertain"}))
+        self.assertFalse(recrawl_target_resolved(
+            {"verdict_reason": "未抓到 JD（暂时无法确认平台状态），无法精筛"}
+        ))
+
+
+class RecrawlOutcomeScopeTests(unittest.TestCase):
+    """B098：本次重抓的成败只看本次目标，不被整轮其他待确认岗位拖成失败。"""
+
+    def _run(self, jobs, job_ids, detail_jobs):
+        task_id = "recrawl-outcome"
+        ctx = _FakeCtx(jobs, task_id)
+        writes = []
+        ctx.write_run = lambda *args, **kwargs: writes.append(dict(kwargs))
+
+        def fake_match_jds(chunk, profile_summary, endpoint, api_key, **kwargs):
+            return {
+                "verdicts": {
+                    str(j.get("job_id")): {
+                        "verdict": "match", "reason": "OK", "caveats": [],
+                    }
+                    for j in chunk
+                }
+            }
+
+        with mock.patch("webui.ai.match_jds", side_effect=fake_match_jds), \
+                mock.patch("webui.ai.retrieve_api_key", return_value="sk-test"), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, None)), \
+                mock.patch("webui.pipeline_exec.fetch_job_details", return_value={"jobs": detail_jobs}), \
+                mock.patch("webui.pipeline_exec.failed_code_label", return_value="抓取失败"), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"), \
+                mock.patch("webui.result_rounds.apply_recrawl_writeback"):
+            run_recrawl_task(
+                ctx, task_id,
+                job_ids=job_ids,
+                profile_summary="3 年 Python 后端",
+                source_run_id="src-outcome",
+            )
+        return ctx, writes
+
+    def test_other_pending_jobs_do_not_make_this_recrawl_partial(self):
+        """整轮还有别的待确认岗位时，本次目标全部解决应记 succeeded。"""
+        jobs = [
+            {"job_id": "J1", "jd": "", "source_url": TARGET_URL},
+            {"job_id": "JO", "jd": "", "source_url": TARGET_URL + "other"},
+        ]
+        ctx, writes = self._run(
+            jobs, ["J1"], detail_jobs=[{"job_id": "J1", "jd": "JD1 文本"}],
+        )
+        self.assertEqual(ctx.tasks["recrawl-outcome"]["status"], "succeeded")
+        self.assertEqual(writes[-1].get("status"), "succeeded")
+
+    def test_target_without_result_keeps_recrawl_partial(self):
+        """本次目标里没抓到结果的岗位不能算成功，任务记 partial。"""
+        jobs = [
+            {"job_id": "J1", "jd": "", "source_url": TARGET_URL},
+            {"job_id": "J2", "jd": "", "source_url": TARGET_URL + "2"},
+        ]
+        ctx, writes = self._run(
+            jobs, ["J1", "J2"], detail_jobs=[{"job_id": "J1", "jd": "JD1 文本"}],
+        )
+        task = ctx.tasks["recrawl-outcome"]
+        self.assertEqual(task["status"], "partial")
+        self.assertEqual(writes[-1].get("status"), "partial")
+        self.assertIn("1 个岗位待确认", str((task.get("progress") or {}).get("message") or ""))
 
 
 class RecrawlActivityFactTests(unittest.TestCase):

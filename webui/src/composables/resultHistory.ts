@@ -68,6 +68,17 @@ const state = reactive<ResultHistoryState>({
 
 let loadSeq = 0;
 
+/**
+ * 历史浏览的用户意图序号：每次「点开另一轮」或「回到最新」都 +1。
+ * 晚到的请求发现序号已变就自己作废，避免两条加载互相覆盖
+ * （点另一轮先闪最新、点得急停在最新、点 BOSS 轮先闪智联）。
+ */
+let viewIntentSeq = 0;
+
+export function currentHistoryIntent(): number {
+  return viewIntentSeq;
+}
+
 export function formatHistoryTime(value: string | number | null | undefined): string {
   if (value === null || value === undefined || value === "") return "";
   const date = typeof value === "number"
@@ -111,21 +122,27 @@ function hide() {
 }
 
 async function openRound(runId: string): Promise<void> {
+  const intent = ++viewIntentSeq;
   state.detailLoading = true;
-  state.detail = null;
+  // 不在这里清空 detail：切换轮次不是「回到最新」，清空会被当成回最新
+  // 而触发另一条异步加载，两条加载赛跑，谁后到谁定画面。
   try {
     const detail = await apiRequest<HistoryRoundDetail>(`/api/result-history/${encodeURIComponent(runId)}`);
+    if (intent !== viewIntentSeq) return;  // 期间又点了别的轮次：丢弃本次结果
     state.detail = detail;
     state.open = false;
   } catch (error) {
+    if (intent !== viewIntentSeq) return;
     state.error = error instanceof Error ? error.message : "历史轮次读取失败";
     state.open = true;
   } finally {
-    state.detailLoading = false;
+    if (intent === viewIntentSeq) state.detailLoading = false;
   }
 }
 
 function backToLatest() {
+  // 回到最新是明确的用户意图：作废仍在飞的轮次加载。
+  viewIntentSeq += 1;
   state.detail = null;
 }
 
@@ -145,7 +162,7 @@ async function deleteRound(item: HistoryRoundItem): Promise<void> {
       method: "DELETE",
     });
     if (state.detail?.source_run_id === item.run_id) {
-      state.detail = null;
+      backToLatest();
     }
     state.items = state.items.filter((round) => round.run_id !== item.run_id);
     state.deleteTarget = null;

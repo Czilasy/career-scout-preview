@@ -17,6 +17,7 @@ from webui.resume_identity import append_account_switch_log_line, ensure_frozen_
 from webui.task_pause_support import normalize_recoverable_failed_run
 from webui.task_runners import _iso_epoch_ms
 from webui.workbench import normalize_job_link_for_platform
+from webui.runners.recrawl_task import recrawl_target_resolved
 from webui.logging_setup import get_logger
 
 _logger = get_logger(__name__)
@@ -135,28 +136,35 @@ def register_pipeline_jobs_routes(app, ctx):
             if status in {'cancelled', 'interrupted'}:
                 _recrawl_whitebox_record(task_id, 'task_interrupted', None, {'stop_reason': 'cancelled'}, attempt=attempt, severity='warning', required=True)
                 return _recrawl_whitebox_finish(task_id, lifecycle_end='cancelled')
-            # The in-memory task is cleaned up after a successful runner and
-            # may expose ``done`` even though the durable screening run is
-            # ``succeeded``.  Both are successful lifecycle outcomes here.
-            if status in {'succeeded', 'done', 'completed'}:
-                for key in active_keys:
-                    jid = key.split(':', 1)[1]
-                    update = updates.get(jid) or {}
-                    completed = bool(update) or jid in completed_after
-                    _recrawl_whitebox_record(task_id, 'scope_completed', key, {'scope_complete': True, 'source_exhausted': None, 'stop_reason': 'target_reached', 'returned_total_count': int(completed), 'unit_unique_count': int(completed)}, attempt=attempt)
-                return _recrawl_whitebox_finish(task_id)
+            # 逐岗位按真实完成情况定稿：抓到 JD 或拿到明确判定才算完成；只带回
+            # 一句失败原因的岗位必须记为未完成，不能被记成已完成。整次成败由
+            # 这些单元事实推出，不再把"没有全部完成"一律当成整次失败。
             for key in active_keys:
                 jid = key.split(':', 1)[1]
                 update = updates.get(jid) or {}
-                # A paused run may already have durably completed some jobs.
-                # Preserve those facts and mark only the unfinished jobs as
-                # incomplete so a later resume can recover the whole plan.
-                if update or jid in completed_after:
+                # 暂停时已落断点的批次保留为已完成事实，便于继续后复用。
+                completed = recrawl_target_resolved(update) or (
+                    status == 'paused' and jid in completed_after
+                )
+                if completed:
                     _recrawl_whitebox_record(task_id, 'scope_completed', key, {'scope_complete': True, 'source_exhausted': None, 'stop_reason': 'target_reached', 'returned_total_count': 1, 'unit_unique_count': 1}, attempt=attempt)
                 else:
-                    _recrawl_whitebox_record(task_id, 'unit_incomplete' if status == 'paused' else 'unit_failed', key, {'error_code': 'recrawl_incomplete' if status == 'paused' else 'recrawl_failed', 'error_reason': '重抓未完成'}, attempt=attempt, severity='warning' if status == 'paused' else 'error')
-            if status != 'paused':
-                return _recrawl_whitebox_finish(task_id, lifecycle_end='failed')
+                    reason = str(update.get('verdict_reason') or '').strip()
+                    _recrawl_whitebox_record(
+                        task_id,
+                        'unit_incomplete' if status == 'paused' else 'unit_failed',
+                        key,
+                        {'error_code': 'recrawl_incomplete' if status == 'paused' else 'recrawl_failed',
+                         'error_reason': reason or '重抓未完成'},
+                        attempt=attempt,
+                        severity='warning' if status == 'paused' else 'error',
+                    )
+            if status == 'paused':
+                # 暂停不定稿：保留断点，等用户点继续。
+                return None
+            if status in {'succeeded', 'done', 'completed', 'partial'}:
+                return _recrawl_whitebox_finish(task_id)
+            return _recrawl_whitebox_finish(task_id, lifecycle_end='failed')
         except Exception as exc:
             try:
                 for key in job_keys:

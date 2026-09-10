@@ -160,4 +160,92 @@ describe("useResultHistory", () => {
     const history = useResultHistory();
     await expect(history.archiveAllCurrentResults()).rejects.toThrow();
   });
+
+  // B099：切轮次不是「回到最新」。清空展示会被当成回最新而触发第二条
+  // 异步加载，两条加载赛跑导致「先闪最新、点急了停在最新」。
+  it("keeps the current detail while another round loads", async () => {
+    let resolveDetail: (value: Response) => void = () => {};
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/result-history/h1")) {
+        return response({
+          ok: true, has_result: true, source_run_id: "h1", platform: "boss",
+          status: "done", result: { jobs: [], total_kept: 1 },
+        });
+      }
+      if (url.endsWith("/api/result-history/h2")) {
+        return new Promise<Response>((resolve) => { resolveDetail = resolve; });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const history = useResultHistory();
+    await history.openRound("h1");
+    expect(history.detail.value?.source_run_id).toBe("h1");
+
+    const pending = history.openRound("h2");
+    await flushPromises();
+    expect(history.detail.value?.source_run_id).toBe("h1");
+
+    resolveDetail(response({
+      ok: true, has_result: true, source_run_id: "h2", platform: "boss",
+      status: "done", result: { jobs: [], total_kept: 2 },
+    }));
+    await pending;
+    expect(history.detail.value?.source_run_id).toBe("h2");
+  });
+
+  it("ignores a late response for a round the user switched away from", async () => {
+    let resolveFirst: (value: Response) => void = () => {};
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/result-history/h1")) {
+        return new Promise<Response>((resolve) => { resolveFirst = resolve; });
+      }
+      if (url.endsWith("/api/result-history/h2")) {
+        return response({
+          ok: true, has_result: true, source_run_id: "h2", platform: "boss",
+          status: "done", result: { jobs: [], total_kept: 2 },
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const history = useResultHistory();
+    const first = history.openRound("h1");
+    await flushPromises();
+    await history.openRound("h2");
+    expect(history.detail.value?.source_run_id).toBe("h2");
+
+    resolveFirst(response({
+      ok: true, has_result: true, source_run_id: "h1", platform: "boss",
+      status: "done", result: { jobs: [], total_kept: 1 },
+    }));
+    await first;
+    await flushPromises();
+    expect(history.detail.value?.source_run_id).toBe("h2");
+  });
+
+  it("backToLatest discards an in-flight round load", async () => {
+    let resolveDetail: (value: Response) => void = () => {};
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/api/result-history/h1")) {
+        return new Promise<Response>((resolve) => { resolveDetail = resolve; });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const history = useResultHistory();
+    const pending = history.openRound("h1");
+    await flushPromises();
+    history.backToLatest();
+
+    resolveDetail(response({
+      ok: true, has_result: true, source_run_id: "h1", platform: "boss",
+      status: "done", result: { jobs: [], total_kept: 1 },
+    }));
+    await pending;
+    await flushPromises();
+    expect(history.detail.value).toBeNull();
+  });
 });
