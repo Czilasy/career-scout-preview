@@ -205,9 +205,18 @@ class SchemaMigrationTests(unittest.TestCase):
     def test_migration_is_idempotent(self):
         TaskStore(self.db_path)
         store = TaskStore(self.db_path)
+        with store._connection() as conn:
+            before = conn.execute(
+                "SELECT COUNT(*) AS n FROM schema_migrations"
+            ).fetchone()["n"]
         store2 = TaskStore(self.db_path)
-        # Reopening should not error or duplicate migrations
-        self.assertGreaterEqual(store.schema_version(), store2.schema_version())
+        with store2._connection() as conn:
+            after = conn.execute(
+                "SELECT COUNT(*) AS n FROM schema_migrations"
+            ).fetchone()["n"]
+        # 重复打开不得报错、不得重复登记迁移记录
+        self.assertEqual(store.schema_version(), store2.schema_version())
+        self.assertEqual(before, after, "重复打开不得重复登记迁移记录")
 
     def test_migration_026_adds_start_finish_columns(self):
         store = TaskStore(self.db_path)

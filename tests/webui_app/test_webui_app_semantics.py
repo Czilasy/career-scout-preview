@@ -430,7 +430,11 @@ class StatusMappingTests(unittest.TestCase):
     # -- T412: continue 一致性校验 + 原子 claim --------------------------
 
     def test_continue_checks_platform_consistency(self):
-        """T412: continue 验证平台一致性。"""
+        """T412: 缺续跑身份的 paused run 继续时给出明确业务拒绝。
+
+        404 说明对象/路由缺失、500 说明未处理异常，两者都算回归；
+        paused 但缺 execution_params 的 run 必须被业务校验明确拒绝。
+        """
         run_id = "test_continue_platform"
         self._create_run(run_id, "paused")
         # 设置 platform
@@ -439,10 +443,11 @@ class StatusMappingTests(unittest.TestCase):
                 "UPDATE screening_runs SET platform='boss' WHERE id=?",
                 (run_id,))
 
-        # 尝试继续但不匹配平台（无平台校验时也会因无 execution_params 失败）
         resp = self.client.post(f"/api/task/continue/{run_id}")
-        # 可能因缺少 scrape_task_id 而失败，但不应该报 404
-        self.assertNotEqual(resp.status_code, 404)
+        self.assertIn(resp.status_code, (400, 409, 422), resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertFalse(data.get("ok"))
+        self.assertTrue(str(data.get("error") or "").strip())
 
     def test_claim_paused_run_atomic(self):
         """T412: claim_paused_screening_run 原子性——两次调用只成功一次。"""

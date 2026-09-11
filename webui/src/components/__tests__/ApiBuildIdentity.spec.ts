@@ -45,7 +45,12 @@ describe("API build identity", () => {
 
     await apiRequest("/api/task/cancel/run-1", { method: "POST" });
 
-    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
+    // 按 URL 定位目标请求（apiRequest 会先请求 /api/session，不能按下标取第一次调用）
+    const cancelCall = fetchMock.mock.calls.find(
+      ([input]) => String(input) === "/api/task/cancel/run-1",
+    );
+    expect(cancelCall).toBeTruthy();
+    const headers = cancelCall?.[1]?.headers as Headers;
     expect(headers.get("X-Boss-Build")).toBeNull();
   });
 });

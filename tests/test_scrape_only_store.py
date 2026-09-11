@@ -159,12 +159,21 @@ class ScrapeOnlyStoreTests(unittest.TestCase):
 
     def test_upgrade_unknown_run_is_noop(self):
         # 未知 run_id 不报错也不产生内容（UPDATE 0 行 + DELETE 0 行）
+        with self.store._connection() as conn:
+            before = conn.execute(
+                "SELECT COUNT(*) AS n FROM screening_runs"
+            ).fetchone()["n"]
         self.store.upgrade_scraped_run(
             "missing-run",
             {"ok": True, "jobs": _screened_jobs(1), "dropped": [], "total_scraped": 1},
             {"platform": "boss"}, status="done", platform="boss",
         )
         self.assertIsNone(self.store.get_screening_run("missing-run"))
+        with self.store._connection() as conn:
+            after = conn.execute(
+                "SELECT COUNT(*) AS n FROM screening_runs"
+            ).fetchone()["n"]
+        self.assertEqual(before, after, "未知 run 的升级必须是零副作用")
 
     def test_upgrade_scraped_run_with_dropped_jobs_rewrites_history(self):
         run_id = self.store.save_scraped_only_snapshot(

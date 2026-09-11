@@ -38,29 +38,29 @@
 **Goal**: 修复"看着在保护、实际保护不到"的用例与守卫；清理过期门禁与永久跳过用例。
 **Independent Test**: 每条修复后注入对应故障，用例必须变红（修复前不红/不执行）。
 
-- [ ] T001 [US1] 修复 `tests/test_pipeline_guard.py` L245-261 零执行用例：改用真 `WhiteboxService` + 真 store（临时 sqlite），或给 `_FakeStore`（L31-44）补齐白箱链路所需方法使事实真实写入；修复后注入"阻断事实写入"验证该用例变红
-- [ ] T002 [US1] `tests/webui_app/test_webui_app_runtime.py` L17-107 补隔离：对 `_kernel_check_error`（真实 HTTP 探测）与 `load_browser_accounts`（真读用户目录）打桩；断言不变；验证跑该文件期间无真实端口请求、无用户目录读取
-- [ ] T003 [US1] `tests/sc015_viewport_check.py` L20-23、L134 更新过期选择器为当前真实元素名（`resume-ai-screen` → `continue-ai-screen`；`.verdict-reason` → 实施时查前端现值）
-- [ ] T004 [US1] `tests/healthy_pipeline/test_pipeline_state.py` L744-745 同步选择器断言（与 T003 同批完成，保证门禁与测试一致）
-- [ ] T005 [US1] `tests/test_desktop_shell.py` L530-541 用例传临时 `state_dir`，杜绝写真实 `~/.career-scout/desktop_window.json`；验证运行前后真实目录无变化
-- [ ] T006 [US1] `tests/healthy_pipeline/test_pipeline_state.py` L781-800 删除两条因 `specs/010-healthy-pipeline-recovery` 不存在而永久跳过的用例（研究决策 5）
-- [ ] T007 [US1] `webui/src/views/__tests__/DiscoveryScrapeOnly.spec.ts` L180 名实不符用例补"开始 AI 筛选入口"正向断言
-- [ ] T008 [US1] `tests/test_pipeline_exec_accounts.py` L300-312 三条相同断言的登录态用例改为可判别（夹具使 fallback 与池首不同）
-- [ ] T009 [US1] `tests/test_desktop_runtime.py` L140-155 补真断言（"只读调用"断言只读语义）；同文件 L196-200 恒真断言（`>=1` 必真）定性处置
-- [ ] T010 [US1] `tests/test_update_manifest.py` L55-57 Windows 恒跳过：补平台无关等价变体（研究决策 6；确无等价手段则保留跳过并注明，上报）
-- [ ] T011 [US1] `tests/test_logging_setup.py` L102-116 同上（日志文件删除重建的 Windows 变体）
-- [ ] T012 [US1] `tests/chrome_setup/test_scraper_contracts.py` L530 恒满足断言（`sum<=12`）改真边界断言；L270 版本硬编码改引生产常量
-- [ ] T013 [US1] `tests/webui_store/test_store_migrations.py` L210 恒真幂等断言改真断言或删（定性记录）
-- [ ] T014 [US1] 共享日志目录隔离：`tests/test_logging_setup.py`、`tests/test_logging_whitebox.py`、`tests/chrome_setup/harness.py` 的 `career-scout-test-logs` 改为各自独立 mkdtemp
-- [ ] T015 [US1] `tests/test_account_round_robin.py` 补全猴子补丁还原（`mark/clear_account_rate_limited` 等；研究决策 7）
-- [ ] T016 [US1] `webui/src/components/__tests__/BrowserAccountsDialog.spec.ts` L543 消除顺序依赖（`mockImplementationOnce` 撞模块级 session 缓存：自带预热或改稳定桩）
-- [ ] T017 [US1] `webui/src/__tests__/ApiBuildIdentity.spec.ts` L48 按调用下标取 fetch 改为按请求特征匹配
-- [ ] T018 [US1] `tests/webui_app/test_webui_app_semantics.py` L432-445 恒真断言（`assertNotEqual(status, 404)`）改真断言
-- [ ] T019 [US1] `tests/webui_store/test_scrape_only_store.py` L160-167 断言从未被创建的 run：修夹具真创建或改断言
-- [ ] T020 [US1] `tests/test_desktop_shell_wiring.py` L424 依赖日志中文关键词"事件"改结构化断言（事件名/字段）
-- [ ] T021 [US1] `webui/src/components/__tests__/App.spec.ts` L679/974/987/1001（`.notice-bar`）与 L1076（`task-completed-toast`）定性处置：前者保留并加说明注释（防误接回的墓碑）；后者（无对应元素）改真断言或删
-- [ ] T022 [US1] `tests/test_candidate.py` L658-659、`tests/test_execution_config.py` L722-723 将 `unittest.main()` 挪至文件末尾（修复直跑丢例）
-- [ ] T023 [US1] 批一收尾：受影响子集 + 全量 + 前端 + 构建 + 卫生；统计对比基线；按契约第 4 节写批末报告（含每条注入验证记录、`types.spec.ts` 定性说明）；**停止等用户指令**
+- [x] T001 [US1] 修复 `tests/test_pipeline_guard.py` L245-261 零执行用例：改用真 `WhiteboxService` + 真 store（临时 sqlite），或给 `_FakeStore`（L31-44）补齐白箱链路所需方法使事实真实写入；修复后注入"阻断事实写入"验证该用例变红
+- [x] T002 [US1] `tests/webui_app/test_webui_app_runtime.py` L17-107 补隔离：对 `_kernel_check_error`（真实 HTTP 探测）与 `load_browser_accounts`（真读用户目录）打桩；断言不变；验证跑该文件期间无真实端口请求、无用户目录读取
+- [x] T003 [US1] `tests/sc015_viewport_check.py` L20-23、L134 更新过期选择器为当前真实元素名（`resume-ai-screen` → `continue-ai-screen`；`.verdict-reason` → 实施时查前端现值）
+- [x] T004 [US1] `tests/healthy_pipeline/test_pipeline_state.py` L744-745 同步选择器断言（与 T003 同批完成，保证门禁与测试一致）
+- [x] T005 [US1] `tests/test_desktop_shell.py` L530-541 用例传临时 `state_dir`，杜绝写真实 `~/.career-scout/desktop_window.json`；验证运行前后真实目录无变化
+- [x] T006 [US1] `tests/healthy_pipeline/test_pipeline_state.py` L781-800 删除两条因 `specs/010-healthy-pipeline-recovery` 不存在而永久跳过的用例（研究决策 5）
+- [x] T007 [US1] `webui/src/views/__tests__/DiscoveryScrapeOnly.spec.ts` L180 名实不符用例补"开始 AI 筛选入口"正向断言
+- [x] T008 [US1] `tests/test_pipeline_exec_accounts.py` L300-312 三条相同断言的登录态用例改为可判别（夹具使 fallback 与池首不同）
+- [x] T009 [US1] `tests/test_desktop_runtime.py` L140-155 补真断言（"只读调用"断言只读语义）；同文件 L196-200 恒真断言（`>=1` 必真）定性处置
+- [x] T010 [US1] `tests/test_update_manifest.py` L55-57 Windows 恒跳过：补平台无关等价变体（研究决策 6；确无等价手段则保留跳过并注明，上报）
+- [x] T011 [US1] `tests/test_logging_setup.py` L102-116 同上（日志文件删除重建的 Windows 变体）
+- [x] T012 [US1] `tests/chrome_setup/test_scraper_contracts.py` L530 恒满足断言（`sum<=12`）改真边界断言；L270 版本硬编码改引生产常量
+- [x] T013 [US1] `tests/webui_store/test_store_migrations.py` L210 恒真幂等断言改真断言或删（定性记录）
+- [x] T014 [US1] 共享日志目录隔离：`tests/test_logging_setup.py`、`tests/test_logging_whitebox.py`、`tests/chrome_setup/harness.py` 的 `career-scout-test-logs` 改为各自独立 mkdtemp
+- [x] T015 [US1] `tests/test_account_round_robin.py` 补全猴子补丁还原（`mark/clear_account_rate_limited` 等；研究决策 7）
+- [x] T016 [US1] `webui/src/components/__tests__/BrowserAccountsDialog.spec.ts` L543 消除顺序依赖（`mockImplementationOnce` 撞模块级 session 缓存：自带预热或改稳定桩）
+- [x] T017 [US1] `webui/src/__tests__/ApiBuildIdentity.spec.ts` L48 按调用下标取 fetch 改为按请求特征匹配
+- [x] T018 [US1] `tests/webui_app/test_webui_app_semantics.py` L432-445 恒真断言（`assertNotEqual(status, 404)`）改真断言
+- [x] T019 [US1] `tests/webui_store/test_scrape_only_store.py` L160-167 断言从未被创建的 run：修夹具真创建或改断言
+- [x] T020 [US1] `tests/test_desktop_shell_wiring.py` L424 依赖日志中文关键词"事件"改结构化断言（事件名/字段）
+- [x] T021 [US1] `webui/src/components/__tests__/App.spec.ts` L679/974/987/1001（`.notice-bar`）与 L1076（`task-completed-toast`）定性处置：前者保留并加说明注释（防误接回的墓碑）；后者（无对应元素）改真断言或删
+- [x] T022 [US1] `tests/test_candidate.py` L658-659、`tests/test_execution_config.py` L722-723 将 `unittest.main()` 挪至文件末尾（修复直跑丢例）
+- [x] T023 [US1] 批一收尾：受影响子集 + 全量 + 前端 + 构建 + 卫生；统计对比基线；按契约第 4 节写批末报告（含每条注入验证记录、`types.spec.ts` 定性说明）；**停止等用户指令**
 
 > 说明：审计原 §4.6（`webui/semantic.py`）与 §4.7（前端 6 个零引用符号）经用户拍板转批五；本批不触碰。`types.spec.ts` 的处置（价值在 `vue-tsc`/构建）在批二 T036 与批末报告一并说明。
 

@@ -719,9 +719,6 @@ class ModePresetsV2Tests(unittest.TestCase):
         self.assertEqual(data["match_concurrency"], 5)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 # ===========================================================================
 # B054 地点范围：旧摘要兼容与新地点计数
 # ===========================================================================
@@ -780,3 +777,7 @@ class B054LocationScopeDigestTests(unittest.TestCase):
         self.assertEqual(scope.planned_pages, 9)
         self.assertEqual(len(scope.locations), 3)
         self.assertNotEqual(scope.scope_digest, self._scope_data()["scope_digest"])
+
+
+if __name__ == "__main__":
+    unittest.main()

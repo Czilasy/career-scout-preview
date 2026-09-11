@@ -450,11 +450,14 @@ describe("BrowserAccountsDialog role assignment (B073)", () => {
 
   // Spec 038 B091：模拟后端 pool 配置端点（PUT /api/browser-accounts/<id>/pool）。
   // 默认每账号都进池、默认全选、默认配额取中值（R1 25 / R2 150）。
-  function poolFetchMock(initial: Array<{ id: string; name: string }> = [accA, accB]) {
+  function poolFetchMock(
+    initial: Array<{ id: string; name: string }> = [accA, accB],
+    rateLimited: string[] = [],
+  ) {
     let accounts = initial.map((a, i) => ({
       ...a,
       pool: { selected: true, order: i, r1_quota: 25, r2_quota: 150 },
-      rate_limited: false,
+      rate_limited: rateLimited.includes(a.id),
     }));
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -538,20 +541,9 @@ describe("BrowserAccountsDialog role assignment (B073)", () => {
   });
 
   it("shows rate-limited badge when account.rate_limited is true", async () => {
-    const fetchMock = poolFetchMock();
-    // 改 mock：让 b 撞墙限流
-    fetchMock.mockImplementationOnce(async (input: RequestInfo | URL) => {
-      if (String(input) === "/api/browser-accounts") {
-        return response({
-          accounts: [
-            { ...accA, pool: { selected: true, order: 0, r1_quota: 25, r2_quota: 150 }, rate_limited: false },
-            { ...accB, pool: { selected: true, order: 1, r1_quota: 25, r2_quota: 150 }, rate_limited: true },
-          ],
-          active_account: "a",
-        });
-      }
-      return response({});
-    });
+    // 通过工厂参数标记 b 撞墙限流：按 URL 应答、不依赖调用顺序，
+    // 消除模块级 session 缓存预热差异导致的单跑必挂。
+    const fetchMock = poolFetchMock([accA, accB], ["b"]);
     const wrapper = await mountOpen(fetchMock);
     const badge = wrapper.get('[data-testid="rate-limited-b"]');
     expect(badge.text()).toContain("限流");

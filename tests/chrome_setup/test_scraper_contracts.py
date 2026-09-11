@@ -266,8 +266,13 @@ class VersionConsistencyTests(unittest.TestCase):
         pyproject = self._read_text("pyproject.toml")
         m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
         self.assertIsNotNone(m, "pyproject.toml 未找到 version 字段")
-        self.assertIn(f"v{m.group(1)}", desktop)
-        self.assertNotIn("v2.8.2", desktop)
+        current = f"v{m.group(1)}"
+        self.assertIn(current, desktop)
+        # 桌面版段落只应引用当前版本号（防残留历史版本，如曾出现的 v2.8.2）
+        self.assertEqual(
+            set(re.findall(r"v\d+\.\d+\.\d+", desktop)) - {current},
+            set(),
+        )
 
 
 class ProjectScopeTests(unittest.TestCase):
@@ -527,7 +532,11 @@ class ScrapeDetailsReadinessContractTests(unittest.TestCase):
         readiness_waits = [
             entry[0] for entry in calls if entry[1] == "readiness_wait"
         ]
-        self.assertLessEqual(sum(readiness_waits), 12)
+        # 明确边界：一次 not_ready → 恰等待一次（max_readiness_retries=1），
+        # 且单次等待落在预算内（替代原本恒满足的 sum<=12）。
+        self.assertEqual(len(readiness_waits), 1)
+        self.assertGreater(readiness_waits[0], 0)
+        self.assertLessEqual(readiness_waits[0], 12)
 
     def test_scrape_details_first_not_ready_triggers_single_scroll_retry(self):
         module = load_module()

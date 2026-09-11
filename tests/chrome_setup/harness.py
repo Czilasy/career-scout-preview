@@ -1,7 +1,9 @@
+import atexit
 import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 from unittest import mock
@@ -17,12 +19,11 @@ import websocket  # noqa: F401
 SCRIPT_PATH = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "boss_cdp_raw.py"
 
 # 测试真实 spawn 的 CLI 子进程（--help/--check/session-import 等）会经
-# get_logger 懒初始化写日志；统一把日志目录指到系统临时目录，防测试噪音
-# 灌进正式日志目录（033 白箱边缘情况）。
-os.environ.setdefault(
-    "CAREER_SCOUT_LOG_DIR",
-    str(pathlib.Path(tempfile.gettempdir()) / "career-scout-test-logs"),
-)
+# get_logger 懒初始化写日志；把日志目录指到本进程专属的临时子目录，防测试
+# 噪音灌进正式日志目录（033 白箱边缘情况），也避免与其他测试文件共用同一目录。
+_TEST_LOG_DIR = pathlib.Path(tempfile.mkdtemp(prefix="career-scout-test-logs-"))
+atexit.register(shutil.rmtree, _TEST_LOG_DIR, ignore_errors=True)
+os.environ.setdefault("CAREER_SCOUT_LOG_DIR", str(_TEST_LOG_DIR))
 
 
 def load_module():

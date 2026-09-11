@@ -100,24 +100,25 @@ class LoggingWhiteboxTests(unittest.TestCase):
         self.assertEqual(source.env.get("CAREER_SCOUT_CORRELATION_ID"), "task-env-check")
 
     def test_lazy_init_restores_task_id_from_env(self):
-        """子进程侧懒初始化时，任务编号从 env 恢复到日志上下文。"""
+        """子进程侧懒初始化时，任务编号从 env 恢复到日志上下文。
+
+        隔离：让 gettempdir 指向一次性临时目录，避免与其他测试文件共用
+        career-scout-test-logs 造成跨文件互扰。
+        """
         from webui import logging_setup
 
         logging_setup._task_id_var.set("")
         _close_logger()
         try:
-            with mock.patch.dict(os.environ, {"CAREER_SCOUT_TASK_ID": "task-from-env"}):
+            with mock.patch.dict(os.environ, {"CAREER_SCOUT_TASK_ID": "task-from-env"}), \
+                    tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch("tempfile.gettempdir", return_value=tmp):
                 logging_setup.get_logger("task_id_probe")
                 self.assertEqual(logging_setup._task_id_var.get(), "task-from-env")
+                _close_logger()
         finally:
             logging_setup._task_id_var.set("")
             _close_logger()
-            temp_dir = Path(tempfile.gettempdir()) / "career-scout-test-logs"
-            for p in temp_dir.glob("career-scout.log*"):
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
 
 
 if __name__ == "__main__":

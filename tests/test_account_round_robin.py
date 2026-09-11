@@ -365,12 +365,16 @@ class ListRobinTests(unittest.TestCase):
                                cdp_port=getattr(template, "cdp_port", 9222))
         robin_mod.clone_source = _clone
         # rate_limited 持久化打桩（避免写盘）
+        self._mark_restore = robin_mod.mark_account_rate_limited
+        self._clear_restore = robin_mod.clear_account_rate_limited
         robin_mod.mark_account_rate_limited = lambda *a, **k: None
         robin_mod.clear_account_rate_limited = lambda *a, **k: None
 
     def tearDown(self):
         robin_mod._switch_browser_account = self._restore
         robin_mod.clone_source = self._clone_restore
+        robin_mod.mark_account_rate_limited = self._mark_restore
+        robin_mod.clear_account_rate_limited = self._clear_restore
 
     def _source_in_pool(self, aid="a", outcomes=None, platform="boss", port=9222):
         return _FakeSource(aid, outcomes or [], platform=platform, cdp_port=port)

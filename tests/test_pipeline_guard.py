@@ -10,6 +10,7 @@
   重抓并最终完成该批，不依赖真实浏览器）。
 """
 
+import json
 import logging
 import tempfile
 import threading
@@ -21,6 +22,8 @@ from unittest import mock
 
 from webui.pipeline_guard import PipelineGuard
 from webui.source_breaker import SourceOutcome
+from webui.store import TaskStore
+from webui.whitebox import WhiteboxService
 
 STALL = 0.15        # 测试用短卡死阈值（秒）
 POLL = 0.03         # 监控扫描间隔（秒）
@@ -68,15 +71,6 @@ class _FakeProcess:
 
     def poll(self):
         return self._poll
-
-
-class _FakeWhitebox:
-    def __init__(self):
-        self.facts = []
-
-    def record_for_owner(self, owner_kind, owner_id, fact):
-        self.facts.append((owner_kind, owner_id, fact))
-        return True
 
 
 def _make_guard(ctx, **overrides):
@@ -243,22 +237,37 @@ class PipelineGuardCoreTests(unittest.TestCase):
             self.assertIn("attempt", content)
 
     def test_whitebox_guard_events_keep_task_unit_and_attempt_context(self):
-        """033 V2 T035：卡住/重试事件必须可定位到任务、阶段、单元和尝试。"""
-        whitebox = _FakeWhitebox()
-        guard = _make_guard(self.ctx, whitebox=whitebox)
-        try:
-            guard.begin_batch("detail-batch", task_id="task-1", attempt=1)
-            time.sleep(STALL + 0.05)
-            guard.scan_once()
-            guard.begin_batch("detail-batch", task_id="task-1", attempt=2)
-            for _owner, owner_id, fact in whitebox.facts:
-                self.assertEqual(owner_id, "task-1")
+        """033 V2 T035：卡住/重试事件必须可定位到任务、阶段、单元和尝试。
+
+        使用真 WhiteboxService + 真库（临时 sqlite）走通写入链路：此前的假替身
+        不是 WhiteboxService 实例、被服务构造分支绕过，断言从未执行。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "state" / "webui.db")
+            service = WhiteboxService(
+                store, emergency_path=Path(tmp) / "emergency.jsonl",
+            )
+            service.begin(
+                "scrape", "task-1",
+                {"units": [{"unit_key": "detail-batch",
+                            "unit_kind": "detail_batch", "stage": "jd_detail"}]},
+            )
+            guard = _make_guard(self.ctx, whitebox=service)
+            try:
+                guard.begin_batch("detail-batch", task_id="task-1", attempt=1)
+                time.sleep(STALL + 0.05)
+                guard.scan_once()
+                guard.begin_batch("detail-batch", task_id="task-1", attempt=2)
+            finally:
+                guard.close()
+            run = store.get_whitebox_run("scrape", "task-1")
+            facts = store.list_whitebox_events(run["id"])
+            self.assertTrue(facts, "guard 的卡死/重试事件必须真实写入白箱")
+            for fact in facts:
                 self.assertEqual(fact["stage"], "jd_detail")
                 self.assertEqual(fact["unit_key"], "detail-batch")
                 self.assertGreaterEqual(fact["attempt_no"], 1)
-                self.assertEqual(fact["payload"]["task_id"], "task-1")
-        finally:
-            guard.close()
+                self.assertEqual(json.loads(fact["payload_json"])["task_id"], "task-1")
 
 
 class FetchJobDetailsGuardTests(unittest.TestCase):

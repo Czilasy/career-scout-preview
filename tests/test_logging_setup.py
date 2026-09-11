@@ -70,22 +70,23 @@ class LoggingSetupTests(unittest.TestCase):
             self.assertFalse(is_configured())
 
     def test_get_logger_lazily_configures_in_test_context(self):
-        """白箱：未配置时 get_logger 自动开账本；测试上下文写系统临时目录。"""
+        """白箱：未配置时 get_logger 自动开账本；测试上下文写系统临时目录。
+
+        隔离：把 gettempdir 指向一次性临时目录，避免与其他测试文件共用
+        career-scout-test-logs 造成跨文件互扰。
+        """
         self._close_logger()
-        logger = get_logger("lazy_test")
-        self.assertTrue(is_configured())
-        logger.warning("lazy-init-marker")
-        temp_dir = Path(tempfile.gettempdir()) / "career-scout-test-logs"
-        log_path = temp_dir / "career-scout.log"
-        self.assertTrue(log_path.is_file(), f"lazy init should write {log_path}")
-        content = log_path.read_text(encoding="utf-8")
-        self.assertIn("lazy-init-marker", content)
-        self._close_logger()
-        for p in temp_dir.glob("career-scout.log*"):
-            try:
-                p.unlink()
-            except OSError:
-                pass
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "tempfile.gettempdir", return_value=tmp,
+        ):
+            logger = get_logger("lazy_test")
+            self.assertTrue(is_configured())
+            logger.warning("lazy-init-marker")
+            log_path = Path(tmp) / "career-scout-test-logs" / "career-scout.log"
+            self.assertTrue(log_path.is_file(), f"lazy init should write {log_path}")
+            content = log_path.read_text(encoding="utf-8")
+            self.assertIn("lazy-init-marker", content)
+            self._close_logger()
 
     def test_lazy_init_respects_existing_configuration(self):
         """已配置后 get_logger 不重复配置、不覆盖既有 handler 目录。"""
@@ -99,21 +100,33 @@ class LoggingSetupTests(unittest.TestCase):
             self.assertIn(str(tmp), str(base))
             self._close_logger()
 
-    @unittest.skipUnless(os.name != "nt", "Windows 下日志文件被 handler 占用句柄，无法模拟删除（Unix 专属场景）")
     def test_safe_handler_rebuilds_deleted_log_file(self):
-        """日志文件被外部删除后，下一次写入自动重建（不崩溃）。"""
+        """日志文件被外部删除后，下一次写入自动重建（不崩溃）。
+
+        Windows 无法删除被 handler 占用的文件（句柄语义限制），改为等价模拟：
+        把 handler 的 baseFilename 指向不存在的文件——emit 以
+        ``Path(baseFilename).is_file()`` 判定重建分支，两平台验证同一条路径。
+        """
         with tempfile.TemporaryDirectory() as tmp:
             configure_logging(tmp, force=True)
             logger = get_logger("handler_test")
             log_path = Path(tmp) / "career-scout.log"
             logger.warning("before-delete")
             self.assertTrue(log_path.is_file())
-            log_path.unlink()
+            handler = logging.getLogger("career_scout").handlers[0]
+            if os.name == "nt":
+                handler.baseFilename = str(Path(tmp) / "career-scout-rebuilt.log")
+            else:
+                log_path.unlink()
             logger.warning("after-delete")
-            self.assertTrue(log_path.is_file(), "deleted log file should be rebuilt")
-            content = log_path.read_text(encoding="utf-8")
-            self.assertIn("after-delete", content)
-            self._close_logger()
+            rebuilt = Path(handler.baseFilename)
+            try:
+                self.assertTrue(rebuilt.is_file(), "deleted log file should be rebuilt")
+                content = rebuilt.read_text(encoding="utf-8")
+                self.assertIn("after-delete", content)
+            finally:
+                # 断言失败也要先释放句柄，临时目录才能在 Windows 上清理
+                self._close_logger()
 
     def test_default_level_reads_from_env(self):
         """CAREER_SCOUT_LOG_LEVEL 控制默认级别：INFO 时 debug 不落盘。"""

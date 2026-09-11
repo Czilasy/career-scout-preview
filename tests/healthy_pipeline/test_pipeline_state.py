@@ -741,9 +741,11 @@ class Sc015AcceptanceHarnessTests(unittest.TestCase):
         module = _load_sc015_viewport_check()
         self.assertTrue(hasattr(module, "CONTINUE_SELECTOR"))
         self.assertTrue(hasattr(module, "PENDING_ROW_SELECTOR"))
-        self.assertIn("resume-ai-screen", module.CONTINUE_SELECTOR)
-        self.assertIn("resume-recrawl", module.CONTINUE_SELECTOR)
+        self.assertTrue(hasattr(module, "PENDING_REASON_SELECTOR"))
+        self.assertIn("continue-ai-screen", module.CONTINUE_SELECTOR)
+        self.assertIn("continue-recrawl", module.CONTINUE_SELECTOR)
         self.assertIn("job-row", module.PENDING_ROW_SELECTOR)
+        self.assertIn("company-insight", module.PENDING_REASON_SELECTOR)
 
     def test_sc015_uses_declared_websocket_client_dependency(self):
         """The real CDP harness must use the project's declared websocket client."""
@@ -776,66 +778,6 @@ class Sc015AcceptanceHarnessTests(unittest.TestCase):
                 self.assertTrue(
                     ast.get_docstring(functions[name]), f"{path}:{name} 缺少 docstring"
                 )
-
-
-class Spec010DocumentConsistencyTests(unittest.TestCase):
-    """FR-045：规格工件不得把无法核验的 30/8/608 写成事实。"""
-
-    def _skip_if_internal_specs_missing(self):
-        root = pathlib.Path(__file__).resolve().parents[2]
-        missing = [
-            relative
-            for relative in (
-                "specs/010-healthy-pipeline-recovery/contracts/api-contracts.md",
-                "specs/010-healthy-pipeline-recovery/data-model.md",
-                "specs/010-healthy-pipeline-recovery/quickstart.md",
-                "specs/010-healthy-pipeline-recovery/spec.md",
-                "specs/010-healthy-pipeline-recovery/tasks.md",
-            )
-            if not (root / relative).exists()
-        ]
-        if missing:
-            self.skipTest(
-                "internal spec artifacts are not shipped in public releases: " + missing[0]
-            )
-
-    def test_contract_and_quickstart_do_not_guess_historical_subclasses(self):
-        self._skip_if_internal_specs_missing()
-        root = pathlib.Path(__file__).resolve().parents[2]
-        for relative in (
-            "specs/010-healthy-pipeline-recovery/contracts/api-contracts.md",
-            "specs/010-healthy-pipeline-recovery/data-model.md",
-            "specs/010-healthy-pipeline-recovery/quickstart.md",
-        ):
-            text = (root / relative).read_text(encoding="utf-8")
-            self.assertNotIn("detail_invalid: 30", text, relative)
-            self.assertNotIn('"detail_invalid": 30', text, relative)
-            for fabricated in (
-                "30 条详情无效", "8 条验证码失败", "608 条未开始",
-                "详情输出无效：30 条", "验证码失败：8 条",
-                "未继续执行：608 条",
-            ):
-                self.assertNotIn(fabricated, text, relative)
-            self.assertNotIn("captcha: 8", text, relative)
-            self.assertNotIn("captcha_failed: 8", text, relative)
-            self.assertNotIn('"captcha_failed": 8', text, relative)
-            self.assertNotIn("failed_code=NULL", text, relative)
-            self.assertIn("historical_reason_unavailable", text, relative)
-
-    def test_final_artifacts_record_acceptance_amendments_without_fabricating_passes(self):
-        self._skip_if_internal_specs_missing()
-        root = pathlib.Path(__file__).resolve().parents[2]
-        spec = (
-            root / "specs/010-healthy-pipeline-recovery/spec.md"
-        ).read_text(encoding="utf-8")
-        tasks = (
-            root / "specs/010-healthy-pipeline-recovery/tasks.md"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("Acceptance Amendment (2026-07-28)", spec)
-        self.assertIn("不声称曾取得 24 小时墙钟证据", spec)
-        self.assertIn("[X] F004", tasks)
-        self.assertIn("[X] F005", tasks)
 
 
 if __name__ == "__main__":

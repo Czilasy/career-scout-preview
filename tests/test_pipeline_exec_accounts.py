@@ -299,17 +299,18 @@ class AccountForRoleResolutionTests(unittest.TestCase):
 
     @mock.patch("scripts.login_state_cache.read_cached_state", return_value="not_logged_in")
     def test_login_missing_downgrades_to_current_account(self, _state):
-        # a 第一个 selected 但登录态 not_logged_in → fallback=a（仍是 a）
-        self.assertEqual(account_for_role("R1", self.path, fallback="a"), "a")
+        # a 是池首但登录态 not_logged_in → 跳过 a，降级到 fallback=b（可判别）
+        self.assertEqual(account_for_role("R1", self.path, fallback="b"), "b")
 
     @mock.patch("scripts.login_state_cache.read_cached_state", return_value="restricted")
     def test_restricted_downgrades_to_current_account(self, _state):
-        self.assertEqual(account_for_role("R1", self.path, fallback="a"), "a")
+        # a 是池首但受限 → 跳过 a，降级到 fallback=b（可判别）
+        self.assertEqual(account_for_role("R1", self.path, fallback="b"), "b")
 
     @mock.patch("scripts.login_state_cache.read_cached_state", return_value="logged_in")
     def test_logged_in_pool_account_is_kept(self, _state):
-        # a 第一个 selected 且登录态 OK → 返回 a
-        self.assertEqual(account_for_role("R1", self.path, fallback="a"), "a")
+        # a 是池首且登录态 OK → 返回池首 a，不降级到 fallback=b（可判别）
+        self.assertEqual(account_for_role("R1", self.path, fallback="b"), "a")
 
 
 class AddAccountAutoEnrollsTests(unittest.TestCase):

@@ -655,9 +655,6 @@ class CandidateContractV2ValidationTests(unittest.TestCase):
         self.assertEqual(result["evidence"][0]["safe_excerpt"], "订单服务设计与维护")
 
 
-if __name__ == "__main__":  # pragma: no cover
-    unittest.main()
-
 class CandidateV3NormalizerTests(unittest.TestCase):
     def test_empty_v3_shape_and_fresh(self):
         a = candidate.build_empty_candidate_analysis()
@@ -978,3 +975,5 @@ class CandidateV3NormalizerTests(unittest.TestCase):
         self.assertEqual(o["quality"]["warnings"],[])
 
 
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

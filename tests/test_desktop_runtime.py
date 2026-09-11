@@ -138,7 +138,7 @@ class CheckWebview2Tests(unittest.TestCase):
         self.assertFalse(result["installed"])
 
     def test_reader_is_called_read_only(self):
-        # 验证 reader 是只读调用：reader 只被调用，不应被传入可变对象被改写
+        # 注入 reader 只被读取调用，参数类型固定 (int, str)
         calls = []
 
         def tracking_reader(root, subkey):
@@ -153,6 +153,21 @@ class CheckWebview2Tests(unittest.TestCase):
         for root, subkey in calls:
             self.assertIsInstance(root, int)
             self.assertIsInstance(subkey, str)
+        # 默认读取器路径同样只读：注入假 winreg，只允许出现读 API（OpenKey），
+        # 不得触碰任何写 API（SetValueEx/CreateKey/DeleteKey 等）。
+        fake_winreg = mock.MagicMock(name="winreg")
+        fake_winreg.OpenKey.side_effect = OSError("no key")
+        with mock.patch.object(desktop_runtime, "winreg", fake_winreg), \
+                mock.patch.object(desktop_runtime, "_has_winreg", True):
+            result = desktop_runtime.check_webview2()
+        self.assertFalse(result["installed"])
+        self.assertTrue(fake_winreg.OpenKey.called)
+        for write_api in ("SetValueEx", "SetValue", "CreateKey", "CreateKeyEx",
+                          "DeleteKey", "DeleteValue"):
+            self.assertFalse(
+                getattr(fake_winreg, write_api).called,
+                f"只读检测不得调用注册表写 API：{write_api}",
+            )
 
     def test_no_exception_when_reader_raises(self):
         # reader 抛异常（OpenKey 系统错误）应被吞掉，视为该位置缺失
@@ -192,13 +207,6 @@ class PickFreePortTests(unittest.TestCase):
                 sock.bind(("127.0.0.1", port))
             finally:
                 sock.close()
-
-    def test_repeated_calls_can_differ(self):
-        # 不保证必不同，但 5 次调用应大概率能拿到至少 2 个不同端口
-        # （若实现固定返回某端口则此测试会失败，符合任务"验证可绑定"边界）
-        ports = {desktop_runtime.pick_free_port() for _ in range(5)}
-        self.assertGreaterEqual(len(ports), 1)
-
 
 if __name__ == "__main__":
     unittest.main()

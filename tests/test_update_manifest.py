@@ -53,13 +53,18 @@ class UpdateManifestTests(unittest.TestCase):
             )
 
     def test_written_manifest_is_readable_by_public_web_server(self):
-        if os.name == "nt":
-            self.skipTest("Windows 不保留 Unix manifest 权限位；由 Linux 镜像端验证")
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "manifest.json"
             _write_manifest(path, {})
 
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+            # 公共 Web 服务器需要直接读取该文件：Windows 无 POSIX 权限位，
+            # 断言平台无关的"可读且为合法 JSON"；POSIX 上另验证 0644 权限位。
+            self.assertTrue(path.is_file())
+            self.assertIsInstance(
+                json.loads(path.read_text(encoding="utf-8")), dict
+            )
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
 
 
 if __name__ == "__main__":

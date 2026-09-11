@@ -18,10 +18,15 @@ import websocket
 DEFAULT_BASE_URL = "http://127.0.0.1:5050"
 VIEWPORTS = ((375, 812), (390, 844), (768, 1024), (1440, 900))
 CONTINUE_SELECTOR = (
-    '[data-testid="resume-ai-screen"],'
-    '[data-testid="resume-recrawl"]'
+    '[data-testid="continue-ai-screen"],'
+    '[data-testid="continue-recrawl"]'
 )
 PENDING_ROW_SELECTOR = '[data-testid="job-row"]'
+# B058 起「AI 判断说明」原因浮层取代旧 .verdict-reason 段落；浮层由悬停或
+# 聚焦按钮（:focus-within）展开，脚本在窄屏点击行后聚焦按钮再读取原因。
+PENDING_REASON_SELECTOR = (
+    '.company-insight.ai-insight .company-insight-popover .insight-list li'
+)
 RECRAWL_SELECTOR = '[data-testid="pending-recrawl"]'
 PLATFORM_FILTER_SELECTOR = '[data-testid="result-platform-filter"]'
 
@@ -131,7 +136,7 @@ def test_viewport(ws_url, width, height, base_url):
   const task = inspect('.task-progress');
   const pause = inspect('[data-testid="pause-reason"]');
   const continuation = inspect(__CONTINUE_SELECTOR__);
-  let pending = inspect('.verdict-reason p');
+  let pending = inspect(__PENDING_REASON_SELECTOR__);
   if (!pending.visible) {
     if (window.innerWidth <= 760) {
       const row = document.querySelector(__PENDING_ROW_SELECTOR__);
@@ -140,12 +145,17 @@ def test_viewport(ws_url, width, height, base_url):
         await new Promise(resolve => setTimeout(resolve, 250));
       }
     }
-    const reason = document.querySelector('.verdict-reason p');
+    const insightButton = document.querySelector('.company-insight.ai-insight .ai-insight-button');
+    if (insightButton) {
+      insightButton.focus();
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    const reason = document.querySelector(__PENDING_REASON_SELECTOR__);
     if (reason) {
       reason.scrollIntoView({block: 'center', inline: 'nearest'});
       await new Promise(resolve => setTimeout(resolve, 100));
-      pending = inspect('.verdict-reason p');
     }
+    pending = inspect(__PENDING_REASON_SELECTOR__);
   }
   const scrollTo = async (selector) => {
     const element = document.querySelector(selector);
@@ -183,6 +193,8 @@ def test_viewport(ws_url, width, height, base_url):
             "__CONTINUE_SELECTOR__", json.dumps(CONTINUE_SELECTOR)
         ).replace(
             "__PENDING_ROW_SELECTOR__", json.dumps(PENDING_ROW_SELECTOR)
+        ).replace(
+            "__PENDING_REASON_SELECTOR__", json.dumps(PENDING_REASON_SELECTOR)
         ).replace(
             "__RECRAWL_SELECTOR__", json.dumps(RECRAWL_SELECTOR)
         ).replace(

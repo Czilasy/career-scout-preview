@@ -528,16 +528,18 @@ class ShellOrchestrationTests(unittest.TestCase):
         self.assertIn("PYTHON_EXECUTABLE", cfg)
 
     def test_closing_cancels_running_tasks(self):
-        """closing 事件取消抓取任务（合同 §6）。"""
+        """closing 事件取消抓取任务（合同 §6）；窗口状态写入临时目录，不碰真实用户目录。"""
         event = _FakeCancelEvent()
         runner = _FakeRunner(events={"t1": event})
         app = _FakeApp(runners={"TASK_RUNNER": runner})
         webview_mod = _FakeWebview(fire_closing=True)
-        deps = _make_deps(
-            webview_module=webview_mod,
-            create_app=lambda config: app,
-        )
-        desktop.run_desktop_shell(deps)
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = _make_deps(
+                webview_module=webview_mod,
+                create_app=lambda config: app,
+                state_dir=tmp,
+            )
+            desktop.run_desktop_shell(deps)
         self.assertTrue(event.set_called)
 
 

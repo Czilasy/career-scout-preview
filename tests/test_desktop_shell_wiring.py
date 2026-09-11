@@ -421,7 +421,10 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
         )
         code = desktop.run_desktop_shell(deps)
         self.assertEqual(code, 0)
-        self.assertTrue(any("事件" in msg for msg in logger.calls))
+        self.assertTrue(
+            any("pywebview 事件 API 不可用" in msg for msg in logger.calls),
+            f"缺少事件 API 不可用的明示日志：{logger.calls}",
+        )
 
 
 # ===========================================================================

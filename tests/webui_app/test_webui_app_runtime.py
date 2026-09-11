@@ -29,15 +29,22 @@ class ChromeAccountProfileSwitchTests(unittest.TestCase):
             pipeline_exec_chrome, "load_browser_accounts",
             return_value=hermetic_accounts,
         ), mock.patch.object(
+            pipeline_exec_chrome, "fetch_cdp_browser_field", return_value=None,
+        ), mock.patch.object(
+            pipeline_exec_chrome, "resolve_executable",
+            return_value=("C:/spec040-test/browser.exe", ""),
+        ), mock.patch.object(
+            pipeline_exec_chrome, "selection_data_dir_key", return_value=None,
+        ), mock.patch.object(
+            pipeline_exec_chrome, "_cdp_data_dir",
+            return_value="C:/spec040-test/profile",
+        ), mock.patch.object(
             pipeline_exec.boss, "is_cdp_ready", side_effect=[True, True],
         ), mock.patch.object(
             pipeline_exec.boss, "cdp_port_uses_profile", return_value=False,
         ) as uses, mock.patch.object(
             pipeline_exec.boss, "chrome_user_data_dirs_for_cdp_port",
             return_value=[pipeline_exec.BROWSER_ACCOUNTS["b"]["profile_dir"]],
-        ), mock.patch(
-            "webui.pipeline_exec_chrome.load_browser_accounts",
-            return_value=dict(pipeline_exec.BROWSER_ACCOUNTS),
         ), mock.patch.object(
             pipeline_exec.boss, "close_cdp_chrome",
         ) as close, mock.patch.object(
@@ -56,7 +63,21 @@ class ChromeAccountProfileSwitchTests(unittest.TestCase):
     def test_ensure_chrome_ready_refuses_unknown_profile(self):
         """端口被非 A/B 的 Chrome 占用时禁止自动关闭，避免误伤主 Chrome。"""
         from webui import pipeline_exec
+        from webui import pipeline_exec_chrome
         with mock.patch.object(
+            pipeline_exec_chrome, "fetch_cdp_browser_field", return_value=None,
+        ), mock.patch.object(
+            pipeline_exec_chrome, "resolve_executable",
+            return_value=("C:/spec040-test/browser.exe", ""),
+        ), mock.patch.object(
+            pipeline_exec_chrome, "selection_data_dir_key", return_value=None,
+        ), mock.patch.object(
+            pipeline_exec_chrome, "_cdp_data_dir",
+            return_value="C:/spec040-test/profile",
+        ), mock.patch.object(
+            pipeline_exec_chrome, "load_browser_accounts",
+            return_value=dict(pipeline_exec.BROWSER_ACCOUNTS),
+        ), mock.patch.object(
             pipeline_exec.boss, "is_cdp_ready", return_value=True,
         ), mock.patch.object(
             pipeline_exec.boss, "cdp_port_uses_profile", return_value=False,
@@ -74,9 +95,28 @@ class ChromeAccountProfileSwitchTests(unittest.TestCase):
     def test_ensure_chrome_ready_minimizes_only_when_requested(self):
         """R6: 实际启动 Chrome 且 minimize_after_launch=True 时最小化窗口；默认不最小化。"""
         from webui import pipeline_exec
+        from webui import pipeline_exec_chrome
         launched = mock.Mock()
         launched.poll.return_value = None
         base = [
+            mock.patch.object(
+                pipeline_exec_chrome, "fetch_cdp_browser_field", return_value=None,
+            ),
+            mock.patch.object(
+                pipeline_exec_chrome, "resolve_executable",
+                return_value=("C:/spec040-test/browser.exe", ""),
+            ),
+            mock.patch.object(
+                pipeline_exec_chrome, "selection_data_dir_key", return_value=None,
+            ),
+            mock.patch.object(
+                pipeline_exec_chrome, "_cdp_data_dir",
+                return_value="C:/spec040-test/profile",
+            ),
+            mock.patch.object(
+                pipeline_exec_chrome, "load_browser_accounts",
+                return_value=dict(pipeline_exec.BROWSER_ACCOUNTS),
+            ),
             mock.patch.object(
                 pipeline_exec.boss, "is_cdp_ready", side_effect=[False, True],
             ),
@@ -90,14 +130,14 @@ class ChromeAccountProfileSwitchTests(unittest.TestCase):
             ),
         ]
         # 默认参数：不最小化（登录空间等调用方需要窗口在前台）
-        with base[0], base[1], base[2], base[3], mock.patch.object(
+        with base[0], base[1], base[2], base[3], base[4], base[5], base[6], base[7], base[8], mock.patch.object(
             pipeline_exec.boss, "minimize_chrome_window",
         ) as minimize:
             ok, _msg = pipeline_exec.ensure_chrome_ready(9444)
         self.assertTrue(ok)
         minimize.assert_not_called()
         # 任务路径：启动后立即最小化
-        with base[0], base[1], base[2], base[3], mock.patch.object(
+        with base[0], base[1], base[2], base[3], base[4], base[5], base[6], base[7], base[8], mock.patch.object(
             pipeline_exec.boss, "minimize_chrome_window",
         ) as minimize:
             ok, _msg = pipeline_exec.ensure_chrome_ready(

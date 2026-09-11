@@ -177,7 +177,7 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
     expect(scraped?.[0]).toMatchObject({ phase: "scraped", judged: 238 });
   });
 
-  it("04 scraped_only 轮显示“开始 AI 筛选”入口", async () => {
+  it("04 scraped_only 轮保持只读浏览：待筛选模式且不出现重抓胶囊", async () => {
     const { wrapper } = mountWithFetch({
       latestBoss: {
         ok: true, has_result: true, source_run_id: "run-1",
@@ -193,7 +193,10 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
     const stepBtn = wrapper.findAll("button").find((b) => b.text().includes("查看结果"));
     await stepBtn!.trigger("click");
     await flushPromises();
-    expect(wrapper.find('[data-testid="continue-ai-from-results"]').exists()).toBe(false);
+    // 正向锚点：确实处于 scraped_only 待筛选浏览模式
+    expect(wrapper.text()).toContain("待筛选");
+    expect(wrapper.text()).not.toContain("判定依据");
+    // 未筛选轮不得出现重抓胶囊（isScrapedOnly 渲染条件回归守卫）
     expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
   });
   it("0 岗位：不调用保存接口，04 页显示 0", async () => {
