@@ -345,8 +345,11 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
 
     # -- T403: source created from frozen runtime -----------------------
 
-    def _wait_for_task(self, task_id, timeout=5.0):
-        """Poll search-progress until task leaves queued/running."""
+    def _wait_for_task(self, task_id, timeout=20.0):
+        """Poll search-progress until task leaves queued/running.
+
+        20s 给慢速 CI 留余量：5s 在负载高的共享 runner 上过紧。
+        """
         import time as _time
         deadline = _time.monotonic() + timeout
         last = None

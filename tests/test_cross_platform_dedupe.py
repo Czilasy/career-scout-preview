@@ -267,7 +267,8 @@ def _enable_zhilian_for_test():
     return current
 
 
-def _wait_for_pipeline_task(client, task_id, timeout=8.0):
+def _wait_for_pipeline_task(client, task_id, timeout=20.0):
+    # 20s 给慢速 CI 留余量（与 harness.py 同步）：8s 曾在 Windows runner 误报。
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:

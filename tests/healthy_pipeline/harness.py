@@ -64,7 +64,8 @@ def _authed_test_client(app):
     return client
 
 
-def _wait_for_pipeline_task(client, task_id, timeout=8.0):
+def _wait_for_pipeline_task(client, task_id, timeout=20.0):
+    # 20s 是给慢速 CI 的余量（Windows runner 全量约 60 分钟）：8s 曾致偶发超时误报。
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
