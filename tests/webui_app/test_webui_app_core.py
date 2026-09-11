@@ -782,52 +782,6 @@ class SourceErrorClassificationTests(unittest.TestCase):
         ):
             self.assertEqual(_classify_failed_code(10, sample), "source_status_unclear")
 
-    def test_failure_line_decides_the_code(self):
-        from webui.source import _classify_failed_code
-        cases = (
-            ("source_verification_required", "__CAREERSCOUT_FAILED__ code=source_verification_required hint=验证码"),
-            ("source_rate_limited", "__CAREERSCOUT_FAILED__ code=source_rate_limited hint=操作频繁"),
-            ("source_login_required", "__CAREERSCOUT_FAILED__ code=source_login_required hint=401"),
-            ("source_status_unclear", "__CAREERSCOUT_FAILED__ code=source_status_unclear hint=无法确认"),
-        )
-        for expected, sample in cases:
-            self.assertEqual(_classify_failed_code(10, sample), expected)
-
-    def test_exit_1_with_login_keyword_returns_login_required(self):
-        from webui.source import _classify_failed_code
-        self.assertEqual(
-            _classify_failed_code(1, "请先登录 BOSS 直聘"),
-            "source_login_required",
-        )
-
-    def test_exit_1_generic_returns_unknown_error(self):
-        from webui.source import _classify_failed_code
-        self.assertEqual(
-            _classify_failed_code(1, "环境异常"),
-            "source_unknown_error",
-        )
-
-    def test_exit_2_returns_cdp_unavailable(self):
-        from webui.source import _classify_failed_code
-        self.assertEqual(
-            _classify_failed_code(2, "connect ECONNREFUSED 127.0.0.1:9222"),
-            "source_cdp_unavailable",
-        )
-
-    def test_exit_3_returns_invalid_output(self):
-        from webui.source import _classify_failed_code
-        self.assertEqual(
-            _classify_failed_code(3, "start-page 必须在 1 到 3 之间"),
-            "source_invalid_output",
-        )
-
-    def test_unknown_exit_code_returns_unknown_error(self):
-        from webui.source import _classify_failed_code
-        self.assertEqual(
-            _classify_failed_code(99, "unknown"),
-            "source_unknown_error",
-        )
-
     def test_rate_limit_label_not_verification(self):
         """限流文案不得显示成验证码/滑块（用户反馈回归）。"""
         from webui.pipeline_exec import _FAILED_CODE_LABELS

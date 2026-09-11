@@ -16,7 +16,6 @@ class BuildResumeAnalysisPromptTests(unittest.TestCase):
         self.assertIn("degree_type", prompt)
         self.assertIn("week_off", prompt)
         self.assertIn("overtime", prompt)
-        self.assertIn("default", prompt.replace("默认\"统招\"", "default"))
 
     def test_degree_type_rule_mentions_default_and_exclusions(self):
         prompt = build_resume_analysis_prompt("x")
@@ -92,6 +91,26 @@ class BuildMatchSystemPromptTests(unittest.TestCase):
         self.assertIn("六类字段", prompt)
         self.assertIn("疑似骗局", prompt)
         self.assertIn("统招公办本科", prompt)
+
+    def test_match_prompt_keeps_integration_copy(self):
+        """040 批三迁移：原 test_ai_match 集成侧独有文案断言归正本统一保护。"""
+        prompt = self._prompt()
+        self.assertIn("最高优先级，绝对硬约束", prompt)
+        self.assertIn("已确认的筛选条件", prompt)
+        self.assertIn("不得只写 caveats 后仍判 match", prompt)
+        self.assertIn("薪资筛选区间已由系统硬性核对", prompt)
+        self.assertIn("JD 正文硬要求优先于标题和标签", prompt)
+        self.assertIn("判断是参考不是法律", prompt)
+        self.assertIn("以候选人自己的主业方向为锚", prompt)
+        self.assertIn("明显跨链路的岗位默认 match=false", prompt)
+        self.assertIn("匹配从宽只适用于候选人没有约束的维度", prompt)
+        self.assertIn("以 JD 主责为准", prompt)
+        self.assertIn("不得把 AI 已识别出的方向冲突", prompt)
+        self.assertNotIn("本身不得作为 match=false 的理由", prompt)
+        self.assertNotIn("行业、类别、技能不完全一致不排除", prompt)
+        self.assertIn("以意愿为准", prompt)
+        self.assertIn("岗位靠谱判定", prompt)
+        self.assertIn("flags 为必填字段", prompt)
 
 
 if __name__ == "__main__":

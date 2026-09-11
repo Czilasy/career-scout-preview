@@ -266,7 +266,6 @@ class ScreenFlowTests(unittest.TestCase):
         self.assertEqual(ctx["scrape_task_id"], "")
         self.assertTrue(ctx["resumable"])
         self.assertEqual(ctx["status"], "paused")
-        self.assertTrue(ctx["resumable"])
 
     def test_build_round_context_from_snapshot_falls_back_to_latest_run(self):
         _make_ai_run(self.store, "paused-run", status="paused")

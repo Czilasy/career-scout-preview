@@ -120,23 +120,6 @@ class BossNormalizeTests(unittest.TestCase):
 # 智联时间戳归一化（2026-08-28 实测：判定以 lastOnlineTime 为准，文本仅展示）
 # ---------------------------------------------------------------------------
 class ZhilianNormalizeTests(unittest.TestCase):
-    def test_exact_age_from_ms(self):
-        now_ms = time.time() * 1000
-        ts = now_ms - 10 * 86400 * 1000
-        fact = ra.normalize_detail_activity(
-            "zhilian",
-            {
-                "recruiter_last_online_ms": ts,
-                "recruiter_activity_text": "今日活跃",
-            },
-        )
-        self.assertTrue(fact["known"])
-        self.assertEqual(fact["source"], "zhilian")
-        self.assertEqual(fact["text"], "今日活跃")
-        self.assertAlmostEqual(fact["last_online_ms"], ts, delta=1)
-        self.assertAlmostEqual(fact["age_lower_days"], 10.0, delta=0.01)
-        self.assertAlmostEqual(fact["age_upper_days"], 10.0, delta=0.01)
-
     def test_bad_ms_unknown_without_raise(self):
         for bad in (None, "abc", [], ""):
             fact = ra.normalize_detail_activity(

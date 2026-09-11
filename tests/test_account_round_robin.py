@@ -12,7 +12,6 @@ RotationQueue 撞墙换号顺次接力；is_wall_code 判定；ListRobin 子范�
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -204,9 +203,6 @@ class WallCodeTests(unittest.TestCase):
         # source_rate_limited / source_verification_required 属系统性阻断
         self.assertTrue(is_wall_code("source_rate_limited"))
         self.assertTrue(is_wall_code("source_verification_required"))
-
-    def test_explicit_platform_rate_limit_remains_a_wall_signal(self):
-        self.assertTrue(is_wall_code("source_rate_limited"))
 
     def test_login_required_is_a_public_systemic_wall(self):
         self.assertTrue(is_wall_code("source_login_required"))

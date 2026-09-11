@@ -7,12 +7,10 @@ import ast
 import pathlib
 import tempfile
 import threading
-import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 from webui.store import (
-    DiscoveryStoreConflictError,
     RUN_STATUSES, RUN_TRANSITIONS, SYSTEMIC_BLOCK_CODES,
 )
 

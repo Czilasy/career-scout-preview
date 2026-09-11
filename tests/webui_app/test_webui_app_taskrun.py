@@ -1885,7 +1885,6 @@ class ResultRoundRescueTests(unittest.TestCase):
                         save_side_effect=None):
         """跑一轮筛选任务；可注入 save_finished_round 替身。"""
         from webui import pipeline_exec
-        import webui.result_rounds as result_rounds
 
         def _fake_screen_jobs(jobs_arg, *a, **kw):
             screen_calls.append([str(j.get("job_id")) for j in jobs_arg])
@@ -2059,6 +2058,11 @@ class ResumeAccountGateIntegrationTests(unittest.TestCase):
         )
         return task_id
 
+    def _reset_app(self):
+        """场景间重建 app：continue 会真实占用浏览器端口，共享实例会误报 browser_busy。"""
+        self.temp.cleanup()
+        self.setUp()
+
     def _continue(self, task_id):
         executor = self.app.config["PIPELINE_EXECUTOR"]
         with mock.patch.object(executor, "submit"):
@@ -2068,60 +2072,61 @@ class ResumeAccountGateIntegrationTests(unittest.TestCase):
         return [e for e in self.store.list_task_events(task_id)
                 if e.get("type") == "account_switch"]
 
-    def test_untouched_global_keeps_r2_frozen_account(self):
-        """核心回归：用户未动全局账号（当前=快照），继续沿用冻结 b 不改写。"""
-        task_id = self._seed_paused_run(
+    def test_gate_keeps_frozen_account_and_records_real_switch(self):
+        """双门槛集成：未动全局不改写冻结身份；真换号时事件+日志留痕。
+
+        040 批三：原四条集成用例合并为一条（未换号零留痕/无快照不改写
+        断言并入本用例，函数级判定由 tests/webui_app/test_resume_account_gate.py 覆盖）。
+        """
+        # 场景零：存量任务无快照 → 不自动换号，沿用冻结身份（原 test_missing_snapshot 断言）
+        legacy = self._seed_paused_run(
+            "gate-legacy", browser_account="b", snapshot=None,
+            error_code="source_rate_limited")
+        resp = self._continue(legacy)
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        params = (self.store.get_screening_run(legacy) or {}).get(
+            "execution_params") or {}
+        self.assertEqual(params.get("browser_account"), "b")
+        self.assertEqual(self._account_switch_events(legacy), [])
+
+        # 场景间隔离：continue 会真实占用浏览器端口，共享 app 会让下一场景 409
+        self._reset_app()
+
+        # 场景一：用户未动全局账号（当前=快照）→ 不改写冻结 b、无换号事件与日志行
+        kept = self._seed_paused_run(
             "gate-untouched", browser_account="b", snapshot="a",
             error_code="source_rate_limited")
-        resp = self._continue(task_id)
+        resp = self._continue(kept)
         self.assertEqual(resp.status_code, 200, resp.get_json())
-        params = (self.store.get_screening_run(task_id) or {}).get(
+        params = (self.store.get_screening_run(kept) or {}).get(
             "execution_params") or {}
         self.assertEqual(params.get("browser_account"), "b")
         self.assertEqual(params.get("active_account_at_freeze"), "a")
-        self.assertEqual(self._account_switch_events(task_id), [])
+        self.assertEqual(self._account_switch_events(kept), [])
+        logs = " ".join(self.app.config["PIPELINE_TASKS"][kept]["logs"])
+        self.assertNotIn("切换到账号", logs)
 
-    def test_missing_snapshot_keeps_frozen_account(self):
-        """存量任务无快照 → 不自动换号，沿用冻结身份。"""
-        task_id = self._seed_paused_run(
-            "gate-legacy", browser_account="b", snapshot=None,
-            error_code="source_rate_limited")
-        resp = self._continue(task_id)
-        self.assertEqual(resp.status_code, 200, resp.get_json())
-        params = (self.store.get_screening_run(task_id) or {}).get(
-            "execution_params") or {}
-        self.assertEqual(params.get("browser_account"), "b")
-        self.assertEqual(self._account_switch_events(task_id), [])
+        # 场景间隔离：同上，重建 app 后再跑换号场景
+        self._reset_app()
 
-    def test_switch_writes_event_and_log_line(self):
-        """B057 场景（暂停期间激活 b）→ 换号发生且事件+日志行留痕。"""
-        task_id = self._seed_paused_run(
+        # 场景二：暂停期间激活 b（B057）→ 换号发生且事件+日志行留痕
+        switched = self._seed_paused_run(
             "gate-switch", browser_account="a", snapshot="a",
             error_code="source_rate_limited", current_stage="scrape")
         with mock.patch("webui.pipeline_exec.close_debug_chrome"):
             activated = self.client.post("/api/browser-accounts/b/activate")
         self.assertEqual(activated.status_code, 200, activated.get_json())
-        resp = self._continue(task_id)
+        resp = self._continue(switched)
         self.assertEqual(resp.status_code, 200, resp.get_json())
-        params = (self.store.get_screening_run(task_id) or {}).get(
+        params = (self.store.get_screening_run(switched) or {}).get(
             "execution_params") or {}
         self.assertEqual(params.get("browser_account"), "b")
-        events = self._account_switch_events(task_id)
+        events = self._account_switch_events(switched)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["payload"].get("from_account"), "a")
         self.assertEqual(events[0]["payload"].get("to_account"), "b")
-        logs = " ".join(self.app.config["PIPELINE_TASKS"][task_id]["logs"])
+        logs = " ".join(self.app.config["PIPELINE_TASKS"][switched]["logs"])
         self.assertIn("切换到账号", logs)
-
-    def test_no_switch_leaves_no_audit_trace(self):
-        """未换号的续跑零留痕（无事件、日志无换号行）。"""
-        task_id = self._seed_paused_run(
-            "gate-clean", browser_account="b", snapshot="a",
-            error_code="source_rate_limited")
-        resp = self._continue(task_id)
-        self.assertEqual(resp.status_code, 200, resp.get_json())
-        logs = " ".join(self.app.config["PIPELINE_TASKS"][task_id]["logs"])
-        self.assertNotIn("切换到账号", logs)
 
 
 class JobDetailConcurrencyGuardTests(unittest.TestCase):

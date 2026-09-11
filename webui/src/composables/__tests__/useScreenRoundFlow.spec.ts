@@ -36,9 +36,7 @@ function makeDeps() {
     recrawlSnapshot: ref<any>(null),
     finishedPartial: ref(false),
     resultsPageSeen: ref(false),
-    restoredTaskHint: ref(""),
     activeStep: ref("screen"),
-    resultLoaded: ref(false),
     resultPlatformFilter: ref<"all" | Platform>("all"),
     currentRoundStatus: ref(""),
     uncertainCount: ref(0),
@@ -276,7 +274,6 @@ describe("useScreenRoundFlow", () => {
       roundContext({ platform: "zhilian", screen_run_id: "screen-z", status: "succeeded", resumable: false }),
     );
     const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(false);
-    confirmMock.mockClear();
     await flow.confirmNewRound();
     expect(confirmMock).not.toHaveBeenCalled();
     expect(api.resetWorkflow).not.toHaveBeenCalled();
@@ -431,6 +428,7 @@ describe("useScreenRoundFlow", () => {
     expect(confirmMock).not.toHaveBeenCalled();
     expect(api.resetWorkflow).not.toHaveBeenCalled();
     expect(refs.activeStep.value).toBe("screen");
+    confirmMock.mockRestore();
   });
 
   it("derives pause/continue actions from snapshot status", () => {
@@ -483,7 +481,6 @@ describe("useScreenRoundFlow", () => {
     const flow = useScreenRoundFlow({ refs, api });
     flow.restoreRoundContext(roundContext({ status: "interrupted", resumable: false }));
     const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(false);
-    confirmMock.mockClear();
     await flow.confirmNewRound();
     expect(confirmMock).not.toHaveBeenCalled();
     expect(api.resetWorkflow).toHaveBeenCalled();

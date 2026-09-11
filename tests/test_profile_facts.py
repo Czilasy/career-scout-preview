@@ -41,6 +41,8 @@ class ValidateProfileFactsTests(unittest.TestCase):
         self.assertEqual(facts["core_skills"], ["Python", "Django"])
         # 「非统招」是显式合法枚举；machine 归一化只认明确非统招标志。
         self.assertEqual(facts["degree_type"], "非统招")
+        # 040 批三迁移：显式 degree 保留（原 test_ai_match 集成侧断言）
+        self.assertEqual(facts["degree"], "本科")
         self.assertEqual(facts["week_off"], "双休")
         self.assertEqual(facts["overtime"], "能够加班")
 
@@ -57,6 +59,9 @@ class ValidateProfileFactsTests(unittest.TestCase):
         self.assertNotIn("job_type", facts)
         self.assertNotIn("languages", facts)
         self.assertNotIn("week_off", facts)
+        # 040 批三迁移：空/非字符串 degree 丢弃（原 test_ai_match 集成侧断言）
+        self.assertNotIn("degree", validate_profile_facts({"degree": ""}))
+        self.assertNotIn("degree", validate_profile_facts({"degree": 123}))
 
     def test_missing_fields_not_injected(self):
         """B062：validate 不把默认值写成存证——未体现保持未体现。"""
@@ -74,6 +79,9 @@ class ValidateProfileFactsTests(unittest.TestCase):
         })
         self.assertNotIn("week_off", facts)
         self.assertNotIn("overtime", facts)
+        # 040 批三迁移：job_type「未体现」显式保留（与 week_off/overtime 处理不同）
+        self.assertEqual(
+            validate_profile_facts({"job_type": "未体现"}), {"job_type": "未体现"})
 
     def test_degree_type_defaults_to_tongzhao(self):
         """FR-006：degree_type 默认「统招」，仅明确非统招标志才填「非统招」。"""
@@ -85,6 +93,8 @@ class ValidateProfileFactsTests(unittest.TestCase):
         self.assertEqual(normalize_degree_type("成考"), "非统招")
         self.assertEqual(normalize_degree_type("函授"), "非统招")
         self.assertEqual(normalize_degree_type("夜校本科"), "非统招")
+        # 040 批三迁移：含「本科」字样的非统招标志仍归一为非统招
+        self.assertEqual(normalize_degree_type("自考本科"), "非统招")
 
     def test_non_tongzhao_preserved_in_facts(self):
         facts = validate_profile_facts({"degree_type": "自考"})

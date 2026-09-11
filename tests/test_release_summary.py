@@ -6,28 +6,6 @@ from __future__ import annotations
 import unittest
 
 from scripts.release_summary import _reject_overlong_items, build_release_summary
-from webui.updater import _summarize_release_notes
-
-
-class ReleaseNotesSummaryTests(unittest.TestCase):
-    """摘要提取只保留用户条目，安装包/校验值等技术行一律过滤。"""
-
-    def test_summary_notes_keep_user_items_and_drop_packaging_lines(self):
-        notes = "\n".join([
-            "## 更新内容",
-            "修复：",
-            "-任务状态显示更准确",
-            "-Windows 安装包：CareerScout-v9.9.9.exe",
-            "-校验值（SHA256）：abc123",
-            "优化：",
-            "-任务进度更顺滑",
-        ])
-        items = _summarize_release_notes(notes, "9.9.9")
-
-        self.assertEqual(
-            items,
-            ["修复：任务状态显示更准确", "优化：任务进度更顺滑"],
-        )
 
 
 class ReleaseSummaryLengthGateTests(unittest.TestCase):

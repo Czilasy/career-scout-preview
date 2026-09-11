@@ -131,12 +131,10 @@ describe("Discovery recovery paths", () => {
     await wrapper.get('[data-testid="pending-recrawl-heading"]').trigger("click");
     await flushPromises();
 
+    // 040 批三：重抓请求体（source_run_id/job_ids）由 RecrawlContinue.spec.ts 正本覆盖，
+    // 此处只验证头部按钮点击确实发起重抓。
     const recrawlCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/pipeline/recrawl"));
     expect(recrawlCall).toBeTruthy();
-    expect(JSON.parse(String(recrawlCall![1]?.body))).toMatchObject({
-      source_run_id: "latest-boss-run",
-      job_ids: ["uncertain"],
-    });
 
     wrapper.unmount();
     vi.unstubAllGlobals();

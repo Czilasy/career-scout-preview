@@ -1,7 +1,6 @@
 from __future__ import annotations
 import json
-from unittest.mock import patch, MagicMock
-import requests
+from unittest.mock import MagicMock
 
 
 def _mock_chat_response(payload: dict, status_code: int = 200) -> MagicMock:

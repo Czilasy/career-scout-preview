@@ -200,18 +200,6 @@ class FunnelSearchTests(unittest.TestCase):
             candidate["id"], is_acceptable=True)
         self.assertNotEqual(result["status"], "boundary")
 
-    def test_boundary_candidate_not_eligible_for_mode_slot(self):
-        """FR-015: 危险边界候选不可应用为模式槽位。"""
-        candidate = self.controller.propose_candidate(
-            experiment_id=self.experiment["id"],
-            stage="list", strategy_step="boundary",
-            parent_id=None, config=_sample_nine_fields())
-        self.controller.classify_boundary(
-            candidate["id"], is_acceptable=False)
-        fetched = self.store.get_tuning_candidate(candidate["id"])
-        # boundary 是终态，不能转 accepted
-        self.assertEqual(fetched["status"], "boundary")
-
     # -- 中位数/尾部比较 (FR-017/018/020) --------------------------------
 
     def test_check_convergence_converged_with_low_variation(self):

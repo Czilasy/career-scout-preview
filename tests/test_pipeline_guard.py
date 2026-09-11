@@ -211,7 +211,7 @@ class PipelineGuardCoreTests(unittest.TestCase):
     # ---- US3 事件日志 ----
 
     def test_stall_retry_giveup_events_written_to_log(self):
-        from webui.logging_setup import configure_logging, get_logger
+        from webui.logging_setup import configure_logging
         with tempfile.TemporaryDirectory() as tmp:
             configure_logging(tmp, force=True)
             try:

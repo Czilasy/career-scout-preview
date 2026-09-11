@@ -192,7 +192,8 @@ class CheckUpdateTests(unittest.TestCase):
 
 class ReleaseSummaryTests(unittest.TestCase):
     def test_summarize_release_notes_keeps_user_items_and_filters_release_details(self):
-        notes = """增加：
+        notes = """## 更新内容
+增加：
 - 任务完成状态现在区分完整成功、空结果、部分完成、失败、无法确认和中断。
 
 优化：
@@ -202,6 +203,7 @@ class ReleaseSummaryTests(unittest.TestCase):
 - 空结果、后台提交失败和完成证据缺失不再被误报为成功。
 
 Windows 安装包：`CareerScout-v1.8.2.exe`
+-Windows 安装包：CareerScout-v1.8.2.exe
 macOS 安装包：`CareerScout-v1.8.2.dmg`
 校验值（SHA256）：`CareerScout-v1.8.2.exe.sha256`
 前置条件：Windows 用户直接运行安装包。
@@ -294,8 +296,6 @@ class Sha256Tests(unittest.TestCase):
             f.write(b"career-scout")
             path = Path(f.name)
         try:
-            import hashlib
-
             self.assertEqual(
                 updater.compute_sha256(path),
                 hashlib.sha256(b"career-scout").hexdigest(),
@@ -306,20 +306,26 @@ class Sha256Tests(unittest.TestCase):
 
 class DownloaderTests(unittest.TestCase):
     def test_start_rejects_disallowed_url(self):
-        d = updater.UpdateDownloader(state_dir=tempfile.mkdtemp())
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = updater.UpdateDownloader(state_dir=tmp.name)
         info = updater.UpdateInfo(asset_url="https://evil.com/x.exe")
         self.assertFalse(d.start(info))
         self.assertEqual(d.status()["status"], "failed")
         self.assertEqual(d.status()["error"], "invalid_download_url")
 
     def test_start_rejects_double_start(self):
-        d = updater.UpdateDownloader(state_dir=tempfile.mkdtemp())
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = updater.UpdateDownloader(state_dir=tmp.name)
         d.state.status = "downloading"
         info = updater.UpdateInfo(asset_url="https://github.com/x.exe")
         self.assertFalse(d.start(info))
 
     def test_download_run_overwrites_existing_target(self):
-        d = updater.UpdateDownloader(state_dir=tempfile.mkdtemp())
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = updater.UpdateDownloader(state_dir=tmp.name)
         info = updater.UpdateInfo(
             asset_name="CareerScout-v2.5.0.exe",
             asset_url="https://github.com/x/x.exe",
@@ -339,7 +345,9 @@ class DownloaderTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), content)
 
     def test_download_exception_stores_stable_code_and_logs_original(self):
-        d = updater.UpdateDownloader(state_dir=tempfile.mkdtemp())
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = updater.UpdateDownloader(state_dir=tmp.name)
         info = updater.UpdateInfo(asset_url="https://github.com/x/x.exe")
         d._target = d.download_dir / "x.exe"
         with self.assertLogs("career_scout.webui.updater", level="ERROR") as logs, \

@@ -1,4 +1,5 @@
 """B054 地点范围测试：规范化、组合展开、参数翻译与摘要。"""
+import tempfile
 import unittest
 from unittest import mock
 
@@ -186,11 +187,13 @@ class RunSearchComboKeyTests(unittest.TestCase):
             SourceOutcome.success(jobs=[{"job_id": "j2", "source_url": "u2"}], safe_log="ok", input_hash="h2", scope_complete=True),
             SourceOutcome.success(jobs=[{"job_id": "j3", "source_url": "u3"}], safe_log="ok", input_hash="h3", scope_complete=True),
         ]
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         with mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome"), \
                 mock.patch("webui.pipeline_exec.time.sleep"):
             result = run_search(
-                params, source, pages=1, artifact_dir="tmp",
+                params, source, pages=1, artifact_dir=tmp.name,
                 sleeper=lambda *args, **kwargs: None,
                 close_chrome_on_success=True,
             )

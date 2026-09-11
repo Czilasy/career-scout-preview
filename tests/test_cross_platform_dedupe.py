@@ -7,13 +7,12 @@
 from __future__ import annotations
 
 import threading
-import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from unittest import mock
 
-from webui.app import create_app
+from tests.healthy_pipeline.harness import _make_app, _wait_for_pipeline_task
 from webui.cross_platform_dedupe import (
     DEDUPE_WINDOW_DAYS,
     EXTRA_KEY,
@@ -236,22 +235,6 @@ class OutcomeVisibilityTests(unittest.TestCase):
 # 集成用例（T006/T007/T011/T012/T014）：create_app + /api/ai-screen 真实链路
 # ---------------------------------------------------------------------------
 
-def _make_app():
-    import pathlib
-    import sys
-    import tempfile
-    temp = tempfile.TemporaryDirectory()
-    root = pathlib.Path(temp.name)
-    app = create_app({
-        "TESTING": True,
-        "START_TASKS": False,
-        "RESULT_DIR": str(root / "results"),
-        "DB_PATH": str(root / "state" / "webui.db"),
-        "PYTHON_EXECUTABLE": sys.executable,
-    })
-    return app, temp
-
-
 def _enable_zhilian_for_test():
     """在需要验证已启用平台语义的测试中显式打开智联 fixture。"""
     from webui.platforms import get_platform, register_platform
@@ -265,20 +248,6 @@ def _enable_zhilian_for_test():
         availability_reason="",
     ))
     return current
-
-
-def _wait_for_pipeline_task(client, task_id, timeout=20.0):
-    # 20s 给慢速 CI 留余量（与 harness.py 同步）：8s 曾在 Windows runner 误报。
-    deadline = time.monotonic() + timeout
-    last = None
-    while time.monotonic() < deadline:
-        response = client.get(f"/api/search-progress/{task_id}")
-        if response.status_code == 200:
-            last = response.get_json()
-            if last.get("status") not in ("queued", "running"):
-                return last
-        time.sleep(0.01)
-    raise AssertionError(f"task {task_id} did not stop; last={last}")
 
 
 def _boss_kept_job(job_id, *, company="北京字节跳动科技有限公司",

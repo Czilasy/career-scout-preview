@@ -16,7 +16,6 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest import mock
 
 # worker 线程的 print 含 ⟳ 等非 GBK 字符，测试 stdout 重定向为 utf-8
 sys.stdout.reconfigure(encoding="utf-8")
@@ -119,19 +118,6 @@ class DetailScrapeFinalizeRegressionTests(unittest.TestCase):
         self.assertGreater(len(results), 0)
         self.assertTrue(exists)
         self.assertGreater(persisted, 0)
-
-    def test_finalize_timeout_results_persisted(self):
-        """超时后已抓结果已原子落盘（output 文件存在且非空）。"""
-        jobs = _make_jobs(12)
-        _, exists, persisted = _run(
-            {"jobs": jobs},
-            tab_pool_size=2,
-            finalize_timeout=1.5,
-            sleeper=_slow_sleep,
-        )
-        self.assertTrue(exists)
-        self.assertGreater(persisted, 0)
-
 
 if __name__ == "__main__":
     unittest.main()

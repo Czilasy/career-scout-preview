@@ -27,13 +27,9 @@ class FailureLineContractTests(unittest.TestCase):
         self.assertEqual(parsed[1], "second")
 
     def test_parse_ignores_lookalikes_in_job_titles(self):
-        # 岗位标题长得很像失败行也不能被误认（前缀必须行首独立出现）
-        parsed = signals.parse_failure_line(
-            "JD 提到 __CAREERSCOUT_FAILED__ code=source_rate_limited 是内部协议")
-        # 行中包含前缀仍会命中正则（search）；契约要求脚本只在行首打行，
-        # 这里锁定"取最后一行命中"的确定性行为即可
-        if parsed is not None:
-            self.assertEqual(parsed[0], "source_rate_limited")
+        # 前缀必须行首独立出现；标题/正文里出现相似文本不得被误认
+        self.assertIsNone(signals.parse_failure_line(
+            "JD 提到 __CAREERSCOUT_FAILED__ code=source_rate_limited 是内部协议"))
 
     def test_parse_empty_and_none(self):
         self.assertIsNone(signals.parse_failure_line(""))
@@ -153,15 +149,6 @@ class ProbeOrderRegressionTests(unittest.TestCase):
 
 class MisreportRegressionTests(unittest.TestCase):
     """SC-001 回归：敏感词样本不得进入受限语义；分类只认失败行。"""
-
-    def test_webui_classification_ignores_job_text(self):
-        from webui.source import _classify_failed_code
-        # 退出码 10 且无失败行：哪怕输出充满敏感词也只是"暂无法确认"
-        captured = (
-            "✓ 滑块验证码识别工程师 | 429元/天 | 反爬限流专家\n"
-            "✓ slider组件开发 | too many requests\n"
-            "  ⚠️ 无数据（连续 3 页）")
-        self.assertEqual(_classify_failed_code(10, captured), "source_status_unclear")
 
     def test_soft_failure_code_not_in_block_set(self):
         from webui.error_registry import SYSTEMIC_BLOCK_CODES

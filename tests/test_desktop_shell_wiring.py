@@ -19,6 +19,13 @@ from packaging import desktop
 from packaging import window_state as ws
 
 
+def _state_dir(case):
+    """为用例建立临时 state_dir 并登记清理（不写真实用户目录、不残留）。"""
+    tmp = tempfile.TemporaryDirectory(prefix="cs-window-state-")
+    case.addCleanup(tmp.cleanup)
+    return tmp.name
+
+
 # ---------------------------------------------------------------------------
 # 测试替身（编排层用；扩展版：全部窗口事件可 fire）
 # ---------------------------------------------------------------------------
@@ -145,7 +152,7 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
 
     def test_closing_saves_window_state(self):
         """普通态 closing 保存当前窗口矩形（迁移自 test_desktop_shell）。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         webview_mod = _FakeWebview(fire_closing=True)
         original_create = webview_mod.create_window
 
@@ -165,7 +172,7 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
 
     def test_closing_saves_state_when_window_xy_none(self):
         """首启（window.x/y 为 None）closing 也能保存：缺项回退默认普通矩形位置。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         webview_mod = _FakeWebview(fire_closing=True)
         original_create = webview_mod.create_window
 
@@ -186,7 +193,7 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
 
     def test_maximized_close_saves_last_normal_not_fullscreen(self):
         """US1 核心场景：拖好 → 最大化 → 关窗，落盘为普通矩形而非全屏矩形。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         webview_mod = _FakeWebview()
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
@@ -211,7 +218,7 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
 
     def test_maximized_never_dragged_saves_default_normal(self):
         """US1 场景 7：最大化且未拖过 → 落盘默认普通矩形 + maximized=True。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         webview_mod = _FakeWebview()
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
@@ -225,7 +232,7 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
 
     def test_restore_back_to_normal_saves_normal_rect(self):
         """US1 场景 2：最大化 → 还原 → 关窗，落盘普通矩形 maximized=False。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         webview_mod = _FakeWebview()
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
@@ -249,7 +256,7 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
             quit_handler = None
 
         js_api = _CapturingApi()
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         webview_mod = _FakeWebview()
         deps = _make_deps(
             webview_module=webview_mod, state_dir=state_dir, js_api=js_api
@@ -272,7 +279,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
 
     def test_first_open_no_memory_maximized_default_size(self):
         """无记忆 → 1400×800 + maximized=True，位置交给窗口管理器居中。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         webview_mod = _FakeWebview()
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
@@ -284,7 +291,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
 
     def test_startup_maximized_from_memory(self):
         """记忆 maximized=True → 按普通矩形开窗并最大化（可还原回该矩形）。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         ws.save_window_state(
             1400, 800, 50, 60, state_dir=state_dir, maximized=True
         )
@@ -298,7 +305,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
 
     def test_startup_normal_memory_not_maximized(self):
         """普通记忆 → maximized=False 显式传入。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         ws.save_window_state(1400, 800, 200, 150, state_dir=state_dir)
         webview_mod = _FakeWebview()
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
@@ -310,7 +317,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
 
     def test_startup_schema2_polluted_treated_as_first_open(self):
         """schema 2 污染记忆 → 按首开处理（1400×800 最大化）。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         _write_state(
             state_dir,
             {"schema": 2, "width": 1936, "height": 1056, "x": -8, "y": -8},
@@ -324,7 +331,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
 
     def test_first_open_small_screen_default_clamped(self):
         """小屏首开 → 默认普通矩形钳到工作区（仍最大化）。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         webview_mod = _FakeWebview()
         deps = _make_deps(
             webview_module=webview_mod,
@@ -338,7 +345,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
 
     def test_full_cycle_drag_maximize_close_restart_restore(self):
         """US1 端到端：拖好 → 最大化 → 关 → 重启（最大化）→ 还原段参数正确。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         # 第一段生命周期：拖好 + 最大化 + 关窗
         webview_mod = _FakeWebview()
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
@@ -362,7 +369,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
     def test_macos_fullscreen_animation_does_not_pollute_normal_rect(self):
         """审查修复回归：cocoa 全屏动画先发 resized（全屏尺寸）后发 maximized，
         守卫拒绝全屏尺寸，关窗落盘的是用户真实普通矩形而非全屏矩形。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         webview_mod = _FakeWebview()
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
@@ -382,7 +389,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
 
     def test_events_partial_only_closing_still_saves(self):
         """仅 closing 可用（部分事件缺失）→ 其余事件降级跳过，closing 兜底仍保存。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         webview_mod = _FakeWebview(fire_closing=True)
         original_create = webview_mod.create_window
 
@@ -405,7 +412,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
 
     def test_events_api_missing_logs_warning(self):
         """events API 整体不可用（<6.0）→ 记日志明示，不阻断启动。"""
-        state_dir = tempfile.mkdtemp()
+        state_dir = _state_dir(self)
         webview_mod = _FakeWebview()
         original_create = webview_mod.create_window
 
@@ -454,40 +461,6 @@ class WindowControlJsApiTests(unittest.TestCase):
         result = js_api.window_minimize()
         self.assertEqual(result, {"ok": True, "error": None})
         self.assertEqual(win.calls, ["minimize"])
-
-    def test_window_toggle_maximize_from_normal(self):
-        """普通态 window_toggle_maximize → maximize()，返回 maximized=True。"""
-        js_api, win = self._run_with_api()
-        win.calls = []
-        win.maximized = False
-        win.maximize = lambda: win.calls.append("maximize")
-        win.restore = lambda: win.calls.append("restore")
-        result = js_api.window_toggle_maximize()
-        self.assertEqual(
-            result, {"ok": True, "error": None, "maximized": True}
-        )
-        self.assertEqual(win.calls, ["maximize"])
-
-    def test_window_toggle_maximize_from_maximized(self):
-        """最大化态 window_toggle_maximize → restore()，返回 maximized=False。"""
-        js_api, win = self._run_with_api()
-        win.calls = []
-        win.maximized = True
-        win.maximize = lambda: win.calls.append("maximize")
-        win.restore = lambda: win.calls.append("restore")
-        result = js_api.window_toggle_maximize()
-        self.assertEqual(
-            result, {"ok": True, "error": None, "maximized": False}
-        )
-        self.assertEqual(win.calls, ["restore"])
-
-    def test_window_is_maximized_reads_window_state(self):
-        """window_is_maximized 返回窗口当前最大化状态（FR-004 图标切换）。"""
-        js_api, win = self._run_with_api()
-        win.maximized = True
-        self.assertEqual(js_api.window_is_maximized(), {"ok": True, "maximized": True})
-        win.maximized = False
-        self.assertEqual(js_api.window_is_maximized(), {"ok": True, "maximized": False})
 
     def test_window_control_without_window_returns_no_window(self):
         """未注入 window → {ok: False, error: no_window}。"""

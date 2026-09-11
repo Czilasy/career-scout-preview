@@ -1,4 +1,3 @@
-import json
 import pathlib
 import tempfile
 import unittest

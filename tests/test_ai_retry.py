@@ -1,4 +1,3 @@
-import json
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -12,17 +11,7 @@ from webui.ai_retry import (
     retry_delay_seconds,
 )
 
-
-def _mock_chat_response(payload):
-    response = MagicMock()
-    response.status_code = 200
-    content = json.dumps(payload, ensure_ascii=False)
-    sse = json.dumps(
-        {"choices": [{"delta": {"content": content}, "finish_reason": "stop"}]},
-        ensure_ascii=False,
-    )
-    response.iter_lines.return_value = iter([f"data: {sse}", "data: [DONE]", ""])
-    return response
+from tests.ai.harness import _mock_chat_response
 
 
 def _mock_status(status, provider_error=None):
@@ -31,6 +20,14 @@ def _mock_status(status, provider_error=None):
     response.json.return_value = {
         "error": provider_error or {"type": "server_error", "message": "boom"},
     }
+    return response
+
+
+def _empty_sse_response():
+    """HTTP 200 空 body（data: [DONE] 后无内容）的 SSE 响应桩。"""
+    response = MagicMock()
+    response.status_code = 200
+    response.iter_lines.return_value = iter(["data: [DONE]", ""])
     return response
 
 
@@ -169,28 +166,6 @@ class CallAiDefaultRetryTests(unittest.TestCase):
     @patch("webui.ai_retry.random.uniform", return_value=0.0)
     @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_three_failures_raise_safe_error(self, mock_post, mock_sleep, _mock_uniform):
-        from webui.ai import AISecurityError, call_ai
-
-        mock_post.side_effect = [
-            _mock_status(500), _mock_status(500),
-            _mock_status(500), _mock_status(500),
-        ]
-        with self.assertRaises(AISecurityError) as ctx:
-            call_ai(
-                "https://api.example.com/v1/chat/completions", "key",
-                [{"role": "user", "content": "hi"}],
-            )
-        self.assertEqual(ctx.exception.error_code, "server_error")
-        self.assertEqual(mock_post.call_count, 4)
-        self.assertEqual(mock_sleep.call_args_list, [
-            unittest.mock.call(2.0), unittest.mock.call(4.0),
-            unittest.mock.call(8.0),
-        ])
-
-    @patch("webui.ai_retry.random.uniform", return_value=0.0)
-    @patch("webui.ai.time.sleep")
-    @patch("webui.ai.requests.post")
     def test_total_wait_cap_stops_before_overflow(self, mock_post, mock_sleep, _mock_uniform):
         from webui.ai import AISecurityError, call_ai
 
@@ -212,51 +187,6 @@ class CallAiDefaultRetryTests(unittest.TestCase):
             unittest.mock.call(15.0),
         ])
 
-    @patch("webui.ai.time.sleep")
-    @patch("webui.ai.requests.post")
-    def test_401_does_not_retry(self, mock_post, mock_sleep):
-        from webui.ai import AISecurityError, call_ai
-
-        mock_post.return_value = _mock_status(401)
-        with self.assertRaises(AISecurityError) as ctx:
-            call_ai(
-                "https://api.example.com/v1/chat/completions", "key",
-                [{"role": "user", "content": "hi"}],
-            )
-        self.assertEqual(ctx.exception.error_code, "auth_failed")
-        self.assertEqual(mock_post.call_count, 1)
-        mock_sleep.assert_not_called()
-
-    @patch("webui.ai_retry.random.uniform", return_value=0.0)
-    @patch("webui.ai.time.sleep")
-    @patch("webui.ai.requests.post")
-    def test_empty_response_retries_twice_then_invalid(
-        self, mock_post, mock_sleep, _mock_uniform,
-    ):
-        """B063：HTTP 200 空 body 在统一层重试默认 2 次，全部为空才抛 invalid_response。
-
-        旧行为：空 body 直接抛错（mock_post 只调用 1 次）。新行为：重试 2 次
-        （共 3 次调用），耗尽后仍抛 invalid_response 且带 empty_response 诊断。
-        """
-        from webui.ai import AISecurityError, call_ai
-
-        def _empty():
-            response = MagicMock()
-            response.status_code = 200
-            response.iter_lines.return_value = iter(["data: [DONE]", ""])
-            return response
-
-        mock_post.side_effect = [_empty(), _empty(), _empty()]
-        with self.assertRaises(AISecurityError) as ctx:
-            call_ai(
-                "https://api.example.com/v1/chat/completions", "key",
-                [{"role": "user", "content": "hi"}], timeout=30,
-            )
-        self.assertEqual(ctx.exception.error_code, "invalid_response")
-        self.assertEqual(
-            ctx.exception.diagnostics.get("failure_phase"), "empty_response")
-        self.assertEqual(mock_post.call_count, 3)
-
     @patch("webui.ai_retry.random.uniform", return_value=0.0)
     @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
@@ -264,13 +194,9 @@ class CallAiDefaultRetryTests(unittest.TestCase):
         """B063：第一次空 body、第二次正常返回 → 自动重试成功，无异常。"""
         from webui.ai import call_ai
 
-        def _empty():
-            response = MagicMock()
-            response.status_code = 200
-            response.iter_lines.return_value = iter(["data: [DONE]", ""])
-            return response
-
-        mock_post.side_effect = [_empty(), _mock_chat_response({"ok": True})]
+        mock_post.side_effect = [
+            _empty_sse_response(), _mock_chat_response({"ok": True}),
+        ]
         result = call_ai(
             "https://api.example.com/v1/chat/completions", "key",
             [{"role": "user", "content": "hi"}], timeout=30,

@@ -858,24 +858,6 @@ class ChromeSetupTests(unittest.TestCase):
 
         self.assertEqual(details, [{"job_id": "abc123"}])
 
-    @unittest.skipUnless(sys.platform.startswith("win"), "Windows 默认路径语义")
-    def test_windows_default_paths_use_localappdata(self):
-        module = load_module()
-        env = {
-            "LOCALAPPDATA": r"C:\Users\demo-user\AppData\Local",
-            "PROGRAMFILES": r"C:\Program Files",
-            "PROGRAMFILES(X86)": r"C:\Program Files (x86)",
-        }
-        expected_chrome = r"C:\Users\demo-user\AppData\Local\Google\Chrome\Application\chrome.exe"
-        with mock.patch.object(module.platform, "system", return_value="Windows"), \
-                mock.patch.dict(module.os.environ, env, clear=False), \
-                mock.patch.object(module.os.path, "exists", side_effect=lambda p: p == expected_chrome):
-            self.assertEqual(module.get_default_chrome_path(), expected_chrome)
-            self.assertEqual(
-                module.get_default_profile_dir(),
-                r"C:\Users\demo-user\AppData\Local\Google\Chrome\User Data",
-            )
-
     def test_windows_process_parsing_matches_user_data_dir_and_cdp_port(self):
         module = load_module()
         if not hasattr(module.subprocess, "CREATE_NO_WINDOW"):

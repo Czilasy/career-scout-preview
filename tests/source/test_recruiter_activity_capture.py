@@ -125,14 +125,18 @@ class ZhilianStaffMergeTests(unittest.TestCase):
         self.assertEqual(merge_staff_fields({}, None), {})
 
     def test_merged_payload_normalizes_to_known_fact(self):
+        ts = time.time() * 1000 - 10 * 86400 * 1000
         merged = merge_staff_fields(
-            {}, {"staffLastOnlineMs": time.time() * 1000 - 10 * 86400 * 1000,
-                 "recruiter_activity_text": "今日活跃"},
+            {}, {"staffLastOnlineMs": ts, "recruiter_activity_text": "今日活跃"},
         )
         fact = normalize_detail_activity("zhilian", merged)
         self.assertTrue(fact["known"])
         self.assertEqual(fact["source"], "zhilian")
+        # 040 批三迁移：文本展示、原始时间戳与上界天数（原 test_recruiter_activity 断言）
+        self.assertEqual(fact["text"], "今日活跃")
+        self.assertAlmostEqual(fact["last_online_ms"], ts, delta=1)
         self.assertAlmostEqual(fact["age_lower_days"], 10.0, delta=0.01)
+        self.assertAlmostEqual(fact["age_upper_days"], 10.0, delta=0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +163,10 @@ def _exec_config():
     )
 
 
-class PipelineDetailExtraMergeTests(unittest.TestCase):
-    def _run(self, jobs, outcomes, platform="boss"):
+class _FetchDetailsRunMixin:
+    """详情链路测试公共运行器：临时产物目录 + Chrome 就绪桩 + 可传 store。"""
+
+    def _run(self, jobs, outcomes, platform="boss", store=None):
         from webui.pipeline_exec_details import fetch_job_details
         source = _FakeSource(outcomes, platform=platform)
         with tempfile.TemporaryDirectory() as tmp, \
@@ -168,9 +174,11 @@ class PipelineDetailExtraMergeTests(unittest.TestCase):
                         return_value=(True, "")):
             return fetch_job_details(
                 jobs, source, artifact_dir=tmp,
-                execution_config=_exec_config(),
+                execution_config=_exec_config(), store=store,
             )
 
+
+class PipelineDetailExtraMergeTests(_FetchDetailsRunMixin, unittest.TestCase):
     def test_activity_merged_into_extra(self):
         jobs = [{"platform_job_id": "1", "job_id": "1", "title": "A"}]
         outcomes = {"1": SourceOutcome.success(
@@ -229,19 +237,8 @@ class _RecordingStore:
         self.calls.append((platform, platform_job_id, patch))
 
 
-class PipelineDetailStorePersistTests(unittest.TestCase):
+class PipelineDetailStorePersistTests(_FetchDetailsRunMixin, unittest.TestCase):
     """fetch_job_details(store=...) → update_job_extra 岗位目录持久化（028 B084）。"""
-
-    def _run(self, jobs, outcomes, platform="boss", store=None):
-        from webui.pipeline_exec_details import fetch_job_details
-        source = _FakeSource(outcomes, platform=platform)
-        with tempfile.TemporaryDirectory() as tmp, \
-             mock.patch("webui.pipeline_exec.ensure_chrome_ready",
-                        return_value=(True, "")):
-            return fetch_job_details(
-                jobs, source, artifact_dir=tmp,
-                execution_config=_exec_config(), store=store,
-            )
 
     def test_store_receives_normalized_fact(self):
         store = _RecordingStore()

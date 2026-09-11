@@ -127,12 +127,8 @@ class DetailBudgetTests(unittest.TestCase):
         budgets = allocate_detail_budget(query_count=3, total_budget=60)
         self.assertEqual(sum(budgets), 60)
         self.assertEqual(len(budgets), 3)
-
-    def test_single_query_gets_full_budget(self):
-        from webui.workbench import allocate_detail_budget
-
-        budgets = allocate_detail_budget(query_count=1, total_budget=60)
-        self.assertEqual(budgets, [60])
+        # 040 批三合并：单查询边界拿满预算（原 test_single_query_gets_full_budget）
+        self.assertEqual(allocate_detail_budget(query_count=1, total_budget=60), [60])
 
 
 class CardProjectionTests(unittest.TestCase):

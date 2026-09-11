@@ -22,6 +22,20 @@ import requests as real_requests
 SCRIPT_PATH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "boss_cdp_raw.py"
 
 
+def fake_env_check_items():
+    """四行环境检查夹具（040 批三：Web 侧 /api/env-check 与 runtime 测试共用）。"""
+    return ([
+        {"id": "browsers", "name": "Chromium 浏览器", "status": "ok",
+         "detail": "找到 Chrome ✅", "fix": None},
+        {"id": "deps", "name": "Python 依赖", "status": "ok",
+         "detail": "requests / websocket 可导入", "fix": None},
+        {"id": "cdp", "name": "专用浏览器已启动", "status": "fail",
+         "detail": "无法连接 127.0.0.1:9222", "fix": "启动专用浏览器"},
+        {"id": "boss_login", "name": "BOSS 登录状态", "status": "skip",
+         "detail": "跳过", "fix": None},
+    ], False)
+
+
 def load_module():
     """加载 boss_cdp_raw 模块，mock 掉 websocket/requests 两个可选依赖。
 
@@ -116,6 +130,13 @@ class BrowserDetectionTests(unittest.TestCase):
             self.CHROME_LOCAL: True, self.EDGE_LOCAL: True,
         })
         self.assertEqual(path, self.CHROME_LOCAL)
+        # 040 批三 T056 迁移：默认配置目录跟随 Chrome 安装位置
+        # （原 test_chrome_setup.test_windows_default_paths_use_localappdata 独有断言）
+        with self._within_windows_env(module, {self.CHROME_LOCAL: True}):
+            self.assertEqual(
+                module.get_default_profile_dir(),
+                r"C:\Users\demo\AppData\Local\Google\Chrome\User Data",
+            )
 
     @unittest.skipUnless(sys.platform.startswith("win"), "Windows 路径探测语义")
     def test_default_path_falls_back_to_edge(self):
@@ -249,16 +270,8 @@ class EnvCheckApiTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_env_check_returns_grouped_items(self):
-        with mock.patch("scripts.boss.smoke.collect_check_items", return_value=([
-            {"id": "browsers", "name": "Chromium 浏览器", "status": "ok",
-             "detail": "找到 Chrome ✅", "fix": None},
-            {"id": "deps", "name": "Python 依赖", "status": "ok",
-             "detail": "requests / websocket 可导入", "fix": None},
-            {"id": "cdp", "name": "专用浏览器已启动", "status": "fail",
-             "detail": "无法连接 127.0.0.1:9222", "fix": "启动专用浏览器"},
-            {"id": "boss_login", "name": "BOSS 登录状态", "status": "skip",
-             "detail": "跳过", "fix": None},
-        ], False)):
+        with mock.patch("scripts.boss.smoke.collect_check_items",
+                        return_value=fake_env_check_items()):
             payload = self.client.get("/api/env-check").get_json()
 
         self.assertTrue(payload["ok"])

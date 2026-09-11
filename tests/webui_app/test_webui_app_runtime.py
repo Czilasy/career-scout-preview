@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 from webui.app import create_app
 
+from tests.test_env_check import fake_env_check_items
+
 
 class ChromeAccountProfileSwitchTests(unittest.TestCase):
     """账号切换时，端口上旧账号的 Chrome 必须被替换而不是复用。"""
@@ -615,10 +617,10 @@ class RunSearchAllFailTests(unittest.TestCase):
         self.assertEqual(result.get("integrity", {}).get("conclusion"), "partial")
         self.assertEqual(result["total_scraped"], 1)
 
-    @staticmethod
-    def _tmp_dir():
-        import tempfile
-        return tempfile.mkdtemp(prefix="boss_test_")
+    def _tmp_dir(self):
+        tmp = tempfile.TemporaryDirectory(prefix="boss_test_")
+        self.addCleanup(tmp.cleanup)
+        return tmp.name
 
 
 class AdvancedSettingsContractTests(unittest.TestCase):
@@ -1863,23 +1865,11 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
         client.environ_base["HTTP_X_BOSS_TOKEN"] = token
         return app, client
 
-    def _fake_check_items(self):
-        return ([
-            {"id": "browsers", "name": "Chromium 浏览器", "status": "ok",
-             "detail": "找到 Chrome ✅", "fix": None},
-            {"id": "deps", "name": "Python 依赖", "status": "ok",
-             "detail": "requests / websocket 可导入", "fix": None},
-            {"id": "cdp", "name": "专用浏览器已启动", "status": "fail",
-             "detail": "无法连接 127.0.0.1:9222", "fix": "启动专用浏览器"},
-            {"id": "boss_login", "name": "BOSS 登录状态", "status": "skip",
-             "detail": "跳过", "fix": None},
-        ], False)
-
     def test_source_mode_returns_runtime_mode_source(self):
         """源码模式：runtime_mode='source'，local 组无 webview2 项。"""
         app, client = self._make_app("source")
         with mock.patch("scripts.boss.smoke.collect_check_items",
-                        return_value=self._fake_check_items()):
+                        return_value=fake_env_check_items()):
             payload = client.get("/api/env-check").get_json()
         self.assertEqual(payload["runtime_mode"], "source")
         local_items = next(g for g in payload["groups"] if g["id"] == "local")["items"]
@@ -1890,7 +1880,7 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
         """EXE 模式：runtime_mode='exe'。"""
         app, client = self._make_app("exe")
         with mock.patch("scripts.boss.smoke.collect_check_items",
-                        return_value=self._fake_check_items()), \
+                        return_value=fake_env_check_items()), \
                 mock.patch("webui.desktop_runtime.check_webview2",
                            return_value={"installed": True, "available": True,
                                          "version": "120.0.0.0", "detail": "已安装"}):
@@ -1901,7 +1891,7 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
         """EXE 模式：deps 项名称改「内置运行时」，状态恒 ok，fix 为 null。"""
         app, client = self._make_app("exe")
         with mock.patch("scripts.boss.smoke.collect_check_items",
-                        return_value=self._fake_check_items()), \
+                        return_value=fake_env_check_items()), \
                 mock.patch("webui.desktop_runtime.check_webview2",
                            return_value={"installed": True, "available": True,
                                          "version": "120.0.0.0", "detail": "已安装"}):
@@ -1916,7 +1906,7 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
         """EXE 模式：local 组含 webview2 项（注入检测替身）。"""
         app, client = self._make_app("exe")
         with mock.patch("scripts.boss.smoke.collect_check_items",
-                        return_value=self._fake_check_items()), \
+                        return_value=fake_env_check_items()), \
                 mock.patch("webui.desktop_runtime.check_webview2",
                            return_value={"installed": True, "available": True,
                                          "version": "120.0.0.0", "detail": "已安装 WebView2"}):
@@ -1930,7 +1920,7 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
         """EXE 模式：webview2 未安装时 status=fail，fix 文案含「安装 WebView2」。"""
         app, client = self._make_app("exe")
         with mock.patch("scripts.boss.smoke.collect_check_items",
-                        return_value=self._fake_check_items()), \
+                        return_value=fake_env_check_items()), \
                 mock.patch("webui.desktop_runtime.check_webview2",
                            return_value={"installed": False, "available": True,
                                          "version": None, "detail": "未检测到 WebView2"}):
@@ -1944,7 +1934,7 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
         # 016：冷却功能删除；env-check 不再返回 cooldowns 字段
         app, client = self._make_app("source")
         with mock.patch("scripts.boss.smoke.collect_check_items",
-                        return_value=self._fake_check_items()):
+                        return_value=fake_env_check_items()):
             payload = client.get("/api/env-check").get_json()
         self.assertNotIn("cooldowns", payload)
 

@@ -1,6 +1,5 @@
 """健康流程语义守恒合同测试（027 自 tests/test_healthy_pipeline.py 拆出）。"""
 import os
-import json
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor

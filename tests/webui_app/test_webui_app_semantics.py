@@ -15,7 +15,6 @@ from tests.test_cross_platform_dedupe import (  # noqa: E402
     _wait_for_pipeline_task,
     _zl_job,
 )
-from tests.test_cross_platform_dedupe import EXTRA_KEY  # noqa: E402
 
 
 # ======================================================================

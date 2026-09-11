@@ -558,6 +558,15 @@ class Migration27SchemaTests(unittest.TestCase):
             row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
         }
 
+    def _jobs_index_sql(self, conn) -> str:
+        """jobs 相关索引 SQL 拼接（小写），供索引唯一性断言复用。"""
+        return " ".join(
+            row["sql"] for row in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='jobs'"
+            )
+            if row["sql"]
+        ).lower()
+
     def test_jobs_has_platform_and_dual_identity_fields(self):
         """jobs 必须新增 platform、platform_job_id、experience、degree、extra_json。"""
         store = TaskStore(self.db_path)
@@ -724,13 +733,7 @@ class Migration27SchemaTests(unittest.TestCase):
         """jobs 上必须创建 (platform, platform_job_id) 部分唯一索引，且 platform_job_id IS NOT NULL。"""
         store = TaskStore(self.db_path)
         with store._connection() as conn:
-            indexes = [
-                row["sql"] for row in conn.execute(
-                    "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='jobs'"
-                )
-                if row["sql"]
-            ]
-        joined = " ".join(indexes).lower()
+            joined = self._jobs_index_sql(conn)
         self.assertIn("platform", joined)
         self.assertIn("platform_job_id", joined)
         self.assertIn("unique", joined)
@@ -801,13 +804,8 @@ class Migration27SchemaTests(unittest.TestCase):
             schema = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'"
             ).fetchone()
-            indexes = [
-                row["sql"] for row in conn.execute(
-                    "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='jobs'"
-                )
-                if row["sql"]
-            ]
-        joined = (str(schema["sql"]) + " " + " ".join(indexes)).lower()
+            indexes_sql = self._jobs_index_sql(conn)
+        joined = (str(schema["sql"]).lower() + " " + indexes_sql)
         self.assertIn("canonical_url", joined)
         self.assertIn("unique", joined)
 

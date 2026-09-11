@@ -3,7 +3,6 @@ import pathlib
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 from webui.app import create_app
 from webui.result_rounds import (

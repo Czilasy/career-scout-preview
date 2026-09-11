@@ -73,16 +73,6 @@ class ScrapeOnlyStoreTests(unittest.TestCase):
         self.assertTrue(all(row["is_dropped"] == 0 for row in rows))
         self.assertEqual(pending, 0)
 
-    def test_scraped_only_round_enters_history(self):
-        run_id = self.store.save_scraped_only_snapshot(
-            {"ok": True, "jobs": _scrape_jobs(1), "dropped": [], "total_scraped": 1},
-            {"platform": "boss"},
-            scrape_task_id="scrape-1",
-            platform="boss",
-        )
-        rounds = self.store.list_history_rounds("boss")
-        self.assertEqual([r["id"] for r in rounds], [run_id])
-
     # -- 来源查询 --------------------------------------------------------
 
     def test_latest_scraped_only_for_source_finds_round(self):

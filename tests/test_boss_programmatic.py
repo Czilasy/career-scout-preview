@@ -23,7 +23,6 @@ from unittest import mock
 from scripts.boss import cdp_session, city_map, detail_analyze, detail_scrape
 from scripts.boss import login as boss_login
 from scripts.boss import rate_limit, runtime, search
-from scripts.boss import constants as boss_constants
 
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "boss_cdp_raw.py"

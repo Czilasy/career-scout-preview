@@ -1,19 +1,12 @@
 """ZhilianCdpSource 抓取合同测试（027 自 tests/test_source.py 拆出）。"""
-import json
 import unittest
 from unittest import mock
 
 from scripts.zhilian import cdp as zhilian_cdp
 from scripts.zhilian import search as zhilian_search
 from webui.source import (
-    BossCdpSource,
-    FakeJobSource,
-    JobSource,
-    PREFLIGHT_RETRY_DELAY_SECONDS,
-    SAFE_FAILURE_CODES,
     SourceCircuitBreaker,
     SourceOutcome,
-    _normalize_job_fields,
 )
 
 from webui.source import ZhilianCdpSource

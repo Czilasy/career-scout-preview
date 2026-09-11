@@ -434,7 +434,6 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
 
     def test_constructor_accepts_in_process_false(self):
         """in_process 参数默认 False。"""
-        BossCdpSource.__new__(BossCdpSource)
         # 只验证签名接受参数，不触发依赖加载
         import inspect
         sig = inspect.signature(BossCdpSource.__init__)
@@ -1230,6 +1229,8 @@ class RiskSignalClassificationTests(unittest.TestCase):
         self.assertEqual(_classify_failed_code(10, ""), "source_status_unclear")
         self.assertEqual(
             _classify_failed_code(10, "旧脚本无失败行"), "source_status_unclear")
+        # 040 批三迁移：未知退出码兜底（原 test_webui_app_core 断言）
+        self.assertEqual(_classify_failed_code(99, "unknown"), "source_unknown_error")
 
     def test_exit_1_loose_login_words_not_login_required(self):
         """退出码 1 只认高置信短语，单个“登录/login/cookie”字眼不再误判。"""

@@ -80,7 +80,7 @@ class LoginStateCacheTests(unittest.TestCase):
 
     def test_invalidate_all_platforms(self):
         cache.write_login_state("acc1", "boss", "logged_in")
-        cache.write_login_state("acc1", "zhilian", "restricted")
+        cache.write_login_state("acc1", "zhilian", "not_logged_in")
         cache.invalidate_login_state("acc1")
         self.assertIsNone(cache.read_cached_state("acc1", "boss"))
         self.assertIsNone(cache.read_cached_state("acc1", "zhilian"))

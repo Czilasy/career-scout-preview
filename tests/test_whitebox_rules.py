@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import unittest
 
 from webui.whitebox_rules import reduce_conclusion
@@ -118,7 +119,11 @@ class WhiteboxRuleTests(unittest.TestCase):
     def test_reduction_is_idempotent(self):
         plan = _plan("a")
         units = [_unit("a")]
-        self.assertEqual(reduce_conclusion(plan, units), reduce_conclusion(plan, units))
+        snapshot = copy.deepcopy(units)
+        first = reduce_conclusion(plan, units)
+        second = reduce_conclusion(plan, units)
+        self.assertEqual(second, first, "重复归约结果必须一致")
+        self.assertEqual(units, snapshot, "归约不得就地修改输入单元")
 
 
 if __name__ == "__main__":

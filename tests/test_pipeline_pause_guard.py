@@ -16,7 +16,6 @@
       已 immediate 再调不报错。
 """
 
-import json
 import sys
 import tempfile
 import threading
@@ -137,10 +136,6 @@ class FetchJobDetailsRescueTests(unittest.TestCase):
                 guard=self.guard,
                 batch_key_prefix="jd-t1-0",
             )
-
-    @staticmethod
-    def _make_source():
-        return _BaseFakeSource()
 
     def test_rescued_jobs_kept_even_when_all_retries_fail(self):
         """T001：重抓全失败（第 3 次 giveup）时，抢救出的已抓仍保全。"""
@@ -368,7 +363,9 @@ class RunJdStageCheckpointTests(unittest.TestCase):
 
     def _run_stage(self, ctx, resume_jd, survivor_job_ids):
         from webui.runners.ai_screen_jd import run_jd_stage
-        jd_path = str(Path(tempfile.mkdtemp()) / "checkpoint.json")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        jd_path = str(Path(tmp.name) / "checkpoint.json")
         save_jd_checkpoint = mock.Mock()
         handle_user_stop = mock.Mock()
         survivors = [{"job_id": jid, "title": f"J{jid}"} for jid in survivor_job_ids]

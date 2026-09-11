@@ -7,14 +7,10 @@ data.  Keep all samples generic and non-identifiable.
 
 from __future__ import annotations
 
-import json
 import pathlib
 import tempfile
 import uuid
 from contextlib import contextmanager
-
-
-FIXTURES_DIR = pathlib.Path(__file__).resolve().parent / "fixtures"
 
 
 def make_temp_root():
@@ -50,8 +46,8 @@ def sample_resume_text():
     )
 
 
-def sample_pdf_bytes(text: str | None = None):
-    """Build a minimal single-page PDF containing *text* using pypdf."""
+def sample_pdf_bytes():
+    """Build a minimal single-page PDF using pypdf."""
     from pypdf import PdfWriter
 
     writer = PdfWriter()
@@ -127,11 +123,6 @@ def sample_job(job_id=None, title="Python 后端工程师", company="示例科�
     }
 
 
-def sample_jobs(count=5):
-    """Return *count* BOSS-shaped jobs with distinct ids."""
-    return [sample_job(job_id=f"job-{i:03d}") for i in range(count)]
-
-
 def sample_detail(job_id="job-000"):
     """A single BOSS-shaped detail record with JD text."""
     return {
@@ -140,18 +131,3 @@ def sample_detail(job_id="job-000"):
         "参与微服务架构设计，编写单元测试，与前端协作交付 API。",
         "skill_tags": ["Python", "FastAPI", "Redis"],
     }
-
-
-def sample_details(job_ids):
-    """Return detail records for each job_id."""
-    return [sample_detail(jid) for jid in job_ids]
-
-
-def write_json_file(path: pathlib.Path, payload):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-
-
-def load_fixture(name: str):
-    """Load a JSON fixture from tests/fixtures/."""
-    return json.loads((FIXTURES_DIR / name).read_text(encoding="utf-8"))

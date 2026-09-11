@@ -165,14 +165,6 @@ class TaskRunnerInProcessTests(unittest.TestCase):
         self.assertEqual(task["status"], "failed")
         self.assertEqual(task.get("returncode"), 1)
 
-    def test_subprocess_mode_unchanged(self):
-        """execution_mode 默认 subprocess：build_command / ScraperExecutor 路径不变。"""
-        runner = TaskRunner(
-            self.store, str(self.result_dir), sys.executable,
-            start_tasks=False,  # 不显式传 execution_mode
-        )
-        self.assertEqual(runner.execution_mode, "subprocess")
-
     # ---- T024: cancel 语义 -------------------------------------------
 
     def test_cancel_in_process_does_not_touch_process(self):

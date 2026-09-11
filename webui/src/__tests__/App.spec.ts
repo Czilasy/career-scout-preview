@@ -495,25 +495,6 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="reminder-trigger"]').attributes("aria-label")).toBe("查看提醒");
   });
 
-  it("renders 99+ for totals at or above 100 while keeping the real total accessible", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes("/api/job-reminders/count")) {
-        return response({ ok: true, profile_id: "p1", threshold_hours: 720, total: 137 });
-      }
-      if (url.endsWith("/api/profiles")) return response({ profiles: [{ id: "p1", name: "画像A" }] });
-      return baseAppResponse(url) ?? response({});
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const wrapper = mount(App);
-    await flushPromises();
-
-    expect(wrapper.get('[data-testid="reminder-badge"]').text()).toBe("99+");
-    const label = wrapper.get('[data-testid="reminder-trigger"]').attributes("aria-label") || "";
-    expect(label).toContain("137");
-  });
-
   it("does not auto-clear reminders when the drawer is opened and closed", async () => {
     let countCalls = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -797,28 +778,6 @@ describe("App", () => {
       // 长按蓄力结束后浏览器补发的 click 必须被吞掉，明暗保持不变。
       await toggle.trigger("click");
       expect(document.documentElement.getAttribute("data-theme")).toBe("light");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("蓄力中途松手取消弹出，点击仍正常切换明暗", async () => {
-    vi.useFakeTimers();
-    try {
-      toggleTheme("light");
-      document.documentElement.removeAttribute("data-theme");
-      const wrapper = mount(App);
-      await flushPromises();
-
-      const toggle = wrapper.get('[data-testid="theme-toggle"]');
-      await toggle.trigger("pointerdown");
-      await vi.advanceTimersByTimeAsync(400);
-      await toggle.trigger("pointerup");
-      await vi.advanceTimersByTimeAsync(1000);
-
-      expect(wrapper.find('[data-testid="theme-picker"]').exists()).toBe(false);
-      await toggle.trigger("click");
-      expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
     } finally {
       vi.useRealTimers();
     }

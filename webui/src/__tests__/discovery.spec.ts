@@ -359,7 +359,6 @@ describe("platform state (T502)", () => {
     state.setDraftPlatform(draft);
     state.setTaskPlatform(task);
     state.setResultPlatform(result);
-    expect(true).toBe(true);
   });
 });
 
@@ -415,11 +414,8 @@ describe("platform schema race (T504)", () => {
     expect(loader.pendingPlatform).toBeNull();
     expect(loader.error).toBeNull();
     // 字段与最终平台匹配（boss→stage，zhilian→company_nature）
-    if (lastPlatform === "boss") {
-      expect(loader.data?.fields[0]?.key).toBe("stage");
-    } else {
-      expect(loader.data?.fields[0]?.key).toBe("company_nature");
-    }
+    expect(lastPlatform).toBe("zhilian");
+    expect(loader.data?.fields[0]?.key).toBe("company_nature");
   });
 
   it("旧请求 reject 不污染当前 error 状态（错误归属）", async () => {

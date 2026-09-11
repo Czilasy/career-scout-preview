@@ -110,6 +110,7 @@ class ScraperExecutorTests(unittest.TestCase):
         finally:
             timer.cancel()
         self.assertEqual(result.failure_code, "process_cancelled")
+        self.assertFalse(result.ok)
 
     def test_output_limit_terminates_noisy_process(self):
         forwarded = []
@@ -203,21 +204,6 @@ class CancelProcessTreeTests(unittest.TestCase):
                 child_alive = False
             self.assertFalse(child_alive,
                              f"child PID {child_pid} still alive after cancel — process tree not terminated")
-
-    def test_cancel_returns_process_cancelled_failure_code(self):
-        """cancel_event must surface as failure_code='process_cancelled'."""
-        cancelled = threading.Event()
-        timer = threading.Timer(0.1, cancelled.set)
-        timer.start()
-        try:
-            result = ScraperExecutor().execute(
-                [sys.executable, "-c", "import time; time.sleep(30)"],
-                timeout_seconds=10, cancel_event=cancelled,
-            )
-        finally:
-            timer.cancel()
-        self.assertEqual(result.failure_code, "process_cancelled")
-        self.assertFalse(result.ok)
 
     def test_cancel_after_completion_does_not_raise(self):
         """Setting cancel_event after the process exits must not crash execute()."""

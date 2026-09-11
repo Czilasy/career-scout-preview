@@ -9,7 +9,6 @@
 - T039 主编排：依赖全部可注入；正常路径返回 0；closing 触发保存与取消
 """
 
-import json
 import sys
 import tempfile
 import unittest
@@ -460,9 +459,11 @@ class ShellOrchestrationTests(unittest.TestCase):
         )
         calls = webview_mod.create_window_calls
         self.assertTrue(calls)
-        self.assertEqual(
-            calls[0]["frameless"], sys.platform == "win32",
-        )
+        # 按运行平台显式断言（不复制生产表达式自证）
+        if sys.platform == "win32":
+            self.assertIs(calls[0]["frameless"], True, "Windows 必须无边框")
+        else:
+            self.assertIs(calls[0]["frameless"], False, "非 Windows 必须保留原生标题栏")
 
     def test_window_easy_drag_false(self):
         """036 无边框拖拽：easy_drag=False（T021 真机修复，全局 mousedown 会
@@ -472,15 +473,6 @@ class ShellOrchestrationTests(unittest.TestCase):
             _make_deps(webview_module=webview_mod)
         )
         self.assertFalse(webview_mod.create_window_calls[0]["easy_drag"])
-
-    def test_js_api_receives_window_reference(self):
-        """036 窗口控制：js_api 在窗口创建后被注入 window 引用（下划线属性）。"""
-        webview_mod = _FakeWebview()
-        js_api = desktop.DesktopJsApi()
-        deps = _make_deps(webview_module=webview_mod, js_api=js_api)
-        desktop.run_desktop_shell(deps)
-        self.assertIsNotNone(js_api._window)
-        self.assertIs(js_api._window, webview_mod.windows[0])
 
     def test_js_api_window_not_publicly_reachable(self):
         """036 回归防护：Window 引用不得出现在任何公开属性。pywebview 页面

@@ -11,6 +11,9 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
+// 无进行中任务的统一桩响应（多处用例共用同一载荷，避免逐处字面量漂移）。
+const NO_TASK_PAYLOAD = { ok: true, has_task: false };
+
 describe("DiscoveryView", () => {
   beforeEach(() => {
     // 确保当前测试引用的 api 模块实例处于已验证状态（setup.ts 的验证可能落在另一个模块实例上）
@@ -65,7 +68,7 @@ describe("DiscoveryView", () => {
   it("auto-grows the profile summary and hides the textarea scrollbar", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response({ labels: {} });
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -202,7 +205,7 @@ describe("DiscoveryView", () => {
         });
       }
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({
           ok: true,
@@ -287,7 +290,7 @@ describe("DiscoveryView", () => {
         });
       }
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({
           ok: true,
@@ -336,7 +339,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result") && url.includes("platform=boss")) {
         return response({
           ok: true,
@@ -443,7 +446,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result") && url.includes("platform=boss")) {
         return response({
           ok: true,
@@ -634,7 +637,7 @@ describe("DiscoveryView", () => {
       const url = String(input);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -701,7 +704,7 @@ describe("DiscoveryView", () => {
       const url = String(input);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "custom", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -1351,7 +1354,7 @@ describe("DiscoveryView", () => {
         const platform = url.includes("platform=boss") ? "boss" : "zhilian";
         return response({ ok: true, platform, city_mapping_version: 1, cities: [{ label: "上海", value: "上海" }] });
       }
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({
           ok: true, selection: "balanced", settings: {
@@ -1555,7 +1558,7 @@ describe("DiscoveryView", () => {
   it("T513 empty state: no task and no result renders the default BOSS draft platform without task progress", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -1627,7 +1630,7 @@ describe("DiscoveryView", () => {
       }
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -1648,7 +1651,7 @@ describe("DiscoveryView", () => {
   it("T513 failed state: a failed scrape start surfaces the failed task status", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [{ label: "上海", value: "上海" }] });
@@ -1691,7 +1694,7 @@ describe("DiscoveryView", () => {
   it("D7: login-required failure shows an account login guide that opens the accounts panel", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [{ label: "上海", value: "上海" }] });
@@ -1807,7 +1810,7 @@ describe("DiscoveryView", () => {
       }
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -1853,7 +1856,7 @@ describe("DiscoveryView", () => {
       }
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -1889,7 +1892,7 @@ describe("DiscoveryView", () => {
   it("T513 platform disabled: zhilian schema with enabled_for_new_tasks=false disables new task entry", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) {
         const platform = url.includes("platform=boss") ? "boss" : "zhilian";
@@ -1993,7 +1996,7 @@ describe("DiscoveryView", () => {
         // 轨迹浮窗自动加载事件：默认返回空轨迹。
         return response({ ok: true, events: [], next_after_sequence: 0 });
       }
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "custom", settings: {}, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -2229,7 +2232,7 @@ describe("DiscoveryView", () => {
   it("search panels are expanded by default, toggle together, and collapse on start", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -2293,7 +2296,7 @@ describe("DiscoveryView", () => {
     (globalThis as any).__setNarrowMatchMedia(true);
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -2340,7 +2343,7 @@ describe("DiscoveryView", () => {
   it("B040: search drawers stay collapsed when returning to step 2 while scraping", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -2386,7 +2389,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -2438,7 +2441,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -2546,7 +2549,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) {
         return response(url.includes("platform=zhilian") ? zhilianSchemaRich : bossSchemaRich);
@@ -2628,7 +2631,7 @@ describe("DiscoveryView", () => {
     let scrapeCount = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -2702,7 +2705,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
         return response({ ok: true, has_result: true, source_run_id: "run-results", status: "completed", result: { jobs: [], total_kept: 0, total_dropped: 0 } });
       }
@@ -2753,7 +2756,7 @@ describe("DiscoveryView", () => {
     let screenDone = false;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
         if (!screenDone) return response({ ok: true, has_result: false });
         if (url.includes("platform=zhilian")) {
@@ -2847,7 +2850,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       // 完成瞬间合并拉取恒为空：模拟快照尚未可见 / 请求瞬时失败的窗口
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
@@ -2922,7 +2925,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -3402,7 +3405,7 @@ describe("DiscoveryView", () => {
   it("013: dual resumable platforms ask which one to continue from 04", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
         if (url.includes("platform=zhilian")) {
           return response({
@@ -3471,7 +3474,7 @@ describe("DiscoveryView", () => {
   it("013: mixed states continue the only resumable platform from 04", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
         if (url.includes("platform=zhilian")) {
           return response({
@@ -3541,7 +3544,7 @@ describe("DiscoveryView", () => {
     const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(true);
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
         if (url.includes("platform=zhilian")) {
           return response({
@@ -3661,7 +3664,7 @@ describe("DiscoveryView", () => {
   it("B030: all view guides platform selection and single platform recrawls by its own run", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
         if (url.includes("platform=zhilian")) {
           return response({
@@ -3776,19 +3779,11 @@ describe("DiscoveryView", () => {
     await flushPromises();
   }
 
-  async function confirmProfileFromScreen(wrapper: ReturnType<typeof mount>) {
-    await wrapper.findAll("button").find((b) => b.text().includes("广泛抓取"))!.trigger("click");
-    await flushPromises();
-    await wrapper.get('[data-testid="profile-confirm"]').trigger("click");
-    await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
-    await flushPromises();
-  }
-
   function oneClickBase(overrides: Record<string, (url: string, init?: RequestInit) => Promise<Response> | Response> = {}) {
     return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (overrides[url]) return overrides[url](url, init);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(oneClickSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -4031,7 +4026,7 @@ describe("DiscoveryView", () => {
           result: { jobs: [{ job_id: "old-1", title: "旧岗位" }], total_kept: 1, total_dropped: 0, profile_summary: "3年Python后端候选人" },
         });
       }
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/filter-labels")) return response(oneClickSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
       if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
@@ -4471,7 +4466,7 @@ describe("DiscoveryView", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/api/session")) return response({ token: "test" });
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response({ labels: {} });
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -4513,7 +4508,7 @@ describe("DiscoveryView", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/api/session")) return response({ token: "test" });
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response({ labels: {} });
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -4606,7 +4601,7 @@ describe("DiscoveryView", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/api/session")) return response({ token: "test" });
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response({ labels: {} });
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -4667,7 +4662,7 @@ describe("DiscoveryView", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/api/session")) return response({ token: "test" });
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response({ labels: {} });
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -4973,27 +4968,6 @@ describe("DiscoveryView", () => {
       vi.unstubAllGlobals();
     });
 
-    it("暂停：步骤 3 只显示 继续 AI 筛选 + 结束并保存结果，无查看结果", async () => {
-      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.endsWith("/api/latest-running-task")) {
-          return response({ ok: true, has_task: true, task_id: "matrix-paused", kind: "ai_screen", status: "paused", platform: "boss", scrape_task_id: "scrape-m", scrape_completed: true, frozen_filters: { salary: ["406"] }, profile_summary: "画像", round_context: { platform: "boss", keywords: ["Python"], cities: ["上海"], screening_fields: { salary: ["406"] }, profile_summary: "画像", profile_facts: {}, scrape_task_id: "scrape-m", screen_run_id: "matrix-paused", status: "paused", resumable: true, has_frozen_filters: true } });
-        }
-        if (url.includes("/api/task-state/matrix-paused")) return response({ status: "paused", success_count: 1, fail_count: 0, unstarted_count: 1, total: 2 });
-        if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
-        if (url.includes("/api/filter-labels")) return response(bossSchema());
-        if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
-        if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
-        return response({});
-      });
-      vi.stubGlobal("fetch", fetchMock);
-      const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
-      await flushPromises();
-      expect(matrixButtonIds(wrapper)).toEqual(["continue-ai-screen", "finish-save-results"]);
-      expect(wrapper.find('[data-testid="view-screen-results"]').exists()).toBe(false);
-      vi.unstubAllGlobals();
-    });
-
     it.each(["boss", "zhilian"] as const)(
       "步骤 3 的 %s 详情筛选可以放弃本轮并回到上传页",
       async (platform) => {
@@ -5050,7 +5024,7 @@ describe("DiscoveryView", () => {
     it("结束保存后刷新（B078）：完成态自动新一轮，干净 01 页、无上一轮胶囊糊脸", async () => {
       const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+        if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
         if (url.includes("/api/latest-pipeline-result")) {
           if (url.includes("platform=zhilian")) return response({ ok: true, has_result: false });
           return response({
@@ -5088,7 +5062,7 @@ describe("DiscoveryView", () => {
   it("B074: dismissed capsule never reappears on platform/tab switches, only on new result epoch", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
         if (url.includes("platform=zhilian")) {
           return response({
@@ -5115,10 +5089,9 @@ describe("DiscoveryView", () => {
     await flushPromises();
     expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(true);
 
-    // 点「暂不处理」→ 胶囊隐藏
+    // 点「暂不处理」（隐藏断言由 PendingRecrawlCapsule.spec.ts 正本覆盖）
     await wrapper.get('[data-testid="pending-recrawl-dismiss"]').trigger("click");
     await flushPromises();
-    expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
 
     // 切平台（全部→智联→BOSS）→ count 抖动，胶囊不得重弹
     await wrapper.get('[data-testid="result-platform-filter-all"]').trigger("click");
@@ -5139,12 +5112,10 @@ describe("DiscoveryView", () => {
     await flushPromises();
     expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
 
-    // 切到 0 待确认平台视图：胶囊消失，且无绿色「已全部处理」对勾
+    // 切到 0 待确认平台视图：不重弹（绿色对勾否定断言由正本覆盖）
     await wrapper.get('[data-testid="result-platform-filter-zhilian"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="pending-recrawl-done"]').exists()).toBe(false);
-    expect(wrapper.text()).not.toContain("已全部处理");
     await wrapper.get('[data-testid="result-platform-filter-boss"]').trigger("click");
     await flushPromises();
 
@@ -5192,7 +5163,7 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
     return vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/api/latest-running-task")) {
-        return response(overrides.latestTask ?? { ok: true, has_task: false });
+        return response(overrides.latestTask ?? NO_TASK_PAYLOAD);
       }
       if (url.includes("/api/latest-pipeline-result")) {
         if (overrides.noHistory) return response({ ok: true, has_result: false });

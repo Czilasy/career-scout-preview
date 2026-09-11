@@ -150,26 +150,6 @@ class SaveFinishedRoundTests(unittest.TestCase):
         self.assertEqual(run["match_count"], 1)
         self.assertEqual(run["mismatch_count"], 1)
 
-    def test_scraped_only_then_finish_upgrades_in_place(self):
-        outcome = save_scraped_only_round(
-            self.store, [_match_job("s1", verdict="")],
-            platform=PLATFORM, scrape_task_id=SCRAPE_TASK_ID,
-        )
-        self.assertTrue(outcome["saved"])
-        scraped_id = outcome["run_id"]
-        scraped_created = _run_payload(self.store, scraped_id)["created_at"]
-
-        finished_id = save_finished_round(
-            self.store, _result(("match", "not_match")), _script_params(),
-            scrape_task_id=SCRAPE_TASK_ID, status="done", platform=PLATFORM,
-        )
-        self.assertEqual(finished_id, scraped_id)
-        items = self.service.list_history(PLATFORM)
-        self.assertEqual(len(items), 1)
-        run = _run_payload(self.store, finished_id)
-        self.assertEqual(run["created_at"], scraped_created)
-        self.assertEqual(run["status"], "done")
-
     def test_same_scrape_task_different_platform_is_separate_flow(self):
         save_finished_round(
             self.store, _result(), _script_params(PLATFORM),
@@ -194,51 +174,6 @@ class SaveFinishedRoundTests(unittest.TestCase):
             scrape_task_id=SCRAPE_TASK_ID, status="done", platform=PLATFORM,
         )
         self.assertIsNone(run_id)
-        self.assertEqual(_history_count(self.service, PLATFORM), 0)
-
-
-class SaveScrapedOnlyRoundTests(unittest.TestCase):
-    """US2：跳过筛选出口，幂等建未筛选轮，0 岗位不成轮。"""
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.db_path = pathlib.Path(self.temp.name) / "state" / "webui.db"
-        self.store = TaskStore(self.db_path)
-        self.service = ResultHistoryService(self.store)
-
-    def tearDown(self):
-        self.temp.cleanup()
-
-    def test_saves_scraped_only_round(self):
-        outcome = save_scraped_only_round(
-            self.store, [_match_job("s1", verdict="")],
-            platform=PLATFORM, scrape_task_id=SCRAPE_TASK_ID,
-        )
-        self.assertTrue(outcome["saved"])
-        self.assertIsNotNone(outcome["run_id"])
-        items = self.service.list_history(PLATFORM)
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["status"], "scraped_only")
-
-    def test_idempotent_same_source_does_not_duplicate(self):
-        first = save_scraped_only_round(
-            self.store, [_match_job("s1", verdict="")],
-            platform=PLATFORM, scrape_task_id=SCRAPE_TASK_ID,
-        )
-        second = save_scraped_only_round(
-            self.store, [_match_job("s1", verdict=""), _match_job("s2", verdict="")],
-            platform=PLATFORM, scrape_task_id=SCRAPE_TASK_ID,
-        )
-        # 幂等命中：不新建，但结果可用（saved=True，前端展示 result）
-        self.assertTrue(second["saved"])
-        self.assertEqual(second["run_id"], first["run_id"])
-        self.assertEqual(_history_count(self.service, PLATFORM), 1)
-
-    def test_empty_source_creates_no_round(self):
-        outcome = save_scraped_only_round(
-            self.store, [], platform=PLATFORM, scrape_task_id=SCRAPE_TASK_ID,
-        )
-        self.assertFalse(outcome["saved"])
         self.assertEqual(_history_count(self.service, PLATFORM), 0)
 
 

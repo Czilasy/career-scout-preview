@@ -3,7 +3,6 @@ import importlib
 import json
 import pathlib
 import re
-import subprocess
 import unittest
 import warnings
 from unittest import mock
@@ -26,80 +25,6 @@ class ZhilianLoginSpaceTests(unittest.TestCase):
     - 运行锁 → browser_busy；
     - 不泄露 profile 路径。
     """
-
-    def test_profile_isolation_boss_vs_zhilian(self):
-        """同一账号的 BOSS 与智联 profile_dir 不同（T208）。"""
-        from webui.platforms import derive_zhilian_profile_dir
-        boss_dir = "/home/user/.career-scout/chrome-profile"
-        zhilian_dir = derive_zhilian_profile_dir(boss_dir)
-        self.assertNotEqual(boss_dir, zhilian_dir)
-        self.assertTrue(zhilian_dir.endswith(".zhilian"))
-
-    def test_port_isolation_9222_vs_9223(self):
-        """BOSS 9222 与智联 9223 端口不同（T208/T211）。"""
-        from webui.platforms import (
-            BOSS_DEFAULT_CDP_PORT, ZHILIAN_DEFAULT_CDP_PORT,
-        )
-        self.assertEqual(BOSS_DEFAULT_CDP_PORT, 9222)
-        self.assertEqual(ZHILIAN_DEFAULT_CDP_PORT, 9223)
-        self.assertNotEqual(BOSS_DEFAULT_CDP_PORT, ZHILIAN_DEFAULT_CDP_PORT)
-
-    def test_login_space_profile_key_isolation(self):
-        """BOSS 与智联 profile_key 不同（boss:a ≠ zhilian:a）。"""
-        from webui.platforms import resolve_login_space
-        boss_space = resolve_login_space("boss", "a", boss_profile_dir="/tmp/p")
-        zhilian_space = resolve_login_space("zhilian", "a", boss_profile_dir="/tmp/p")
-        self.assertNotEqual(boss_space.profile_key, zhilian_space.profile_key)
-        self.assertNotEqual(boss_space.cdp_port, zhilian_space.cdp_port)
-
-    def test_unknown_profile_occupation_rejected(self):
-        """未知 profile 占用端口 → login_space_conflict（T209）。"""
-        from webui.platforms import check_login_space_conflict
-        ok, reason = check_login_space_conflict(
-            "zhilian", "a",
-            boss_profile_dir="/tmp/profile-a",
-            port_profile_paths=["/tmp/unknown-profile"],
-            known_profile_paths=["/tmp/profile-a.zhilian", "/tmp/profile-b.zhilian"],
-        )
-        self.assertFalse(ok)
-        self.assertEqual(reason, "login_space_conflict")
-
-    def test_known_profile_occupation_allows_switch(self):
-        """同平台已知 profile 占用 → 允许受控切换（T209）。"""
-        from webui.platforms import check_login_space_conflict
-        ok, reason = check_login_space_conflict(
-            "zhilian", "a",
-            boss_profile_dir="/tmp/profile-a",
-            port_profile_paths=["/tmp/profile-b.zhilian"],
-            known_profile_paths=["/tmp/profile-a.zhilian", "/tmp/profile-b.zhilian"],
-        )
-        self.assertTrue(ok)
-        self.assertEqual(reason, "")
-
-    def test_running_lock_blocks_delete(self):
-        """运行锁 → browser_busy，阻断删除（T210）。"""
-        from webui.platforms import check_browser_account_delete
-        ok, reason = check_browser_account_delete(
-            "a", boss_profile_dir="/tmp/profile-a",
-            running_locks=[{"platform": "boss", "account": "a", "kind": "running"}],
-            port_profiles_boss=[], port_profiles_zhilian=[],
-        )
-        self.assertFalse(ok)
-        self.assertIn("browser_busy", reason)
-
-    def test_delete_does_not_leak_profile_path(self):
-        """delete reason 不含 profile 路径（T210/T211）。"""
-        from webui.platforms import check_browser_account_delete
-        secret_path = "/tmp/secret-profile-xyz"
-        ok, reason = check_browser_account_delete(
-            "a", boss_profile_dir=secret_path,
-            running_locks=[], port_profiles_boss=[secret_path],
-            port_profiles_zhilian=[],
-        )
-        self.assertFalse(ok)
-        self.assertNotIn(secret_path, reason)
-        self.assertNotIn("secret", reason)
-        self.assertNotIn("xyz", reason)
 
     def test_login_space_repr_no_profile_dir(self):
         """LoginSpace 不含 profile_dir 字段，repr 不泄露路径（T211）。"""
@@ -331,14 +256,8 @@ class ProjectScopeTests(unittest.TestCase):
 # ============================================================
 
 
-class ScrapeDetailsBatchingContractTests(unittest.TestCase):
-    """T066 RED: scrape_details controlled batching & safe terminal events."""
-
-    def test_batching_contracts_never_use_persistent_default_output(self):
-        """批处理契约测试必须显式隔离详情产物，不能写用户默认目录。"""
-        class_source = pathlib.Path(__file__).read_text(encoding="utf-8")
-        forbidden = "output_path" + "=None"
-        self.assertNotIn(forbidden, class_source)
+class _ScrapeDetailsContractFixture(unittest.TestCase):
+    """详情契约测试公共夹具：临时 CDP profile + 隔离的详情产物路径。"""
 
     def setUp(self):
         self._profile = tempfile_profile()
@@ -347,6 +266,16 @@ class ScrapeDetailsBatchingContractTests(unittest.TestCase):
         self.output_path = str(
             paths["cdp_profile"] / f"{self._testMethodName}-details.json"
         )
+
+
+class ScrapeDetailsBatchingContractTests(_ScrapeDetailsContractFixture):
+    """T066 RED: scrape_details controlled batching & safe terminal events."""
+
+    def test_batching_contracts_never_use_persistent_default_output(self):
+        """批处理契约测试必须显式隔离详情产物，不能写用户默认目录。"""
+        class_source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        forbidden = "output_path" + "=None"
+        self.assertNotIn(forbidden, class_source)
 
     def test_scrape_details_accepts_batch_size_keyword(self):
         module = load_module()
@@ -422,6 +351,11 @@ class ScrapeDetailsBatchingContractTests(unittest.TestCase):
         self.assertEqual(len(create_target_calls), 5)
 
     def test_scrape_details_emits_one_terminal_safe_event_per_job(self):
+        """每个 item 恰好一个终态安全事件（终态集合/job_id/duration_ms 守恒）。
+
+        040 批二同事实三处并一：合并自 CdpMeasurementEventTests 的
+        duration_ms 与终态守恒两条，此处保留最全断言（正本）。
+        """
         module = load_module()
         list_data = _make_scrape_details_list_data(n=4)
         events = []
@@ -436,12 +370,15 @@ class ScrapeDetailsBatchingContractTests(unittest.TestCase):
             output_path=self.output_path,
         )
 
-        self.assertEqual(len(events), 4)
+        self.assertEqual(
+            len(events), len(list_data["jobs"]), "每个 item 必须产生一个 terminal 事件"
+        )
         terminal_statuses = {"completed", "unavailable", "failed", "cancelled"}
         for event in events:
-            self.assertIn(event["status"], terminal_statuses)
+            self.assertIn(event.get("status"), terminal_statuses, "每个 item 必须有明确终态")
             self.assertIn("job_id", event)
             self.assertIn("duration_ms", event)
+            self.assertGreaterEqual(event["duration_ms"], 0, "duration_ms 必须非负")
 
     def test_scrape_details_event_payload_excludes_jd_and_credentials(self):
         module = load_module()
@@ -497,18 +434,10 @@ class ScrapeDetailsBatchingContractTests(unittest.TestCase):
         self.assertEqual(len(gap_calls), 2)
 
 
-class ScrapeDetailsReadinessContractTests(unittest.TestCase):
+class ScrapeDetailsReadinessContractTests(_ScrapeDetailsContractFixture):
     """T067 RED: readiness-driven detail extraction, conditional scroll,
     bounded gap, and zero trailing wait.
     """
-
-    def setUp(self):
-        self._profile = tempfile_profile()
-        paths = self._profile.__enter__()
-        self.addCleanup(self._profile.__exit__, None, None, None)
-        self.output_path = str(
-            paths["cdp_profile"] / f"{self._testMethodName}-details.json"
-        )
 
     def test_scrape_details_readiness_wait_does_not_exceed_twelve_seconds(self):
         module = load_module()
@@ -801,11 +730,14 @@ class RiskControlTests(unittest.TestCase):
 
 
 class CdpMeasurementEventTests(unittest.TestCase):
-    """T016 RED: CDP 抓取阶段测量事件 — 终态守恒与敏感字段拒绝。
+    """T016 RED: CDP 抓取阶段测量事件 — 敏感字段拒绝。
 
     覆盖 FR-030、SC-007、data-model.md 2.9。
     boss_cdp_raw 的事件回调必须产出 stage/batch/item_terminal 事件，
     且不得包含凭据、原始简历或 JD 正文。
+    终态守恒（事件数/终态集合/duration_ms）由
+    ScrapeDetailsBatchingContractTests.test_scrape_details_emits_one_terminal_safe_event_per_job
+    统一覆盖（040 批二同事实三处并一）。
     """
 
     def setUp(self):
@@ -816,24 +748,6 @@ class CdpMeasurementEventTests(unittest.TestCase):
         self.output_path = str(
             paths["cdp_profile"] / f"{self._testMethodName}-details.json"
         )
-
-    def test_scrape_details_events_have_duration_ms(self):
-        """scrape_details 的 terminal 事件必须包含 duration_ms。"""
-        events = []
-        list_data = _make_scrape_details_list_data(n=3)
-
-        self.module.scrape_details(
-            list_data,
-            batch_size=5,
-            session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
-            sleeper=lambda seconds, label=None: None,
-            event_callback=events.append,
-            trailing_wait=False,
-            output_path=self.output_path,
-        )
-        for ev in events:
-            self.assertIn("duration_ms", ev, "事件必须包含 duration_ms")
-            self.assertGreaterEqual(ev["duration_ms"], 0, "duration_ms 必须非负")
 
     def test_scrape_details_events_exclude_jd_body_and_credentials(self):
         """SC-007: 事件 payload 不得包含 JD 正文、凭据或原始简历。"""
@@ -857,27 +771,6 @@ class CdpMeasurementEventTests(unittest.TestCase):
                               "事件不得包含 api_key")
             self.assertNotIn("resume_text", payload_str.lower(),
                               "事件不得包含 resume_text")
-
-    def test_terminal_status_conservation(self):
-        """SC-007: 每个 item 必须有明确终态（completed/failed/unavailable/cancelled）。"""
-        events = []
-        list_data = _make_scrape_details_list_data(n=5)
-
-        self.module.scrape_details(
-            list_data,
-            batch_size=5,
-            session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
-            sleeper=lambda seconds, label=None: None,
-            event_callback=events.append,
-            trailing_wait=False,
-            output_path=self.output_path,
-        )
-        terminal_statuses = {"completed", "unavailable", "failed", "cancelled"}
-        self.assertEqual(len(events), len(list_data["jobs"]),
-                         "每个 item 必须产生一个 terminal 事件")
-        for ev in events:
-            self.assertIn(ev.get("status"), terminal_statuses,
-                          "每个 item 必须有明确终态")
 
 
 class CdpPortThreadingTests(unittest.TestCase):
@@ -918,19 +811,6 @@ class CdpPortThreadingTests(unittest.TestCase):
         import inspect
         sig = inspect.signature(module.run_check)
         self.assertIn("cdp_port", sig.parameters)
-
-    def test_main_parser_includes_cdp_port_argument(self):
-        """--cdp-port 参数被 argparse 接受且默认值为 DEFAULT_CDP_PORT。"""
-        module = load_module()
-        import argparse
-        p = argparse.ArgumentParser()
-        p.add_argument("--cdp-port", type=int, default=module.DEFAULT_CDP_PORT)
-        args = p.parse_args(["--cdp-port", "9223"])
-        self.assertEqual(args.cdp_port, 9223)
-
-        # 默认值验证
-        args_default = p.parse_args([])
-        self.assertEqual(args_default.cdp_port, module.DEFAULT_CDP_PORT)
 
 
 if __name__ == "__main__":

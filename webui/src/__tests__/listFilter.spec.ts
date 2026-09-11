@@ -104,8 +104,6 @@ describe("filterJobs（合同 §2 组内 OR、组间 AND）", () => {
     expect(r2.map((item) => item.job_id)).toEqual(["d"]);
     const r3 = filterJobs(jobs, { ...emptyFilterState(), salary: ["lt5"] });
     expect(r3.map((item) => item.job_id)).toEqual([]);
-    expect(r2).not.toContain(jobs[2]);
-    expect(r2).not.toContain(jobs[4]);
   });
 
   it("filters by experience with exact band strings; missing experience passes nothing", () => {

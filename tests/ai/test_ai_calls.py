@@ -15,7 +15,6 @@ from tests.test_workbench_fixtures import (
     sample_ai_resume_response,
     sample_ai_rank_response,
     sample_ai_preference_response,
-    sample_resume_text,
 )
 
 from tests.ai.harness import _mock_chat_response, _mock_stream_raw
@@ -321,6 +320,8 @@ class CallAITests(unittest.TestCase):
                     [{"role": "user", "content": "hi"}])
 
         self.assertEqual(ctx.exception.error_code, "auth_failed")
+        # 040 批三合并：401 属鉴权失败，不得退避重试（原 test_ai_retry 用例）
+        self.assertEqual(mock_post.call_count, 1)
 
     @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")

@@ -11,7 +11,6 @@
 - ``set_account_rate_limited`` 撞墙写 + 自愈清。
 """
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,7 +21,6 @@ from webui.pipeline_exec_accounts import (
     DEFAULT_R1_QUOTA,
     DEFAULT_R2_QUOTA,
     R1_QUOTA_MAX,
-    R1_QUOTA_MIN,
     R2_QUOTA_MAX,
     R2_QUOTA_MIN,
     _normalize_pool,
@@ -30,7 +28,6 @@ from webui.pipeline_exec_accounts import (
     account_for_role,
     add_browser_account,
     assign_account_role,
-    delete_browser_account,
     has_selected_account,
     load_browser_accounts,
     parse_bool,

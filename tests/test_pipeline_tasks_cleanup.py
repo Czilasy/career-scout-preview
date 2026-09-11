@@ -32,15 +32,16 @@ class PipelineTasksCleanupTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_cleanup_schedules_timer_on_terminal_status(self):
-        """终态后 30 分钟定时器被注册，daemon=True。"""
+        """终态后 30 分钟定时器被注册、置 daemon 并启动。"""
         with mock.patch("threading.Timer") as MockTimer:
             mock_timer = mock.MagicMock()
+            mock_timer.daemon = False  # 初值置假，产品必须显式置 True
             MockTimer.return_value = mock_timer
             self.schedule_cleanup("task-done-123")
             MockTimer.assert_called_once()
             interval = MockTimer.call_args[0][0]
             self.assertEqual(interval, 30 * 60)
-            mock_timer.daemon = True
+            self.assertTrue(mock_timer.daemon, "清理定时器必须 daemon=True")
             mock_timer.start.assert_called_once()
 
     def test_cleanup_callback_removes_task(self):

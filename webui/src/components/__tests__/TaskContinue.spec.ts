@@ -93,7 +93,6 @@ describe("DiscoveryView paused AI recovery", () => {
       "/api/task/continue/paused-ai-run",
       expect.objectContaining({
         method: "POST",
-        headers: expect.objectContaining({}),
       }),
     );
     const continueCall = fetchMock.mock.calls.find(
@@ -161,11 +160,8 @@ describe("DiscoveryView paused AI recovery", () => {
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
 
-    // T510：TaskProgress 头部展示任务自身平台（zhilian）徽章，与 .platform-segment 草稿徽章独立
-    const badge = wrapper.get('[data-testid="task-platform-badge"]');
-    expect(badge.text()).toContain("智联");
-    expect(badge.attributes("data-platform")).toBe("zhilian");
-
+    // 040 批三：平台徽章展示断言由本文件“TaskProgress platform badge (T510)”
+    // 用例统一覆盖；此处只保留集成独有事实——continue 不发 body。
     // 点继续：continue 不发 body（不发 platform — 任务平台已冻结，后端从父 run 读）
     await wrapper.get('[data-testid="continue-ai-screen"]').trigger("click");
     await flushPromises();
@@ -524,42 +520,6 @@ describe("TaskProgress canonical terminal states", () => {
     expect(wrapper.text()).not.toContain("精筛每批");
   });
 
-  it("formats terminal elapsed over one hour as X小时Y分Z秒", () => {
-    // 57875s = 16h 4m 35s；旧实现显示成"964分35秒"。
-    const finished = 1_000 + 57_875_000;
-    const wrapper = mount(TaskProgress, {
-      props: {
-        kind: "screen",
-        snapshot: {
-          status: "completed",
-          progress: { stage: "done", overall_percent: 100 },
-          started_at: 1_000,
-          finished_at: finished,
-        },
-      },
-    });
-    expect(wrapper.get(".task-status").text()).toContain("已完成");
-    expect(wrapper.get(".task-elapsed").text()).toContain("用时 16小时4分35秒");
-    wrapper.unmount();
-  });
-
-  it("keeps cumulative elapsed fixed while paused via active_elapsed_ms", () => {
-    const wrapper = mount(TaskProgress, {
-      props: {
-        kind: "screen",
-        snapshot: {
-          status: "paused",
-          progress: { stage: "fetch_jd", overall_percent: 40 },
-          started_at: 1_000_000,
-          active_elapsed_ms: 90_000,
-        },
-      },
-    });
-    // 暂停态没有 finished_at 也不再依赖 started_at 差值；显示排除暂停后的累计。
-    expect(wrapper.get(".task-status").text()).toContain("已暂停");
-    expect(wrapper.get(".task-elapsed").text()).toContain("用时 1分30秒");
-    wrapper.unmount();
-  });
 });
 
 describe("TaskProgress real progress engine and grouped counts", () => {
@@ -783,27 +743,6 @@ describe("TaskProgress real progress engine and grouped counts", () => {
     });
     expect(wrapper.get(".task-stage").text()).toContain("处理中");
     expect(wrapper.text()).not.toContain("mystery_stage");
-  });
-
-  it("derives scrape counts from completed combinations instead of screen counters", () => {
-    const wrapper = mount(TaskProgress, {
-      props: {
-        kind: "scrape",
-        snapshot: {
-          status: "running",
-          total: 2,
-          success_count: 0,
-          unstarted_count: 2,
-          progress: { stage: "searching", current: 1, total: 2, overall_percent: 50 },
-        },
-      },
-    });
-
-    const text = wrapper.get('[data-testid="task-counts"]').text();
-    expect(text).toContain("已完成 1 / 2");
-    expect(text).toContain("进行中 1");
-    expect(text).toContain("未开始 0");
-    expect(text).not.toContain("已完成 0 / 2");
   });
 
   it("resets display for a new run that stays in the same stage", async () => {

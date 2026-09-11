@@ -1171,9 +1171,6 @@ class TuningExperimentRouteTests(unittest.TestCase):
         self.assertEqual(
             store.get_advanced_config_state()["last_custom_digest"], custom_digest)
 
-        self.assertEqual(
-            store.get_advanced_config_state()["last_custom_digest"], custom_digest)
-
 
 class SourceDetailBatchCommandTests(unittest.TestCase):
     """JD 批量详情命令必须透传并发 tab 数，默认值为 5。"""

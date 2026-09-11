@@ -1,3 +1,5 @@
+// 说明：本文件以类型级断言为主，真正的保护来自 `npm run build`（vue-tsc）
+// 对类型的编译检查；vitest 运行期只执行其中少量值级断言。
 import type {
   BrowserAccount,
   CityEntry,
@@ -79,19 +81,16 @@ describe("platform types baseline (T501)", () => {
 
   it("keeps platform error codes aligned with the frozen contract", () => {
     const code: PlatformErrorCode = "platform_validation_failed";
-    expectTypeOf<PlatformErrorCode>().toExtend<PlatformErrorCode>();
     void code;
   });
 
   it("covers source adapter error codes from job-source.md", () => {
     const code: SourceErrorCode = "source_login_required";
-    expectTypeOf<SourceErrorCode>().toExtend<SourceErrorCode>();
     void code;
   });
 
   it("maps DB canonical status to the unified API status set", () => {
     const status: TaskApiStatus = "completed_with_pending";
-    expectTypeOf<TaskApiStatus>().toExtend<TaskApiStatus>();
     void status;
   });
 

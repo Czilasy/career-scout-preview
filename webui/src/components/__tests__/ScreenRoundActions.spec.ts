@@ -43,16 +43,14 @@ describe("ScreenRoundActions 按钮矩阵", () => {
   });
 
   it("暂停/失败：继续 AI 筛选 + 结束并保存结果，无查看结果", () => {
-    for (const kind of ["continue"] as const) {
-      const wrapper = mount(ScreenRoundActions, {
-        props: { action: action(kind), showFinishSave: true },
-      });
-      const buttons = visibleButtons(wrapper);
-      expect(buttons).toHaveLength(2);
-      expect(wrapper.get('[data-testid="continue-ai-screen"]').text()).toContain("继续 AI 筛选");
-      expect(wrapper.get('[data-testid="finish-save-results"]').text()).toContain("结束并保存结果");
-      expect(wrapper.find('[data-testid="view-screen-results"]').exists()).toBe(false);
-    }
+    const wrapper = mount(ScreenRoundActions, {
+      props: { action: action("continue"), showFinishSave: true },
+    });
+    const buttons = visibleButtons(wrapper);
+    expect(buttons).toHaveLength(2);
+    expect(wrapper.get('[data-testid="continue-ai-screen"]').text()).toContain("继续 AI 筛选");
+    expect(wrapper.get('[data-testid="finish-save-results"]').text()).toContain("结束并保存结果");
+    expect(wrapper.find('[data-testid="view-screen-results"]').exists()).toBe(false);
   });
 
   it("结束保存/关闭态：0 个动作按钮", () => {
@@ -160,7 +158,6 @@ describe("ScreenRoundActions 按钮矩阵", () => {
     expect(
       ACTION_IDS.filter((id) => wrapper.find(`[data-testid="${id}"]`).exists()),
     ).toEqual(ids);
-    expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
     wrapper.unmount();
   });
 

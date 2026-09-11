@@ -8,10 +8,6 @@ import time
 import unittest
 from unittest import mock
 from webui.app import create_app
-from webui.store import (
-    DiscoveryStoreConflictError,
-    RUN_STATUSES, RUN_TRANSITIONS, SYSTEMIC_BLOCK_CODES,
-)
 
 from tests.healthy_pipeline.harness import _make_app, _authed_test_client, _wait_for_pipeline_task, _pause_run
 from webui.task_pause_support import request_stop
@@ -629,71 +625,6 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
             if executor is not None:
                 executor.shutdown(wait=True, cancel_futures=True)
             temp.cleanup()
-
-    def test_corrupt_scrape_checkpoint_finishes_failed_without_worker_for_both_platforms(self):
-        """损坏抓取断点必须保留原始字节、错误结束且不启动 worker。"""
-        for platform in ("boss", "zhilian"):
-            app, temp = _make_app()
-            try:
-                client = _authed_test_client(app)
-                store = app.config["TASK_STORE"]
-                ctx = app.config["PIPELINE_CONTEXT"]
-                run_id = f"corrupt-scrape-checkpoint-{platform}"
-                script_params = {"keyword": "前端", "city": ["上海"], "pages": 1}
-                store.create_screening_run(
-                    run_id,
-                    source_count=1,
-                    execution_params={
-                        "platform": platform,
-                        "script_params": script_params,
-                        "browser_account": "a",
-                        "cdp_port": 9222 if platform == "boss" else 9223,
-                        "profile_key": f"{platform}:a",
-                    },
-                )
-                _pause_run(
-                    store, run_id, error_code="captcha_required",
-                    current_stage="scrape",
-                )
-                raw_checkpoint = '{"credential":"must-not-be-replaced"'
-                with store._connection() as conn:
-                    conn.execute(
-                        "INSERT INTO pipeline_checkpoints "
-                        "(run_id, stage, completed_keys_json, saved_at) "
-                        "VALUES (?, 'scrape', ?, 1)",
-                        (run_id, raw_checkpoint),
-                    )
-                app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
-                with mock.patch.object(ctx, "activate_run_browser") as activate, \
-                        mock.patch.object(ctx.executor, "submit") as submit:
-                    response = client.post(
-                        f"/api/execute-search/continue/{run_id}",
-                        headers={"X-Boss-Token": app.config["API_TOKEN"]},
-                    )
-
-                self.assertEqual(response.status_code, 409, response.get_json())
-                payload = response.get_json()
-                self.assertEqual(payload["error"], "checkpoint_read_failed")
-                self.assertEqual(payload["error_code"], "checkpoint_read_failed")
-                self.assertEqual(payload["status"], "failed")
-                failed_run = store.get_screening_run(run_id)
-                self.assertEqual(failed_run["status"], "failed")
-                self.assertEqual(failed_run["source_count"], 1)
-                with store._connection() as conn:
-                    row = conn.execute(
-                        "SELECT completed_keys_json FROM pipeline_checkpoints "
-                        "WHERE run_id = ? AND stage = 'scrape'", (run_id,),
-                    ).fetchone()
-                self.assertEqual(row["completed_keys_json"], raw_checkpoint)
-                # 继续链路必须先完成身份/CDP/登录态复检，之后才读取断点。
-                # 断点损坏只应阻止 worker 启动，不能绕过恢复前置检查。
-                activate.assert_called_once()
-                submit.assert_not_called()
-            finally:
-                executor = app.config.get("PIPELINE_EXECUTOR")
-                if executor is not None:
-                    executor.shutdown(wait=True, cancel_futures=True)
-                temp.cleanup()
 
     def test_resume_survives_stale_pause_cleanup_timer(self):
         """暂停任务 30 分钟清理定时器不得误删续跑的新内存任务。

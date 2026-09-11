@@ -63,8 +63,6 @@ class RegistryIntegrityTests(unittest.TestCase):
         self.assertEqual(len(dir_keys), len(set(dir_keys)))
 
     def test_entries_have_required_fields(self):
-        import re
-
         for entry in br.BROWSER_REGISTRY:
             self.assertTrue(entry["name"], entry["key"])
             self.assertTrue(entry["exe_names"], entry["key"])
@@ -214,7 +212,9 @@ class SelectionPersistenceTests(unittest.TestCase):
     """browser_selection.json 读写与容错。"""
 
     def setUp(self):
-        self.path = Path(tempfile.mkdtemp()) / "browser_selection.json"
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "browser_selection.json"
 
     def test_save_load_roundtrip_registry(self):
         br.save_browser_selection("registry", key="brave", path=self.path)
@@ -406,7 +406,9 @@ class EffectiveDataDirTests(unittest.TestCase):
         )
 
     def test_per_account_dirs_isolated_under_namespace(self):
-        base = Path(tempfile.mkdtemp())
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
         acc_a = str(base / "chrome-profile" / "account_a")
         acc_b = str(base / "chrome-profile" / "account_b")
         # 派生以各自父目录为命名空间根：账号彼此隔离、键一致则同命名空间

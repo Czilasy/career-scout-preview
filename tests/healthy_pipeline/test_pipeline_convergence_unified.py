@@ -13,10 +13,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 from webui.app import create_app
-from webui.store import (
-    DiscoveryStoreConflictError,
-    RUN_STATUSES, RUN_TRANSITIONS, SYSTEMIC_BLOCK_CODES,
-)
+from webui.store import DiscoveryStoreConflictError
 
 from tests.healthy_pipeline.harness import _make_app, _authed_test_client, _wait_for_pipeline_task, _pause_run
 

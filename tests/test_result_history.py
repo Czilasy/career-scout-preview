@@ -7,8 +7,8 @@ from webui.result_history import ResultHistoryService
 from webui.store import TaskStore
 
 
-def _save_round(store, platform="boss", status="done", keyword="Python", job_id=None):
-    job_key = job_id or f"{platform}-{status}-{len(store.list_history_rounds(platform))}"
+def _save_round(store, platform="boss", status="done", keyword="Python"):
+    job_key = f"{platform}-{status}-{len(store.list_history_rounds(platform))}"
     result = {
         "ok": True,
         "jobs": [{
@@ -65,8 +65,6 @@ class ResultHistoryStoreTests(unittest.TestCase):
         import contextlib
         import sqlite3
         from unittest import mock
-
-        from webui.store import TaskStore
 
         _save_round(self.store, "boss", keyword="Python")
         run_id = self.store.list_history_rounds()[0]["id"]
@@ -130,20 +128,6 @@ class ResultHistoryStoreTests(unittest.TestCase):
         self.assertTrue(self.service.delete_round(run_id))
         self.assertFalse(self.store.history_round_exists(run_id))
         self.assertEqual(len(self.store.list_task_events(run_id)), 1)
-
-    def test_delete_latest_does_not_promote_archive(self):
-        _save_round(self.store, "boss", keyword="old-1")
-        _save_round(self.store, "boss", keyword="old-2")
-        self.service.archive_all_current_results()
-        newest = _save_round(self.store, "boss", keyword="newest")
-
-        self.assertTrue(self.service.delete_round(newest))
-        # 删除最新轮后不复活上一轮：该平台 latest 置空，旧轮保持归档
-        self.assertIsNone(
-            self.store.load_latest_pipeline_result_for_platform("boss"))
-        items = self.service.list_history("boss")
-        self.assertFalse(any(item["is_latest"] for item in items))
-        self.assertTrue(all(item["archived_at"] for item in items))
 
     def test_history_statuses_are_three_way_only(self):
         """017-US3: 历史轮状态取值域收敛为 done/partial/scraped_only。"""

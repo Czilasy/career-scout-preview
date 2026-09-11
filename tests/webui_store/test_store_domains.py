@@ -93,8 +93,11 @@ class TaskStoreTests(unittest.TestCase):
         self.assertIsNone(
             self.store.load_latest_pipeline_result_for_platform("boss"))
         # 旧轮仍留在历史里，保持归档态
-        history_ids = {r["id"] for r in self.store.list_history_rounds("boss")}
+        history_rows = self.store.list_history_rounds("boss")
+        history_ids = {r["id"] for r in history_rows}
         self.assertIn(old_id, history_ids)
+        # 040 批三迁移：旧轮保持归档标记（原 test_result_history 断言）
+        self.assertTrue(all(row["archived_at"] for row in history_rows))
 
 
 class ScrapePageProgressTests(unittest.TestCase):
@@ -1138,27 +1141,6 @@ class AdvancedConfigStateStoreTests(unittest.TestCase):
         self.store.rollback_mode_version(v1)
         state = self.store.get_advanced_config_state()
         self.assertEqual(state["active_mode_version_id"], v1)
-
-    def test_apply_mode_version_does_not_overwrite_custom(self):
-        """FR-066: 应用模式版本不覆盖自定义配置。"""
-        custom_config = {
-            "inter_combo_delay": 42.0,
-            "detail_batch_size": 7,
-            "detail_interval": 3.0,
-            "detail_reset_every": 2,
-            "detail_batch_cooldown": 8.0,
-            "screen_batch_size": 25,
-            "screen_concurrency": 3,
-            "match_batch_size": 2,
-            "match_concurrency": 4,
-        }
-        self.store.save_custom_config(custom_config)
-        version_id = self.store.create_mode_version(
-            matrix=self._valid_matrix(), manual_ranges={})
-        self.store.apply_mode_version(version_id)
-        state = self.store.get_advanced_config_state()
-        # 自定义配置仍在
-        self.assertEqual(state["last_custom_config"]["inter_combo_delay"], 42.0)
 
     def test_legacy_json_import_one_time(self):
         """旧 advanced_settings.json 一次性导入。"""

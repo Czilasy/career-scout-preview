@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from webui.logging_setup import configure_logging, get_logger, is_configured
+from webui.logging_setup import configure_logging, get_logger
 
 
 def _close_logger():

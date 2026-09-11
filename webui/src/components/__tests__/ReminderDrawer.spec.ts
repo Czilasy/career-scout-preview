@@ -691,7 +691,6 @@ describe("T053 布局合同（scoped CSS 静态校验）", () => {
     await flushPromises();
 
     const actions = wrapper.get(".reminder-item-actions");
-    expect(actions.classes()).toContain("reminder-item-actions");
     // 四个快捷入口：查看/跟进/荒废/建议，均为独立可点击元素。
     expect(actions.findAll("button, a")).toHaveLength(4);
     expect(actions.find("button button").exists()).toBe(false);
