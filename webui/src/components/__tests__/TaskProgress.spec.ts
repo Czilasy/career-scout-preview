@@ -363,3 +363,224 @@ describe("TaskProgress elapsed time: hours and pause-excluded duration", () => {
     wrapper.unmount();
   });
 });
+
+describe("TaskProgress 039 failure display", () => {
+  const issue = (index: number, overrides: Record<string, unknown> = {}) => ({
+    combo_key: `组合${index}`,
+    code: "source_timeout",
+    code_text: "抓取超时",
+    reason: "第 9 页 30 秒无响应",
+    ts: `ts-${index}`,
+    ...overrides,
+  });
+
+  function mountWithIssues(issues: Array<Record<string, unknown>>, overrides = {}) {
+    return mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: snapshot({
+          status: "completed_with_pending",
+          total: 16,
+          success_count: 14,
+          fail_count: issues.length,
+          combo_issues: issues,
+          progress: { stage: "done", overall_percent: 100 },
+          ...overrides,
+        }) as never,
+      },
+    });
+  }
+
+  it("失败只显示数量，不再成排展示明细，悬停前没有浮窗", () => {
+    const wrapper = mountWithIssues([issue(0), issue(1)]);
+    expect(wrapper.find('[data-testid="combo-issues"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="fail-count"]').text()).toBe("2");
+    expect(wrapper.find('[data-testid="fail-tooltip"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("悬停失败数量逐条显示组合名与简单原因，移开后收起", async () => {
+    const wrapper = mountWithIssues([issue(0), issue(1)]);
+    await wrapper.get('[data-testid="fail-count-group"]').trigger("mouseenter");
+    const tooltip = wrapper.get('[data-testid="fail-tooltip"]');
+    expect(tooltip.text()).toContain("组合0：抓取超时");
+    expect(tooltip.text()).toContain("组合1：抓取超时");
+    // 不用“已跳过”“超时抓取”这类词代替原因
+    expect(tooltip.text()).not.toContain("已跳过");
+    expect(tooltip.text()).not.toContain("超时抓取");
+
+    await wrapper.get('[data-testid="fail-count-group"]').trigger("mouseleave");
+    expect(wrapper.find('[data-testid="fail-tooltip"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("浮窗最多 5 条，超出显示另有 N 条", async () => {
+    const issues = Array.from({ length: 8 }, (_unused, index) => issue(index));
+    const wrapper = mountWithIssues(issues, { fail_count: 8 });
+    await wrapper.get('[data-testid="fail-count-group"]').trigger("mouseenter");
+    const tooltip = wrapper.get('[data-testid="fail-tooltip"]');
+    expect(tooltip.findAll(".fail-tooltip-row")).toHaveLength(5);
+    expect(tooltip.text()).toContain("另有 3 条");
+    wrapper.unmount();
+  });
+
+  it("原因名称缺失时回落用真实原因文本", async () => {
+    const wrapper = mountWithIssues([
+      { combo_key: "组合0", code: "source_unknown_error", code_text: "", reason: "页面解析异常", ts: "t" },
+    ]);
+    await wrapper.get('[data-testid="fail-count-group"]').trigger("mouseenter");
+    expect(wrapper.get('[data-testid="fail-tooltip"]').text()).toContain("组合0：页面解析异常");
+    wrapper.unmount();
+  });
+
+  it("空结果不是失败，不进失败浮窗", async () => {
+    const wrapper = mountWithIssues([
+      issue(0),
+      { combo_key: "组合空", code: "combo_empty", code_text: "未搜到岗位", reason: "", ts: "empty" },
+    ]);
+    await wrapper.get('[data-testid="fail-count-group"]').trigger("mouseenter");
+    const tooltip = wrapper.get('[data-testid="fail-tooltip"]').text();
+    expect(tooltip).toContain("组合0：抓取超时");
+    expect(tooltip).not.toContain("未搜到岗位");
+    wrapper.unmount();
+  });
+
+  it("没有失败时不显示失败数字与浮窗入口", () => {
+    const wrapper = mountWithIssues([], {
+      status: "completed", fail_count: 0, combo_issues: [],
+    });
+    expect(wrapper.find('[data-testid="fail-count"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="fail-tooltip"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+});
+
+describe("TaskProgress 039 settled counts", () => {
+  it("收尾后完成/失败/未开始与后端事实一致，不用矛盾默认值", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: snapshot({
+          status: "completed_with_pending",
+          total: 16,
+          success_count: 14,
+          fail_count: 2,
+          // 旧接口可能留下错误的未开始数字，展示必须以后端完成/失败事实为准
+          unstarted_count: 16,
+          combo_issues: [
+            { combo_key: "A|上海", code: "source_timeout", code_text: "抓取超时", reason: "", ts: "t1" },
+            { combo_key: "B|上海", code: "source_timeout", code_text: "抓取超时", reason: "", ts: "t2" },
+          ],
+          progress: { stage: "done", overall_percent: 100 },
+        }) as never,
+      },
+    });
+    const counts = wrapper.get('[data-testid="task-counts"]').text();
+    expect(counts).toContain("已完成 14 / 16");
+    expect(counts).toContain("未开始 0");
+    expect(wrapper.get('[data-testid="fail-count"]').text()).toBe("2");
+    wrapper.unmount();
+  });
+
+  it("全部抓完且无失败时（收尾真实状态 completed）仍显示 16 / 16 与未开始 0", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: snapshot({
+          status: "completed",
+          total: 16,
+          success_count: 16,
+          fail_count: 0,
+          progress: { stage: "done", overall_percent: 100 },
+        }) as never,
+      },
+    });
+    const counts = wrapper.get('[data-testid="task-counts"]').text();
+    expect(counts).toContain("已完成 16 / 16");
+    expect(counts).toContain("未开始 0");
+    expect(wrapper.find('[data-testid="fail-count"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("AI 筛选任务（03 页）完整成功收尾也显示判定计数", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: snapshot({
+          status: "completed",
+          total: 2,
+          success_count: 2,
+          progress: { stage: "done", overall_percent: 100 },
+        }) as never,
+      },
+    });
+    expect(wrapper.get('[data-testid="task-counts"]').text()).toContain("已完成 2 / 2");
+    expect(wrapper.get('[data-testid="task-counts"]').text()).toContain("未开始 0");
+    wrapper.unmount();
+  });
+
+  it("分母未知时不显示 0/0 空数字，但已抓等真实数字不得整行收起", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: snapshot({
+          status: "completed",
+          total: 0,
+          source_total: 143,
+          scraped_count: 143,
+          progress: { stage: "done", overall_percent: 100 },
+        }) as never,
+      },
+    });
+    // 已抓岗位是真实数字：计数行必须展示（用户拍板“永久展示”），
+    // 只在分母未知（0）时不渲染「已完成 0 / 0」空数字。
+    expect(wrapper.find('[data-testid="task-counts"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="scraped-count"]').text()).toContain("143");
+    expect(wrapper.find(".count-current").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("已完成 0 / 0");
+    wrapper.unmount();
+  });
+
+  it("纯抓取轮的筛选面板显示真实 0（已完成 0 / N、未开始 N），不整行隐藏", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: snapshot({
+          status: "completed",
+          total: 143,
+          success_count: 0,
+          fail_count: 0,
+          unstarted_count: 143,
+          source_total: 143,
+          scraped_count: 143,
+          progress: { stage: "done", overall_percent: 100 },
+        }) as never,
+      },
+    });
+    const counts = wrapper.get('[data-testid="task-counts"]').text();
+    expect(counts).toContain("已完成 0 / 143");
+    expect(counts).toContain("未开始 143");
+    expect(wrapper.find('[data-testid="fail-count"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("运行中计数保持既有派生，不受收尾口径影响", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: snapshot({
+          status: "running",
+          total: 14,
+          success_count: 3,
+          fail_count: 1,
+          progress: { stage: "waiting", current: 4, total: 14 },
+        }) as never,
+      },
+    });
+    const counts = wrapper.get('[data-testid="task-counts"]').text();
+    expect(counts).toContain("已完成 4 / 14");
+    expect(counts).toContain("进行中 1");
+    expect(counts).toContain("未开始 9");
+    wrapper.unmount();
+  });
+});

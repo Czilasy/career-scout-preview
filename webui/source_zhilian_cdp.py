@@ -19,6 +19,7 @@ from webui.source_zhilian_defaults import (
 )
 from webui.source_zhilian_runtime_adapter import (
     build_zhilian_detail_signal_map,
+    build_zhilian_list_signal_map,
     normalize_zhilian_detail_signal,
     run_zhilian_preflight_after_profile_switch,
 )
@@ -75,7 +76,7 @@ _ZHILIAN_DETAIL_SIGNAL_MAP = {
 _ZHILIAN_DETAIL_SIGNAL_MAP = build_zhilian_detail_signal_map(
     _ZHILIAN_DETAIL_SIGNAL_MAP,
 )
-_ZHILIAN_LIST_SIGNAL_MAP = {
+_ZHILIAN_LIST_SIGNAL_MAP = build_zhilian_list_signal_map({
     "ok": None,
     "empty": None,  # 平台明确空走 reported_empty，由编排层二次确认
     "login_required": "source_login_required",
@@ -85,7 +86,7 @@ _ZHILIAN_LIST_SIGNAL_MAP = {
     "unreachable": "source_unreachable",
     "timeout": "source_timeout",
     "invalid_output": "source_invalid_output",
-}
+})
 _zhilian_input_hash = compute_zhilian_input_hash
 def _is_zhilian_host(url: str) -> bool:
     """URL host 是否在智联 allowlist 内（脱敏判定，不解析 path/query）。"""

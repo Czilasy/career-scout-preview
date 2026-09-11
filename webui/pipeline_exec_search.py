@@ -21,6 +21,8 @@ from webui.pipeline_exec_status import (
     failed_code_label,
     user_visible_failure_reason,
 )
+from webui.pipeline_exec_retry import (
+    is_transient_retryable, retry_event_fact, retry_failure_outcome, retry_resume_fields)
 from webui.source import PageEventPersistenceError, SourceOutcome
 from webui.browser_recovery import BrowserRecovery
 from webui.frozen_browser_identity import bind_frozen_source_profile
@@ -40,16 +42,11 @@ _logger = get_logger(__name__)
 # 平台明确报告空后，等待该秒数再做一次独立复核确认。
 _EMPTY_CONFIRM_DELAY_SECONDS = 3.0
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
 # INTER_COMBO_DELAY 现从 advanced_settings 动态读取（默认 20~40s）。
-
 
 def _canonical_source_code(code: object) -> str | None:
     raw_code = str(code or "").strip()
@@ -192,7 +189,6 @@ def run_search(params: dict, source, *, pages: int = 3,
         stage = str(kw.get("stage", ""))
         current = int(kw.get("current") or 0)
         total = int(kw.get("total") or 0)
-        kw["overall_percent"] = _scrape_overall_percent(stage, current, total)
         page_progress = kw.pop("page_progress", None)
         if page_progress is not None:
             kw["overall_percent"] = _scrape_page_overall_percent(
@@ -382,6 +378,7 @@ def run_search(params: dict, source, *, pages: int = 3,
             return source.fetch_list(plan_item, on_page_completed=_page_completed)
 
         _skipped_login_combo = [False]
+        retry_used = False  # 039：本组合共用一份重试额度（登录复核/失联重启/偶发重试）
 
         def _notify_combo_issue(entry: dict) -> None:
             if on_issue is None:
@@ -419,6 +416,7 @@ def run_search(params: dict, source, *, pages: int = 3,
 
         def _recheck_login_combo(outcome):
             """疑似登录失效：独立复核一次，通过则重试本组合，否则跳过。"""
+            nonlocal retry_used
             probe = _secondary_login_probe()
             if _probe_passed(probe):
                 _notify_combo_issue({
@@ -429,6 +427,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                 emit(stage="waiting", current=len(completed_combos), total=len(combos),
                      keyword=kw, city=display_city,
                      message="登录复核通过（疑似误报），重试本组合…")
+                retry_used = True
                 retried = _fetch_list_once()
                 if retried.ok or retried.failed_code != "source_login_required":
                     return retried
@@ -505,9 +504,10 @@ def run_search(params: dict, source, *, pages: int = 3,
                 "hard_stop": True, "hard_stop_code": "internal_error",
                 "error": f"抓取执行失败（{type(exc).__name__}），任务已暂停",
             })
-        if not outcome.ok and recovery.is_browser_lost(outcome.failed_code):
+        if not outcome.ok and not retry_used and recovery.is_browser_lost(outcome.failed_code):
             restart_ok, restart_err = recovery.try_restart()
             if restart_ok:
+                retry_used = True
                 resume_page = max(1, int((resume_pages or {}).get(combo_key, 1)))
                 plan_adapter.apply_resume_fields(
                     plan_item,
@@ -569,6 +569,18 @@ def run_search(params: dict, source, *, pages: int = 3,
                         "combinations": len(combos), "completed_combos": completed_combos,
                         "hard_stop": True, "hard_stop_code": source_code,
                         "error": cdp_reason})
+        if is_transient_retryable(outcome.failed_code, retry_used=retry_used):
+            retry_used = True
+            evidence.record_fact(retry_event_fact(combo_key, outcome))
+            plan_adapter.apply_resume_fields(
+                plan_item, **retry_resume_fields(resume_pages, resume_jobs, combo_key, pages))
+            evidence.unit_started(combo_key, pages, int(plan_item["start_page"]))
+            emit(stage="searching", current=len(completed_combos), total=len(combos),
+                 keyword=kw, city=display_city, message="抓取未完成，正在自动重试一次…")
+            try:
+                outcome = _fetch_list_once()
+            except _PIPELINE_OPERATION_ERRORS as exc:
+                outcome = retry_failure_outcome(exc)
         if not outcome.ok:
             _failure_reason = user_visible_failure_reason(
                 outcome.failed_code,
@@ -707,7 +719,6 @@ def run_search(params: dict, source, *, pages: int = 3,
                                                  "batch_index": idx + 1})
                 except Exception:
                     _logger.debug("观测回调执行失败（不阻断搜索主流程）", exc_info=True)
-
 
         # Delay between combinations (not after the last one).
         if idx < len(combos) - 1:

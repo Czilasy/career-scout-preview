@@ -493,6 +493,41 @@ describe("useDiscoveryTasks.pollRecrawl（033 V2 完整性优先）", () => {
   );
 });
 
+describe("useDiscoveryTasks.saveScrapedOnlySnapshot（039 数字永久展示）", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset();
+  });
+
+  it("定格“已抓取，未筛选”轮时，03 面板拿到真实 0（已完成 0 / N、未开始 N）", async () => {
+    apiRequestMock.mockResolvedValue({
+      saved: true,
+      run_id: "run-1",
+      result: {
+        ok: true, jobs: [], dropped: [], total_scraped: 40,
+        total_kept: 0, total_matched: 0, total_dropped: 0, profile_summary: "",
+      },
+    });
+    const state = makeState({
+      scrapeTaskId: ref("scrape-1"),
+      scrapeSnapshot: ref({
+        status: "done", stage: "done", progress: {}, logs: [],
+        scraped_count: 40, source_total: 40,
+      }),
+    });
+    const deps = makeDeps();
+    const tasks = useDiscoveryTasks(state, deps);
+
+    await tasks.saveScrapedOnlySnapshot();
+
+    const screen = state.screenSnapshot.value;
+    expect(screen?.total).toBe(40);
+    expect(screen?.success_count).toBe(0);
+    expect(screen?.fail_count).toBe(0);
+    expect(screen?.unstarted_count).toBe(40);
+    expect(screen?.scraped_count).toBe(40);
+  });
+});
+
 // 035 US2（真机问题②，FR-011）：入口 5（启动/刷新自动开新一轮）的
 // scrape-only running 守卫——抓取运行中恢复现场，不 reset、不取消、不查历史轮。
 describe("useDiscoveryTasks.maybeAutoStartNewRound（035 scrape-only 守卫）", () => {

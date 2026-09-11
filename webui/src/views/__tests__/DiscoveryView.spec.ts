@@ -237,6 +237,300 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
+  it("039: 恢复上一轮时面板显示真实完成/跳过计数与失败留痕（不再 0 完成）", async () => {
+    const settings = {
+      inter_combo_delay: 10,
+      detail_batch_size: 15,
+      detail_interval: 2,
+      detail_reset_every: 4,
+      detail_batch_cooldown: 5,
+      detail_tab_pool_size: 5,
+      screen_batch_size: 50,
+      screen_concurrency: 5,
+      match_batch_size: 4,
+      match_concurrency: 10,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/latest-pipeline-result")) {
+        return response({
+          ok: true,
+          has_result: true,
+          source_run_id: "screen-restored-039",
+          scrape_task_id: "scrape-restored-039",
+          status: "partial",
+          result: {
+            jobs: [{ job_id: "j1", verdict: "match" }, { job_id: "j2", verdict: "not_match" }],
+            profile_summary: "历史画像",
+            total_kept: 2,
+            total_dropped: 0,
+          },
+          started_at: 1_000,
+          finished_at: 2_000,
+        });
+      }
+      if (url.endsWith("/api/task-state/scrape-restored-039")) {
+        return response({
+          status: "completed_with_pending", stage: "done", total: 16,
+          success_count: 14, fail_count: 2, unstarted_count: 0,
+          source_total: 16, scraped_count: 1341, pending_count: 0,
+          combo_issues: [{
+            combo_key: "A|上海", code: "source_timeout",
+            code_text: "抓取超时", reason: "第 9 页无响应", ts: "t1",
+          }],
+        });
+      }
+      if (url.endsWith("/api/task-state/screen-restored-039")) {
+        return response({
+          status: "completed_with_pending", stage: "done", total: 2,
+          success_count: 2, fail_count: 0, unstarted_count: 0, pending_count: 0,
+        });
+      }
+      if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({
+          ok: true,
+          selection: "balanced",
+          settings,
+          last_custom: null,
+          mode_version: null,
+          manual_ranges: {},
+          config_schema_version: 1,
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-039-restore" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text().includes("广泛抓取"))!.trigger("click");
+    await flushPromises();
+
+    const panel = wrapper.find(".task-progress");
+    expect(panel.exists()).toBe(true);
+    expect(panel.text()).toContain("已完成 14 / 16");
+    expect(panel.text()).toContain("未开始 0");
+    expect(panel.get('[data-testid="fail-count"]').text()).toBe("2");
+    expect(panel.text()).not.toContain("未知");
+    // 悬停失败数字：逐条显示该轮真实失败原因
+    await panel.get('[data-testid="fail-count-group"]').trigger("mouseenter");
+    expect(panel.get('[data-testid="fail-tooltip"]').text()).toContain("A|上海：抓取超时");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("039: 灵动岛跳回上一轮时 02 面板沿用真实计数（不再 0 完成）", async () => {
+    const settings = {
+      inter_combo_delay: 10,
+      detail_batch_size: 15,
+      detail_interval: 2,
+      detail_reset_every: 4,
+      detail_batch_cooldown: 5,
+      detail_tab_pool_size: 5,
+      screen_batch_size: 50,
+      screen_concurrency: 5,
+      match_batch_size: 4,
+      match_concurrency: 10,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result") && url.includes("platform=boss")) {
+        return response({
+          ok: true,
+          has_result: true,
+          source_run_id: "screen-restored-039b",
+          scrape_task_id: "scrape-restored-039b",
+          status: "partial",
+          result: {
+            jobs: [{ job_id: "j1", verdict: "match" }, { job_id: "j2", verdict: "not_match" }],
+            profile_summary: "历史画像",
+            total_kept: 16,
+            total_dropped: 0,
+            total_scraped: 16,
+          },
+          started_at: 1_000,
+          finished_at: 2_000,
+        });
+      }
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.endsWith("/api/task-state/scrape-restored-039b")) {
+        return response({
+          status: "completed_with_pending", stage: "done", total: 16,
+          success_count: 14, fail_count: 2, unstarted_count: 0,
+          source_total: 16, scraped_count: 16, pending_count: 0,
+          combo_issues: [{
+            combo_key: "A|上海", code: "source_timeout",
+            code_text: "抓取超时", reason: "第 9 页无响应", ts: "t1",
+          }],
+        });
+      }
+      if (url.endsWith("/api/task-state/screen-restored-039b")) {
+        return response({
+          status: "completed_with_pending", stage: "done", total: 2,
+          success_count: 2, fail_count: 0, unstarted_count: 0, pending_count: 0,
+        });
+      }
+      if (url.endsWith("/api/result-history")) {
+        return response({
+          ok: true,
+          items: [{
+            run_id: "h1", platform: "boss", status: "succeeded",
+            created_at: "2026-09-01 10:00:00", total_scraped: 16, total_kept: 2,
+            total_matched: 1, mismatch_count: 1, total_dropped: 0, pending_count: 0,
+            keyword_summary: "A / 上海", profile_summary_preview: "历史画像",
+            archived_at: null, is_latest: false,
+          }],
+        });
+      }
+      if (url.endsWith("/api/result-history/h1")) {
+        return response({
+          ok: true, has_result: true, source_run_id: "h1", platform: "boss", status: "succeeded",
+          started_at: 1_000, finished_at: 2_000,
+          result: { jobs: [{ job_id: "h1", platform: "boss", verdict: "match", title: "历史岗位" }], total_kept: 1, total_dropped: 0, profile_summary: "历史画像" },
+        });
+      }
+      if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({
+          ok: true, selection: "balanced", settings, last_custom: null,
+          mode_version: null, manual_ranges: {}, config_schema_version: 1,
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-039-island" } });
+    await flushPromises();
+    // 先进历史轮，再回到最新：点灵动岛跳回上一轮走的是同一个快照合成入口
+    //（returnToLatest → applyFetchedLatestResult），该入口必须与启动加载同口径。
+    (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
+    await flushPromises();
+    await wrapper.get('[data-testid="history-round-row"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="back-to-latest"]').trigger("click");
+    await flushPromises();
+    const searchStep = wrapper.findAll("button").find((b) => b.text().includes("广泛抓取"));
+    await searchStep!.trigger("click");
+    await flushPromises();
+
+    const panel = wrapper.find(".task-progress");
+    expect(panel.exists()).toBe(true);
+    expect(panel.text()).toContain("已完成 14 / 16");
+    expect(panel.text()).toContain("未开始 0");
+    expect(panel.get('[data-testid="fail-count"]').text()).toBe("2");
+
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("039: 纯抓取轮从历史返回后 03 面板仍显示真实 0（已完成 0 / N、未开始 N）", async () => {
+    const settings = {
+      inter_combo_delay: 10,
+      detail_batch_size: 15,
+      detail_interval: 2,
+      detail_reset_every: 4,
+      detail_batch_cooldown: 5,
+      detail_tab_pool_size: 5,
+      screen_batch_size: 50,
+      screen_concurrency: 5,
+      match_batch_size: 4,
+      match_concurrency: 10,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result") && url.includes("platform=boss")) {
+        return response({
+          ok: true,
+          has_result: true,
+          source_run_id: "run-039c",
+          scrape_task_id: "scrape-039c",
+          status: "scraped_only",
+          result: {
+            jobs: [{ job_id: "j1" }, { job_id: "j2" }, { job_id: "j3" }],
+            profile_summary: "画像",
+            total_scraped: 3, total_kept: 0, total_dropped: 0,
+          },
+          started_at: 1_000,
+          finished_at: 2_000,
+        });
+      }
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.endsWith("/api/task-state/scrape-039c")) {
+        // 抓取任务：组合口径（2/2），03 面板不得混用该口径
+        return response({
+          status: "done", stage: "done", total: 2,
+          success_count: 2, fail_count: 0, unstarted_count: 0,
+          source_total: 3, scraped_count: 3,
+        });
+      }
+      if (url.endsWith("/api/task-state/run-039c")) {
+        // 未筛选轮真实快照：尚未筛选 → 0 完成、3 未开始（N = 本轮已抓岗位）
+        return response({
+          status: "scraped_only", stage: "scrape", total: 3,
+          success_count: 0, fail_count: 0, unstarted_count: 3,
+          source_total: 3, scraped_count: 3,
+        });
+      }
+      if (url.endsWith("/api/result-history")) {
+        return response({
+          ok: true,
+          items: [{
+            run_id: "h1", platform: "boss", status: "succeeded",
+            created_at: "2026-09-01 10:00:00", total_scraped: 3, total_kept: 3,
+            total_matched: 3, mismatch_count: 0, total_dropped: 0, pending_count: 0,
+            keyword_summary: "A / 上海", profile_summary_preview: "画像",
+            archived_at: null, is_latest: false,
+          }],
+        });
+      }
+      if (url.endsWith("/api/result-history/h1")) {
+        return response({
+          ok: true, has_result: true, source_run_id: "h1", platform: "boss", status: "succeeded",
+          started_at: 1_000, finished_at: 2_000,
+          result: { jobs: [{ job_id: "h1", platform: "boss", verdict: "match", title: "历史岗位" }], total_kept: 1, total_dropped: 0, profile_summary: "画像" },
+        });
+      }
+      if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({
+          ok: true, selection: "balanced", settings, last_custom: null,
+          mode_version: null, manual_ranges: {}, config_schema_version: 1,
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-039-scraped-only" } });
+    await flushPromises();
+    // 历史返回（点灵动岛跳回上一轮走同一入口）后，03 面板不得以“没有筛选单元”为由隐藏
+    (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
+    await flushPromises();
+    await wrapper.get('[data-testid="history-round-row"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="back-to-latest"]').trigger("click");
+    await flushPromises();
+    const screenStep = wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"));
+    await screenStep!.trigger("click");
+    await flushPromises();
+
+    const panel = wrapper.find(".task-progress");
+    expect(panel.exists()).toBe(true);
+    expect(panel.find('[data-testid="task-counts"]').exists()).toBe(true);
+    expect(panel.text()).toContain("已完成 0 / 3");
+    expect(panel.text()).toContain("未开始 3");
+
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
   it("uses canonical scope, applies mode default pages and locks a started task", async () => {
     const settings = {
       inter_combo_delay: 10,

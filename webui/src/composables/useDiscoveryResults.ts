@@ -126,11 +126,12 @@ async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean }) {
   if (!fetched) return;
   const { newer } = fetched;
   if (hasLiveTaskState() && newer.data.scrape_task_id && scrapeTaskId.value && newer.data.scrape_task_id !== scrapeTaskId.value) return;
-  applyFetchedLatestResult(fetched, opts, hasLiveTaskState());
+  const live = hasLiveTaskState();
+  await applyFetchedLatestResult(fetched, opts, live);
 }
 
 
-function applyFetchedLatestResult(
+async function applyFetchedLatestResult(
   fetched: MergedLatestResult,
   opts?: { skipTerminalSnapshot?: boolean },
   live = hasLiveTaskState(),
@@ -194,10 +195,59 @@ function applyFetchedLatestResult(
     : sourceTotal;
   scrapeSnapshot.value.total = stageTotal || sourceTotal;
   scrapeSnapshot.value.source_total = sourceTotal;
+  // 039（用户拍板·数字永久展示）：03 面板不得以“没有筛选单元”为由整行隐藏。
+  // 纯抓取轮尚未筛选，真实结论就是「已完成 0 / N、未开始 N」（N = 本轮已抓岗位，
+  // 即筛选工作单元）；抓完未筛选的轮次不是“无数字可显示”。
   screenSnapshot.value.total = stageTotal || sourceTotal;
   screenSnapshot.value.source_total = sourceTotal;
+  if (currentRoundStatus.value === "scraped_only") {
+    screenSnapshot.value.success_count = 0;
+    screenSnapshot.value.fail_count = 0;
+    screenSnapshot.value.unstarted_count = sourceTotal;
+  }
   const uncertainCount = (merged.jobs || []).filter((job) => job.verdict !== "match" && job.verdict !== "not_match" && job.verdict !== "mismatch").length;
   screenSnapshot.value.pending_count = snapshotStatus === "completed_with_pending" ? uncertainCount : 0;
+  // 039（用户拍板·单一来源）：面板计数只在这里补齐——按本轮真实任务快照
+  //（/api/task-state，与实时面板同一后端口径）取完成/跳过/未开始/已抓与失败留痕。
+  // 启动恢复、从历史/灵动岛跳回最新、以后新增的任何入口都经本函数，
+  // 禁止再按入口各打一份补丁（缺补丁的入口会退回「已完成 0」）。
+  if (!live && !opts?.skipTerminalSnapshot) {
+    await syncRestoredRoundCounts(
+      String(newer.data.scrape_task_id || ""),
+      String(newer.data.source_run_id || ""),
+    );
+  }
+}
+
+// 039：按该轮真实任务快照补齐面板计数与失败留痕；取不到时保持合成值，不阻塞首屏。
+async function syncRestoredRoundCounts(scrapeRunId: string, screenRunId: string) {
+  const epoch = workflowEpoch.value;
+  const targets: Array<[typeof scrapeSnapshot, string]> = [
+    [scrapeSnapshot, scrapeRunId],
+    [screenSnapshot, screenRunId && screenRunId !== scrapeRunId ? screenRunId : ""],
+  ];
+  for (const [target, runId] of targets) {
+    if (!runId || !target.value) continue;
+    let state: Partial<ApiTaskSnapshot>;
+    try {
+      state = await apiRequest<Partial<ApiTaskSnapshot>>(
+        `/api/task-state/${encodeURIComponent(runId)}`);
+    } catch {
+      continue; // 取不到真实快照时保持合成值，不阻塞首屏
+    }
+    if (epoch !== workflowEpoch.value) return; // 期间切轮/开新一轮：不覆盖
+    const snap = target.value;
+    if (!snap) continue;
+    const total = Number(state.total || 0);
+    if (total > 0) snap.total = total;
+    snap.success_count = Number(state.success_count || 0);
+    snap.fail_count = Number(state.fail_count || 0);
+    snap.unstarted_count = Number(state.unstarted_count || 0);
+    snap.pending_count = Number(state.pending_count || 0);
+    if (state.source_total != null) snap.source_total = Number(state.source_total || 0);
+    if (state.scraped_count != null) snap.scraped_count = Number(state.scraped_count || 0);
+    if (state.combo_issues) snap.combo_issues = state.combo_issues;
+  }
 }
 
 // 最新结果加载：分别读取两个平台的最新快照并保留现有合并展示；
@@ -414,7 +464,7 @@ async function returnToLatest() {
       return;
     }
     if (fetched) {
-      applyFetchedLatestResult(fetched);
+      await applyFetchedLatestResult(fetched);
       activeStep.value = "results";
       return;
     }

@@ -25,6 +25,20 @@ def build_zhilian_detail_signal_map(
     return {**dict(base_mapping), **_ZHILIAN_DETAIL_SIGNAL_ADDITIONS}
 
 
+_ZHILIAN_LIST_SIGNAL_ADDITIONS: Mapping[str, str] = {
+    # 列表抓取同样会「连不上浏览器」：补齐映射后该失败具备注册表名称，
+    # 并恢复浏览器失联的自动重启重试资格（与详情侧同构）。
+    "cdp_unavailable": "source_cdp_unavailable",
+}
+
+
+def build_zhilian_list_signal_map(
+    base: Mapping[str, str | None],
+) -> dict[str, str | None]:
+    """在既有列表 signal 映射上补齐智联新增 signal。"""
+    return {**dict(base), **_ZHILIAN_LIST_SIGNAL_ADDITIONS}
+
+
 def normalize_zhilian_detail_signal(
     signal: Any,
     mapping: Mapping[str, str | None],

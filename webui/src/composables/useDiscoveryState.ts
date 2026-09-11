@@ -27,6 +27,7 @@ import type {
   PlatformFilterSchema,
   RoundContext,
   IntegritySnapshot,
+  ComboIssue,
   TaskSnapshot as ApiTaskSnapshot,
 } from "../types";
 import JobWorkspace from "../components/JobWorkspace.vue";
@@ -1208,6 +1209,8 @@ export interface TaskSnapshot {
   /** 一键链路标记：抓取任务完成后前端自动接续 AI 筛选。 */
   auto_screen?: boolean;
   integrity?: IntegritySnapshot | null;
+  /** 039：软失败组合留痕（恢复态面板悬停失败数字时逐条展示）。 */
+  combo_issues?: ComboIssue[] | null;
 }
 
 export interface OneClickLaunch {

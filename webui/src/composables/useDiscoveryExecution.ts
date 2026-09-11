@@ -252,6 +252,9 @@ async function restoreRunningTask() {
       screenTaskId.value = data.task_id;
       scrapeTaskId.value = data.scrape_task_id || "";
       scrapeCompleted.value = Boolean(data.scrape_completed);
+      // 039（用户拍板·单一来源）：终态错误快照同样按真实任务快照补齐计数，
+      // 面板数字与实时口径一致（取不到时保持原快照，不阻塞恢复）。
+      await deps.enrichPausedSnapshot(data.task_id, snapshot, "screen");
       screenSnapshot.value = snapshot;
       analysisReady.value = true;
       deps.enterSearchStep();
@@ -286,6 +289,9 @@ async function restoreRunningTask() {
         analysisReady.value = true;
         activeStep.value = "search";
         restoredTaskHint.value = "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取";
+        // 039（用户拍板·单一来源）：恢复出的面板与实时面板同一口径——完成/跳过/
+        // 未开始/已抓从该任务真实快照补齐，不让计数行整行消失（与暂停恢复同一条路径）。
+        await deps.enrichPausedSnapshot(data.task_id, snapshot, kind);
         scrapeSnapshot.value = {
           ...snapshot,
           scraped_count: data.scraped_count,
@@ -323,6 +329,9 @@ async function restoreRunningTask() {
       scrapeTaskId.value = data.task_id;
       analysisReady.value = true;
       activeStep.value = "search";
+      // 039（用户拍板·单一来源）：失败轮同样按真实任务快照补齐计数与失败留痕，
+      // 不允许「已抓 N 个岗位」等数字随失败整行收起。
+      await deps.enrichPausedSnapshot(data.task_id, snapshot, kind);
       scrapeSnapshot.value = {
         ...snapshot,
         scraped_count: data.scraped_count,
@@ -980,15 +989,25 @@ async function finishPausedTask(runId: string) {
     deps.persistFinishedState?.();
     deps.clearWorkflowState();
     const totalScraped = Number(data.result?.total_scraped ?? 0);
+    // 039：结束保存时保留该轮真实计数与失败留痕，面板不回退成「0 完成、全部未开始」。
+    const finishedCounts = (snap: TaskSnapshot | null) => ({
+      total: snap?.total,
+      success_count: snap?.success_count,
+      fail_count: snap?.fail_count,
+      unstarted_count: snap?.unstarted_count,
+      pending_count: snap?.pending_count,
+      combo_issues: snap?.combo_issues ?? null,
+    });
     const finished: TaskSnapshot = {
       status: "completed_with_pending", stage: "done",
       progress: { message: cleanupError || "已结束并保存部分结果" }, logs: [], error: cleanupError,
       scraped_count: totalScraped,
       source_total: totalScraped,
       platform: data.platform,
+      ...finishedCounts(scrapeSnapshot.value),
     };
     if (scrapeSnapshot.value) scrapeSnapshot.value = finished;
-    if (screenSnapshot.value) screenSnapshot.value = finished;
+    if (screenSnapshot.value) screenSnapshot.value = { ...finished, ...finishedCounts(screenSnapshot.value) };
     if (recrawlSnapshot.value) recrawlSnapshot.value = null;
     if (data.scrape_task_id) scrapeTaskId.value = data.scrape_task_id;
     if (data.result) {

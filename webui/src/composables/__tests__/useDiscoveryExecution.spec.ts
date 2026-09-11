@@ -620,6 +620,48 @@ describe("浏览器清理失败的公共动作反馈", () => {
   );
 });
 
+describe("039 结束保存后的面板计数", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset();
+  });
+
+  it("结束并保存结果后面板保留该轮真实计数与失败留痕，不回退成 0 完成", async () => {
+    apiRequestMock.mockResolvedValue({
+      ok: true,
+      platform: "boss",
+      status: "completed_with_pending",
+      result: { total_scraped: 3, jobs: [] },
+    });
+    const state = makeState({
+      screenTaskId: ref("screen-039-finish"),
+      screenSnapshot: ref({
+        status: "paused", total: 16, success_count: 14, fail_count: 2,
+        unstarted_count: 0, pending_count: 0,
+        combo_issues: [{
+          combo_key: "A|上海", code: "source_timeout",
+          code_text: "抓取超时", reason: "第 9 页无响应", ts: "t1",
+        }],
+      }),
+      scrapeSnapshot: ref({
+        status: "done", total: 2, success_count: 2,
+        fail_count: 0, unstarted_count: 0,
+      }),
+    });
+    const deps = makeDeps();
+    const execution = useDiscoveryExecution(state, deps);
+
+    await execution.finishPausedTask("screen-039-finish");
+
+    expect(state.screenSnapshot.value?.status).toBe("completed_with_pending");
+    expect(state.screenSnapshot.value?.total).toBe(16);
+    expect(state.screenSnapshot.value?.success_count).toBe(14);
+    expect(state.screenSnapshot.value?.fail_count).toBe(2);
+    expect(state.screenSnapshot.value?.unstarted_count).toBe(0);
+    expect(state.screenSnapshot.value?.combo_issues?.[0]?.combo_key).toBe("A|上海");
+    expect(state.scrapeSnapshot.value?.success_count).toBe(2);
+  });
+});
+
 describe("抓取终止后的结果收口", () => {
   beforeEach(() => {
     apiRequestMock.mockReset();

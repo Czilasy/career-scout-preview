@@ -555,7 +555,8 @@ class RunSearchAllFailTests(unittest.TestCase):
                 return SourceOutcome.success(safe_log="ok", input_hash="")
             def fetch_list(self, plan_item, *, on_page_completed=None):
                 call_count[0] += 1
-                if call_count[0] == 1:
+                # 039：首个组合首次失败会重试一次；两次都超时才按跳过定稿。
+                if call_count[0] <= 2:
                     return SourceOutcome.failure(
                         failed_code="source_timeout", safe_log="reason=单组合超时")
                 return SourceOutcome.success(

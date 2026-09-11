@@ -352,6 +352,31 @@ function retryMergeUpgrade(taskId: string, attempt: number, roundEpoch = workflo
   }, delay);
 }
 
+// 039（用户拍板·数字永久展示）：本轮定格为“已抓取，未筛选”时，03 面板同样要
+// 给出真实计数——已完成 0 / N、未开始 N（N = 本轮已抓岗位，即筛选工作单元），
+// 与刷新恢复后的合成快照同口径；不得以“没有筛选单元”为由让面板没有数字。
+function markScrapedOnlyScreenCounts(total: number): void {
+  const count = Math.max(0, Number(total) || 0);
+  const snap = scrapeSnapshot.value;
+  screenSnapshot.value = {
+    status: "completed",
+    stage: "done",
+    progress: { message: "已抓取，未筛选" },
+    logs: [],
+    total: count,
+    success_count: 0,
+    fail_count: 0,
+    unstarted_count: count,
+    source_total: count,
+    scraped_count: count,
+    pending_count: 0,
+    platform: snap?.platform,
+    integrity: snap?.integrity || null,
+    started_at: snap?.started_at,
+    finished_at: snap?.finished_at,
+  };
+}
+
 // B038：把抓取结果固化为"已抓取，未筛选"轮，供自动保存与手动查看共用。
 async function saveScrapedOnlySnapshot(markViewed = false): Promise<"saved" | "zero" | "failed"> {
   const roundEpoch = workflowEpoch.value;
@@ -368,8 +393,11 @@ async function saveScrapedOnlySnapshot(markViewed = false): Promise<"saved" | "z
   );
   if (scrapedCount === 0) {
     deps.setPipelineResult(emptyResult());
+    markScrapedOnlyScreenCounts(0);
     if (!markViewed) resultLoaded.value = false;
-    if (markViewed) currentRoundStatus.value = "scraped_only";
+    // 本轮已是“已抓取，未筛选”：03 面板的开始动作必须保持可用（screenStatus
+    // 依赖该次级状态，completed 快照才会派生 start 而不是“已完成无动作”）。
+    currentRoundStatus.value = "scraped_only";
     return "zero";
   }
   try {
@@ -386,8 +414,13 @@ async function saveScrapedOnlySnapshot(markViewed = false): Promise<"saved" | "z
     if (roundEpoch !== workflowEpoch.value) return "failed";
     if (data.saved && data.result) deps.setPipelineResult(data.result);
     else deps.setPipelineResult(emptyResult());
+    markScrapedOnlyScreenCounts(
+      Number(data.result?.total_scraped ?? scrapedCount ?? 0),
+    );
     if (!markViewed) resultLoaded.value = false;
-    if (markViewed) currentRoundStatus.value = "scraped_only";
+    // 本轮已是“已抓取，未筛选”：03 面板的开始动作必须保持可用（screenStatus
+    // 依赖该次级状态，completed 快照才会派生 start 而不是“已完成无动作”）。
+    currentRoundStatus.value = "scraped_only";
     return "saved";
   } catch (error) {
     deps.notify(errorMessage(error, "保存结果失败"), "error");

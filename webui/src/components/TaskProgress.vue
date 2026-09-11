@@ -384,10 +384,18 @@ const failureVisible = computed(() => {
     || ["failed", "unverifiable", "interrupted"].includes(integrityConclusion.value);
 });
 
-// 016：软失败组合留痕摘要（不阻塞任务，但让用户看见哪些组合失败、为什么）。
+// 039：失败细节不再成排展示；用户悬停失败数量时才逐条给出「组合名：简单原因」。
+// 空结果是中性留痕（不是失败），不进失败浮窗；展示上限 5 条，超出提示共多少条。
 const comboIssues = computed(() =>
-  (props.snapshot?.combo_issues || []).slice(0, 5),
+  (props.snapshot?.combo_issues || []).filter((issue) => issue.code !== "combo_empty"),
 );
+const failTooltipRows = computed(() => comboIssues.value.slice(0, 5));
+const failTooltipMore = computed(() => Math.max(0, comboIssues.value.length - 5));
+const failTooltipVisible = ref(false);
+function issueReason(issue: { code_text?: string; reason?: string }): string {
+  // 统一注册表的简短名称优先；缺失时回落诊断原因，不用「已跳过」这类词代替原因。
+  return String(issue.code_text || issue.reason || "抓取未完成");
+}
 
 // B052：暂停/失败统一内联展示「中文原因 · 错误字段」，错误字段红色。
 const failureLine = computed(() => {
@@ -425,9 +433,13 @@ const failureLine = computed(() => {
 // 切片7：完整计数画面（FR-037）。total>0 时才显示
 const scrapedCount = computed(() => Number(props.snapshot?.scraped_count || 0));
 const showCounts = computed(() => {
-  const t = Number(props.snapshot?.total || 0);
-  if (["done", "completed"].includes(props.snapshot?.status || "")) return false;
-  return t > 0 || sourceTotal.value > 0 || scrapedCount.value > 0;
+  // 039（FR-016 修订，用户拍板）：收尾后 02/03 两个面板都显示各自口径的计数，
+  // 不再按「已完成」隐藏。只要该轮还有可展示的数字（总数 / 来源数 / 已抓岗位）
+  // 就展示计数行；只有真正没有任何数字（空白/刚起步快照）才整行不渲染。
+  // 禁止因缺少某一个口径的 total 把「已抓 N 个岗位」等真实数字一起收起。
+  return Number(props.snapshot?.total || 0) > 0
+    || sourceTotal.value > 0
+    || scrapedCount.value > 0;
 });
 const successCount = computed(() => Number(props.snapshot?.success_count || 0));
 const failCount = computed(() => Number(props.snapshot?.fail_count || 0));
@@ -457,7 +469,16 @@ const scrapeCountState = computed(() => {
   if (props.snapshot?.status === "paused") {
     return { completed: comboCurrent, running: 0, unstarted: Math.max(0, comboTotal - comboCurrent) };
   }
-  return { completed: 0, running: 0, unstarted: comboTotal };
+  // 039 收尾/未知阶段：以后端真实结论为准（抓完 + 跳过 + 未开始 = 总数），
+  // 不再写死“0 完成、全部未开始”这类与失败数量并存的矛盾计数。
+  const settledCompleted = Math.min(comboTotal, Math.max(0, successCount.value));
+  const settledSkipped = Math.min(
+    comboTotal - settledCompleted, Math.max(0, failCount.value));
+  return {
+    completed: settledCompleted,
+    running: 0,
+    unstarted: Math.max(0, comboTotal - settledCompleted - settledSkipped),
+  };
 });
 const currentCompletedCount = computed(() => scrapeCountState.value.completed);
 const currentRunningCount = computed(() => scrapeCountState.value.running);
@@ -527,16 +548,6 @@ const timeLabel = computed(() => {
       {{ failureLine.reason }}<span v-if="failureLine.code" class="error-field" data-testid="error-field"> · {{ failureLine.code }}</span>
     </p>
     <p v-else class="task-message">{{ snapshot.error || integrityMessage || message }}</p>
-    <ul v-if="comboIssues.length" class="task-combo-issues" data-testid="combo-issues">
-      <li
-        v-for="issue in comboIssues"
-        :key="`${issue.combo_key}:${issue.ts}`"
-        class="task-combo-issue"
-      >
-        <span class="task-combo-issue-key">{{ issue.combo_key || "组合" }}</span>
-        <span class="task-combo-issue-text">{{ issue.code_text }}<template v-if="issue.reason"> · {{ issue.reason }}</template></span>
-      </li>
-    </ul>
     <!-- 切片7：完整计数画面（FR-037）。按语义分组：来源 / 粗筛 / 当前阶段 / 待确认 / 失败 -->
     <div v-if="showCounts" class="task-counts" data-testid="task-counts">
       <div v-if="scrapedCount > 0" class="count-group count-scraped">
@@ -555,7 +566,9 @@ const timeLabel = computed(() => {
           <span class="count-chip dropped">淘汰 {{ droppedCount }}</span>
         </span>
       </div>
-      <div class="count-group count-current">
+      <!-- 039：完成/未开始需要真实分母；分母未知（0）时不渲染「已完成 0 / 0」空数字，
+           但该轮其它真实数字（已抓/来源/失败）照常展示，不整行收起。 -->
+      <div v-if="totalCount > 0" class="count-group count-current">
         <span class="count-label">当前</span>
         <span class="count-row">
           <span class="count-chip success">已完成 {{ currentCompletedCount }} / {{ totalCount }}</span>
@@ -571,39 +584,70 @@ const timeLabel = computed(() => {
         <span class="count-label">待确认</span>
         <span class="count-chip pending">{{ pendingCount }}</span>
       </div>
-      <div v-if="showFailCount" class="count-group count-fail">
+      <div
+        v-if="showFailCount"
+        class="count-group count-fail"
+        data-testid="fail-count-group"
+        @mouseenter="failTooltipVisible = true"
+        @mouseleave="failTooltipVisible = false"
+      >
         <span class="count-label">失败</span>
-        <span class="count-chip fail">{{ failCount }}</span>
+        <span
+          class="count-chip fail"
+          tabindex="0"
+          data-testid="fail-count"
+          @focus="failTooltipVisible = true"
+          @blur="failTooltipVisible = false"
+        >{{ failCount }}</span>
+        <div
+          v-if="failTooltipVisible && failTooltipRows.length"
+          class="fail-tooltip"
+          role="tooltip"
+          data-testid="fail-tooltip"
+        >
+          <p
+            v-for="issue in failTooltipRows"
+            :key="`${issue.combo_key}:${issue.ts}`"
+            class="fail-tooltip-row"
+          >{{ issue.combo_key || "组合" }}：{{ issueReason(issue) }}</p>
+          <p v-if="failTooltipMore" class="fail-tooltip-more">另有 {{ failTooltipMore }} 条</p>
+        </div>
       </div>
     </div>
   </section>
 </template>
 
 <style scoped>
-/* 016：软失败组合留痕摘要（最多 5 条，弱化样式不与暂停原因抢焦点） */
-.task-combo-issues {
+/* 039：失败只是一个数字；用户主动悬停时才出现逐条原因的小浮窗（弱化样式，不抢暂停原因焦点）。 */
+.count-fail {
+  position: relative;
+}
+.fail-tooltip {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 5;
   display: grid;
   gap: 4px;
-  margin: 6px 0 0;
-  padding: 0;
-  list-style: none;
+  min-width: 180px;
+  max-width: 320px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
 }
-.task-combo-issue {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+.fail-tooltip-row {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  word-break: break-all;
+}
+.fail-tooltip-more {
+  margin: 0;
   font-size: 12px;
   color: var(--muted);
-}
-.task-combo-issue-key {
-  flex: 0 0 auto;
-  font-weight: 600;
-}
-.task-combo-issue-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .error-field {
   color: var(--danger);

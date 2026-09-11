@@ -1193,7 +1193,8 @@ class EmptyConfirmTests(unittest.TestCase):
                 failed_code="source_invalid_output", safe_log="retry_broken"),
         ])
         self.assertFalse(result["ok"], result)
-        self.assertEqual(source.fetch_calls, 2)
+        # 039：空复核后的失败属偶发白名单，会再自动重试一次（2 → 3）。
+        self.assertEqual(source.fetch_calls, 3)
         failed = [entry for _combo, entry in issues if entry.get("kind") == "combo_failed"]
         self.assertEqual(len(failed), 1)
         self.assertEqual(failed[0]["failed_code"], "source_invalid_output")
@@ -1506,7 +1507,8 @@ class Spec006ProgressSemanticsTests(unittest.TestCase):
 
             def fetch_list(self, _plan_item, *, on_page_completed=None):
                 self.calls += 1
-                if self.calls == 1:
+                # 039：首个组合首次尝试失败后会自动重试一次；两次都失败才定稿跳过。
+                if self.calls <= 2:
                     return SourceOutcome.failure(
                         failed_code="source_unknown_error", safe_log="普通失败",
                     )

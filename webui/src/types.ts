@@ -256,6 +256,8 @@ export interface TaskSnapshot {
   dropped_count?: number;
   pending_count?: number;
   source_total?: number;
+  /** 039：本轮已抓岗位数（/api/task-state 返回；恢复态快照对齐用）。 */
+  scraped_count?: number;
   pause_info?: TaskPauseInfo | null;
   execution_config?: Record<string, unknown> | null;
   platform?: Platform;

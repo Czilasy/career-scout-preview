@@ -124,6 +124,7 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/pipeline_exec_chrome.py` — 调试浏览器生命周期：就绪检查与关闭（021 B7 T023）
 - `webui/pipeline_exec_filters.py` — 搜索参数展开与本地岗位过滤匹配（021 B7 T023）
 - `webui/pipeline_exec_search.py` — run_search：关键词×城市组合抓取主流程（021 B7 T023）
+- `webui/pipeline_exec_retry.py` — 偶发失败一次重试的判定与白箱 retry_scheduled 事实/断点续抓字段构造（039）；纯逻辑，仅由 pipeline_exec_search 单向调用
 - `webui/pipeline_exec_details.py` — fetch_job_details：批量详情抓取与 R2 会话/尝试事实接线（021 B7 T023 / 038 B091 V4）
 - `webui/pipeline_exec_artifacts.py` — 组合产物检查点与冻结清单（021 B7 T023）
 - `webui/pipeline_exec_tuning.py` — 调优轮次执行器 TuningRoundRunner（021 B7 T023）
