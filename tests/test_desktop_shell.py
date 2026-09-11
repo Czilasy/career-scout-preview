@@ -26,7 +26,7 @@ from packaging import desktop
 # 测试替身
 # ---------------------------------------------------------------------------
 class _FakeEvent:
-    """模拟 pywebview window.events.closing 事件（支持 += 注册 handler）。"""
+    """模拟 pywebview window.events.* 事件（支持 += 注册与 fire）。"""
 
     def __init__(self):
         self.handlers = []
@@ -35,17 +35,25 @@ class _FakeEvent:
         self.handlers.append(handler)
         return self
 
+    def fire(self, *args):
+        for handler in list(self.handlers):
+            handler(*args)
+
+
+_EVENT_NAMES = ("closing", "resized", "moved", "maximized", "restored")
+
 
 class _FakeWindow:
-    """模拟 pywebview Window 对象。"""
+    """模拟 pywebview Window 对象（属性可变，事件可 fire）。"""
 
     def __init__(self, **kwargs):
         self.width = kwargs.get("width", desktop.DEFAULT_WIDTH)
         self.height = kwargs.get("height", desktop.DEFAULT_HEIGHT)
         self.x = kwargs.get("x", 100)
         self.y = kwargs.get("y", 100)
-        closing = _FakeEvent()
-        self.events = type("Events", (), {"closing": closing})()
+        self.events = type(
+            "Events", (), {name: _FakeEvent() for name in _EVENT_NAMES}
+        )()
 
 
 class _FakeWebview:

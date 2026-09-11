@@ -82,10 +82,6 @@ export function buildLocationPayload(locations: LocationCondition[]): LocationCo
     });
 }
 
-export function locationCombinationCount(locations: LocationCondition[]): number {
-  return Array.isArray(locations) ? locations.filter(hasDistrict).length : 0;
-}
-
 export function locationSummary(locations: LocationCondition[] | undefined | null): string {
   if (!Array.isArray(locations)) return "";
   const byCity = new Map<string, string[]>();

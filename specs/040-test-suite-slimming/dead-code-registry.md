@@ -30,6 +30,15 @@
 | D004 | `webui/src/screenFlow.ts` 的 `primaryActionLabel`（L99-101）+ `screenFlow.spec.ts` 的导入项与 `it("maps primary action labels")` 用例 | `primaryActionLabel` → 仅 `screenFlow.ts` 定义处 + `screenFlow.spec.ts`（L7 导入、L102-103 断言） | 删函数 + 测试用例 | 前端 -1 例 |
 | D005 | `webui/src/location.ts` 的 `locationCombinationCount`（L85-87）+ `location.spec.ts` 的导入项与 `it("counts only district-level locations")` 用例 | `locationCombinationCount` → 仅 `location.ts` 定义处 + `location.spec.ts`（L3 导入、L52-53 断言）；私有 `hasDistrict` 另被 `locationSummary` 使用，保留 | 删函数 + 测试用例 | 前端 -1 例 |
 
+## 处置记录（2026-09-12 批五实施，逐项经用户同意）
+
+| 项 | 处置 | 用户同意依据 | 验证 |
+|---|---|---|---|
+| D001+D002 | 已删 `webui/semantic.py` + `tests/test_semantic.py` | 2026-09-12 第3题用户答"删" | R1 全仓零引用复核；后端 -21 例 |
+| D003 | 已删五个孤儿导出 + `INTEGRITY_LABELS` + 5 类型导入 + spec 12 例（含"任务规模归类"） | 2026-09-12 第4题用户答"删" | 前端构建成功、858 例全绿 |
+| D004 | 已删 `primaryActionLabel` + spec 1 例 | 2026-09-12 第5题用户答"删" | 同上 |
+| D005 | 已删 `locationCombinationCount` + spec 1 例（`hasDistrict` 保留） | 2026-09-12 第6题用户答"是" | 同上 |
+
 ## 已排除（复核后判定保留）
 
 | # | 位置 | 结论 | 依据 |

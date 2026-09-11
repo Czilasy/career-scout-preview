@@ -36,7 +36,6 @@ from webui.pipeline_job_identity import (
 BOSS_URL = "https://www.zhipin.com/job_detail/abc123.html"
 BOSS_URL_OTHER = "https://www.zhipin.com/job_detail/zzz999.html"
 ZHILIAN_URL = "https://www.zhaopin.com/jobdetail/xyz789.htm"
-ZHILIAN_URL_OTHER = "https://www.zhaopin.com/jobdetail/qqq111.htm"
 
 
 def _create_schema(conn):

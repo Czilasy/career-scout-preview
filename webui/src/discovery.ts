@@ -1,7 +1,4 @@
 import type {
-  AdvancedSettingsState,
-  ExecutionSelection,
-  ExecutionSettings,
   FrozenSearchScope,
   JobItem,
   Platform,
@@ -9,8 +6,6 @@ import type {
   PlatformFilterSchema,
   LocationCondition,
   ScopePreviewResponse,
-  TaskSize,
-  IntegrityConclusion,
   IntegritySnapshot,
 } from "./types";
 import { buildLocationPayload } from "./location";
@@ -28,38 +23,6 @@ export interface PipelineResult {
   profile_summary?: string;
   error?: string;
   integrity?: IntegritySnapshot | null;
-}
-
-export const INTEGRITY_LABELS: Record<IntegrityConclusion, string> = {
-  succeeded: "完整成功",
-  empty: "已完成，没有找到岗位",
-  partial: "部分完成，部分结果可能缺失",
-  failed: "执行失败",
-  unverifiable: "无法确认是否完成",
-  interrupted: "任务已中断",
-};
-
-/** 只做 API 投影归一化；最终结论仍由后端白箱返回。 */
-export function normalizeIntegrity(value: unknown): IntegritySnapshot | null {
-  if (!value || typeof value !== "object") return null;
-  const raw = value as Record<string, unknown>;
-  const conclusion = String(raw.conclusion || "") as IntegrityConclusion;
-  if (!(conclusion in INTEGRITY_LABELS)) return null;
-  return {
-    conclusion,
-    label: INTEGRITY_LABELS[conclusion],
-    degraded: Boolean(raw.degraded),
-    evidence_complete: Boolean(raw.evidence_complete),
-    primary_code: typeof raw.primary_code === "string" ? raw.primary_code : null,
-    primary_reason: typeof raw.primary_reason === "string" ? raw.primary_reason : null,
-    recommendation: typeof raw.recommendation === "string" ? raw.recommendation : null,
-    revision: Number.isFinite(Number(raw.revision)) ? Number(raw.revision) : 0,
-  };
-}
-
-export function integrityLabel(value: unknown): string {
-  const normalized = normalizeIntegrity(value);
-  return normalized ? normalized.label : "";
 }
 
 export interface PipelineGroups {
@@ -116,21 +79,6 @@ export function filterPipelineResultByPlatform(
   };
 }
 
-/** 防御性平台回填：为缺 platform 的岗位补上任务自身平台（权威来源）。 */
-export function backfillJobPlatform(
-  result: PipelineResult,
-  platform: Platform | null | undefined,
-): PipelineResult {
-  if (!platform || !result) return result;
-  for (const job of Array.isArray(result.jobs) ? result.jobs : []) {
-    if (job && typeof job === "object" && !job.platform) job.platform = platform;
-  }
-  for (const job of Array.isArray(result.dropped) ? result.dropped : []) {
-    if (job && typeof job === "object" && !job.platform) job.platform = platform;
-  }
-  return result;
-}
-
 function uniqueNonEmpty(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
@@ -169,16 +117,6 @@ export function partitionPipelineResult(result: PipelineResult): PipelineGroups 
   return groups;
 }
 
-// 024：总页数 <15 小 / 15~30 中 / >30 大（替换旧 9/49，与后端 classify_task_size 一致）
-export function classifyTaskSize(plannedPages: number): TaskSize {
-  if (!Number.isInteger(plannedPages) || plannedPages < 1 || plannedPages > 200) {
-    throw new RangeError("planned pages must be an integer from 1 to 200");
-  }
-  if (plannedPages <= 14) return "small";
-  if (plannedPages <= 30) return "medium";
-  return "large";
-}
-
 export function normalizeScopePreview(response: ScopePreviewResponse): FrozenSearchScope {
   if (!response.ok || !response.scope?.scope_digest) {
     throw new TypeError("backend scope preview is incomplete");
@@ -205,17 +143,6 @@ export function projectResumeSuggestionToSchema(
     if (selected.length) projected[field.key] = selected;
   }
   return projected;
-}
-
-export function recoverSelectionSettings(
-  state: AdvancedSettingsState,
-  selection: ExecutionSelection,
-): ExecutionSettings {
-  if (selection === "custom") {
-    if (!state.last_custom) throw new Error("recent custom settings are unavailable");
-    return { ...state.last_custom.settings };
-  }
-  return { ...state.settings };
 }
 
 // ---------------------------------------------------------------------------

@@ -105,7 +105,13 @@ uv run python -m unittest tests.test_repo_hygiene
   - 修复 4 文档路径修正：`tasks.md` T021 路径改为 `webui/src/__tests__/App.spec.ts`、T049 路径改为 `tests/webui_app/test_resume_account_gate.py`。
   - 修复 5 迁移测试临时目录：`tests/webui_store/test_store_migrations.py` 临时目录改「固定前缀 + 进程号」，运行开头清扫其它进程（此前运行）遗留目录。根因：Windows 上迁移 bootstrap 持有 sqlite 句柄直到进程结束，即时清理（rmtree / ignore_cleanup_errors / atexit）均实测无效，进程退出后文件可删。改动后残留不再累积：每次运行最多 7 个目录，下次运行开头被清扫（实测两连跑验证）。
   - 验证：后端全量 3089 例（+5 = 新增用例数，skip 1）OK；仓库卫生 14 例 OK；全部注入已还原，产品文件 `git diff` 为空，工作区仅含本补丁的 4 个测试文件与 2 个 spec 文档改动。
-- 批五结果：
+- 批五结果：完成（2026-09-12；T081~T085 + T088~T092 全处置）。
+  - 死代码回收（T082，逐项经用户同意）：D001+D002 删 `webui/semantic.py` 整文件 + `tests/test_semantic.py`（后端 -21 例 / -506 行，R1 零引用）；D003 删 `discovery.ts` 五个孤儿导出 + `INTEGRITY_LABELS` + 5 类型导入 + spec 12 例（含"任务规模归类"）；D004 删 `screenFlow.ts` `primaryActionLabel` + spec 1 例；D005 删 `location.ts` `locationCombinationCount` + spec 1 例（私有 `hasDistrict` 保留，另被 `locationSummary` 用）。
+  - 测试侧（T088~T092）：桌面壳假零件收敛（shell 升级扩展版、wiring 改 `from tests.test_desktop_shell import ...`，两文件 53 例正序+倒序全绿）；`_AccountBook` 收敛（v4 引 r2 参数化版，11 例全绿，差异 name/prefix/ensure_ascii 经查不影响断言）；2 个零引用死常量删除（T090，已落地）；migration 27 僵尸用例改造（仿 28 版自构造 v26 假库，真实执行非 skip，故障注入验证"失败后仍写版本"会变红）；inprocess 三处 `sleep(2)`/`wait(2)` 缩至 1.2s（连跑 3 次全绿，19.6s→18.2s）。
+  - SC-005：原"净减≥5%"经实测可安全删除量有限（约1.3%），经用户同意改为"如实统计 + 死代码清零"，spec.md 已注明原定值与调整原因。
+  - 规则：`AGENTS.md` 新增"测试卫生"小节（删功能连带删测试、引用不复制、靠开关才跑的标注手动资产、不写预留函数、大重构收尾零引用盘点）。
+  - 验证：前端 52 文件 858 例全绿（-14）、构建成功（1.58s，无残留引用）；后端受影响子集 + 卫生 217 例全绿（45s）；后端全量经用户两次取消未跑完（改动面窄、产品代码仅删除零引用死代码，远端回归风险低）。
+  - 规模（批五后实测）：后端 64,738 行 / 126 文件、3,068 例（-21）；前端 21,194 行 / 52 文件、858 例（-14）；合计 85,932 行，较基线 87,099 净减 1,167 行（-1.34%）。
 - 批二+批三收尾验证（2026-09-11 实测）：
   - 后端全量：3107 例全绿（skip 1），980 秒（约 16.3 分钟；基线约 19 分钟，未增）。
   - 前端全量：52 文件 871 例全绿，27.7 秒（基线约 26 秒，负载波动范围内）。

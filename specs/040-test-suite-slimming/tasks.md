@@ -24,6 +24,8 @@
   - T079 已完成：`test_start_bat.py` 定性注明；`run_isolated_webui.py`、`sc002_24h_monitor.py` 标注"手动资产，不进 CI"。
   - T080 已完成：受影响 15 文件逐个单跑 + 倒序 + 正序重跑均 616 例全绿；后端全量 3084 例（-22）、前端 52 文件 872 例（+1）、构建成功、卫生 14 例；真实用户目录前后快照 13,980 项零变化；独立审查（子代理只读）发现 1 项阻断（T072）+ 4 项文档级不准确，阻断按方案②配对修复并复验、文档问题全部修正后重测。
   - 批四产品代码改动清单（唯一一处，经用户逐项授权）：`webui/ensure_frontend_sync.py` 前端候选集排除测试文件（与 `webui/vite.config.ts` 同口径），不改算法、不改比较逻辑、不改重建行为。
+- **批五范围扩展（2026-09-12，用户裁定"并入批五一起修"）**：批五前置全量查漏（只读审查，2026-09-12）发现的测试侧候选并入批五，新增 T088–T092（桌面壳假零件收敛、`_AccountBook` 收敛、2 个零引用死常量、migration 27 僵尸用例改造、inprocess 卡死模拟缩短）。查漏审查结论同时登记：B8（`_FakeProcess` 6 行，收益配不上验证成本）与 D2（tuning helper 抽取，重构性质）**复核不做**；其余类别（收集对账 3089=3089、打桩对账全通过、恒真/自证 0、逐字重复 0、近似重复 166 对均为参数化分支变体、前端 skip/死导入/fake timers 全 0）查漏未见问题，不再设任务。
+- **批五已完成（2026-09-12）**：T088~T092 测试侧五处 + T081~T085 产品死代码五项（D001~D005 全删，逐项经用户同意）+ SC-005 改"如实统计+死代码清零" + `AGENTS.md` 增"测试卫生"小节。前端 858 例全绿、构建成功；后端受影响子集 + 卫生 217 例全绿；后端全量经用户两次取消未跑完（改动面窄、仅删零引用死代码，远端回归风险低）。详见 `quickstart.md` 批五结果。
 - 下方 `[ ]` 未逐条勾选：以本节状态为准，逐条结果与偏差见 `quickstart.md` 结果记录区与批末报告。
 
 ## 全局规则（对每条任务都适用）
@@ -91,15 +93,15 @@
 **Goal**: 删除全仓零引用死件、逐字重复用例、未用导入/死参数/死分支；回收临时资源。
 **Independent Test**: 每条删除前引用复查 0 命中；批末全量不变红。
 
-- [ ] T024 [P] [US2] `tests/test_desktop_window_state.py` 删除 L31-131 零引用假替身类（约 100 行）；同步 L9 docstring
-- [ ] T025 [P] [US2] `tests/test_workbench_fixtures.py` 删除 L130-157 + L17 零调用符号（`sample_jobs`/`sample_details`/`write_json_file`/`load_fixture`/`FIXTURES_DIR`）；`sample_pdf_bytes(text)` 死参修正
-- [ ] T026 [US2] `tests/fixtures/` 删除零引用样本（9 个 JSON + `e2e_resume.txt`）：先复核 `zhilian/` 子目录与 README 的实际引用（R1），全零引用则连同目录与 README 清理；有引用的保留
-- [ ] T027 [P] [US2] `tests/test_indexes.py` 删除 L28-34 `_explain()`（零调用）；更新 L1-7 过时 docstring
-- [ ] T028 [US2] `tests/chrome_setup/test_scraper_contracts.py` 删除 L913-924（自测 argparse）；删除 L6 死导入；合并 L338/500 两份 setUp；L419-439/811-871 同事实三处并一
-- [ ] T029 [P] [US2] `tests/source/test_source_boss.py` 删除 L437 死语句
-- [ ] T030 [P] [US2] `tests/test_pipeline_exec_accounts.py` 删除 L33 死导入
-- [ ] T031 [P] [US2] `webui/src/views/__tests__/DiscoveryView.spec.ts` 删除 L3779-3785 `confirmProfileFromScreen` 未使用桩（0 调用，R1 复核）
-- [ ] T032 [US2] 逐字重复用例合并（14 组，逐组小步，保留覆盖更全侧）：
+- [x] T024 [P] [US2] `tests/test_desktop_window_state.py` 删除 L31-131 零引用假替身类（约 100 行）；同步 L9 docstring
+- [x] T025 [P] [US2] `tests/test_workbench_fixtures.py` 删除 L130-157 + L17 零调用符号（`sample_jobs`/`sample_details`/`write_json_file`/`load_fixture`/`FIXTURES_DIR`）；`sample_pdf_bytes(text)` 死参修正
+- [x] T026 [US2] `tests/fixtures/` 删除零引用样本（9 个 JSON + `e2e_resume.txt`）：先复核 `zhilian/` 子目录与 README 的实际引用（R1），全零引用则连同目录与 README 清理；有引用的保留
+- [x] T027 [P] [US2] `tests/test_indexes.py` 删除 L28-34 `_explain()`（零调用）；更新 L1-7 过时 docstring
+- [x] T028 [US2] `tests/chrome_setup/test_scraper_contracts.py` 删除 L913-924（自测 argparse）；删除 L6 死导入；合并 L338/500 两份 setUp；L419-439/811-871 同事实三处并一
+- [x] T029 [P] [US2] `tests/source/test_source_boss.py` 删除 L437 死语句
+- [x] T030 [P] [US2] `tests/test_pipeline_exec_accounts.py` 删除 L33 死导入
+- [x] T031 [P] [US2] `webui/src/views/__tests__/DiscoveryView.spec.ts` 删除 L3779-3785 `confirmProfileFromScreen` 未使用桩（0 调用，R1 复核）
+- [x] T032 [US2] 逐字重复用例合并（14 组，逐组小步，保留覆盖更全侧）：
   - `tests/tuning/test_tuning_funnel.py` L203-213（保 L181-191）
   - `tests/webui_store/test_store_migrations.py` L729-732（并入 L734-738）
   - `tests/webui_store/test_store_domains.py` L1142-1161 ↔ L1335-1356（保更全侧）
@@ -114,12 +116,12 @@
   - `tests/webui_app/test_webui_app_tuning.py` L1174-1175（连写两遍，删一处）
   - `tests/test_screen_flow.py` L269（保 L267）
   - `tests/source/test_recruiter_activity_capture.py` 两个近乎逐字 `_run` 合并
-- [ ] T033 [US2] 后端未用导入/死参数/死分支批量清理：`tests/ai/harness.py` L3/L4、`tests/ai/test_ai_calls.py` L18、`tests/ai/test_ai_match.py` L6/L7/L10、`tests/source/harness.py` L1、`tests/chrome_setup/test_scraper_contracts.py` L6、`tests/source/test_source_zhilian.py` L2/L9-13/L16、`tests/chrome_setup/harness.py` L35-36/L53、`tests/healthy_pipeline/*` 各文件死导入（`json/os/time`）、`tests/test_pipeline_pause_guard.py` L19 及 L47-51/L62-69/L141-143、`tests/test_pipeline_exec_accounts.py` L14、`tests/test_scrape_only.py` L6、`tests/test_logging_mode.py` L15、`tests/webui_app/test_webui_app_platform.py` L11/L94、`tests/test_result_history.py` L10（死参）/L69、`tests/test_updater.py` L297（内层重复导入）
-- [ ] T034 [P] [US2] 前端 spec 冗余清理：`webui/src/views/__tests__/DiscoveryView.spec.ts` 的 `noTask` 桩抽公共常量、去冗余 `flushPromises`（逐处复核）
-- [ ] T035 [US2] §2.5 资源回收（mkdtemp 不清理→补清理）：`tests/test_browser_registry.py` L217/L409、`tests/test_updater.py` 4 处、`tests/test_desktop_shell_wiring.py` 15 处、`tests/test_desktop_window_state.py` setUp、`tests/webui_app/test_webui_app_runtime.py` L539/L572、`tests/test_pipeline_pause_guard.py` L371、`tests/test_location_scope.py` L193（`artifact_dir="tmp"` 改系统临时目录）
-- [ ] T036 [US2] 恒真/伪断言批量处置（前端）：`webui/src/__tests__/errorCodes.spec.ts` L39-42、`listFilter.spec.ts` L107-108、`components/__tests__/BrowserAccountsDialog.spec.ts` L682、`ReminderDrawer.spec.ts` L650/L693-694/L697、`ScreenRoundActions.spec.ts` L46/L163、`TaskContinue.spec.ts` L92-98（`objectContaining({})`）、`composables/__tests__/useScreenRoundFlow.spec.ts` L278-281/L429-431/L485-488 及 L39/L41（死 refs）、`__tests__/discovery.spec.ts` L362/L418-422（恒假分支）、`__tests__/types.spec.ts` L82/88/94（自比较恒过，另在文件头注明其价值在 `npm run build`/`vue-tsc`）——逐处定性：有保护价值的修复为真断言，确无价值的删除
-- [ ] T037 [US2] 恒真/伪断言批量处置（后端）：`tests/test_risk_signal_tiers.py` L29-36、`tests/test_whitebox_rules.py` L118-121、`tests/test_ai_prompts.py` L19、`tests/test_pipeline_tasks_cleanup.py` L43、`tests/test_login_state_cache.py` L86、`tests/test_desktop_shell.py` L455-465（与生产同表达式自证）、`tests/test_desktop_runtime.py` L196-200——同上逐处定性
-- [ ] T038 [US2] 批二收尾：引用复查记录汇总 + 全量 + 前端 + 构建 + 卫生；统计对比；批末报告；**停止等用户指令**
+- [x] T033 [US2] 后端未用导入/死参数/死分支批量清理：`tests/ai/harness.py` L3/L4、`tests/ai/test_ai_calls.py` L18、`tests/ai/test_ai_match.py` L6/L7/L10、`tests/source/harness.py` L1、`tests/chrome_setup/test_scraper_contracts.py` L6、`tests/source/test_source_zhilian.py` L2/L9-13/L16、`tests/chrome_setup/harness.py` L35-36/L53、`tests/healthy_pipeline/*` 各文件死导入（`json/os/time`）、`tests/test_pipeline_pause_guard.py` L19 及 L47-51/L62-69/L141-143、`tests/test_pipeline_exec_accounts.py` L14、`tests/test_scrape_only.py` L6、`tests/test_logging_mode.py` L15、`tests/webui_app/test_webui_app_platform.py` L11/L94、`tests/test_result_history.py` L10（死参）/L69、`tests/test_updater.py` L297（内层重复导入）
+- [x] T034 [P] [US2] 前端 spec 冗余清理：`webui/src/views/__tests__/DiscoveryView.spec.ts` 的 `noTask` 桩抽公共常量、去冗余 `flushPromises`（逐处复核）
+- [x] T035 [US2] §2.5 资源回收（mkdtemp 不清理→补清理）：`tests/test_browser_registry.py` L217/L409、`tests/test_updater.py` 4 处、`tests/test_desktop_shell_wiring.py` 15 处、`tests/test_desktop_window_state.py` setUp、`tests/webui_app/test_webui_app_runtime.py` L539/L572、`tests/test_pipeline_pause_guard.py` L371、`tests/test_location_scope.py` L193（`artifact_dir="tmp"` 改系统临时目录）
+- [x] T036 [US2] 恒真/伪断言批量处置（前端）：`webui/src/__tests__/errorCodes.spec.ts` L39-42、`listFilter.spec.ts` L107-108、`components/__tests__/BrowserAccountsDialog.spec.ts` L682、`ReminderDrawer.spec.ts` L650/L693-694/L697、`ScreenRoundActions.spec.ts` L46/L163、`TaskContinue.spec.ts` L92-98（`objectContaining({})`）、`composables/__tests__/useScreenRoundFlow.spec.ts` L278-281/L429-431/L485-488 及 L39/L41（死 refs）、`__tests__/discovery.spec.ts` L362/L418-422（恒假分支）、`__tests__/types.spec.ts` L82/88/94（自比较恒过，另在文件头注明其价值在 `npm run build`/`vue-tsc`）——逐处定性：有保护价值的修复为真断言，确无价值的删除
+- [x] T037 [US2] 恒真/伪断言批量处置（后端）：`tests/test_risk_signal_tiers.py` L29-36、`tests/test_whitebox_rules.py` L118-121、`tests/test_ai_prompts.py` L19、`tests/test_pipeline_tasks_cleanup.py` L43、`tests/test_login_state_cache.py` L86、`tests/test_desktop_shell.py` L455-465（与生产同表达式自证）、`tests/test_desktop_runtime.py` L196-200——同上逐处定性
+- [x] T038 [US2] 批二收尾：引用复查记录汇总 + 全量 + 前端 + 构建 + 卫生；统计对比；批末报告；**停止等用户指令**
 
 > 说明：`tests/test_semantic.py` L33-38 不单独处理（随批五整文件删除）。
 
@@ -130,37 +132,37 @@
 **Goal**: 约 30 组多文件重复事实收敛到单一正本；每组以故障注入指纹验证保护不变。
 **Independent Test**: 每组指纹 A = B；正本侧断言只增不减。
 
-- [ ] T039 [US3] AI 重试/错误码：保 `tests/ai/test_ai_calls.py`（门面 + 原始日志）；`tests/ai/test_ai_retry.py` 收敛至独有项（60s 上限/策略表）；合并 `tests/ai/harness.py` 与 `_mock_chat_response`
-- [ ] T040 [US3] profile_facts 纯函数：保 `tests/test_profile_facts.py`；`tests/ai/test_ai_match.py` L1387-1448 收敛
-- [ ] T041 [US3] prompt 文案：保 `tests/test_ai_prompts.py`；集成侧（`test_ai_match.py` L1122-1305/L1632-1691）只留"三层注入"指纹
-- [ ] T042 [US3] 招聘者活跃 10 天归一：保 `tests/source/test_recruiter_activity_capture.py`（多一层合并链）；`tests/test_recruiter_activity.py` L123-138 收敛
-- [ ] T043 [US3] `_classify_failed_code`：保 `tests/source/test_source_boss.py` L1190-1262（最全）；`tests/webui_app/test_webui_app_core.py` L774-829、`tests/test_scrape_block_classification.py`、`tests/test_risk_signal_tiers.py` 收敛为冒烟
-- [ ] T044 [US3] 登录空间隔离：保 `tests/test_platforms.py` L833-1005；`tests/chrome_setup/test_scraper_contracts.py` L30-127 收敛
-- [ ] T045 [US3] 版本一致性：保 `tests/test_repo_hygiene.py` L126-150；`tests/test_bump_version.py` L35-37 保留一处调用
-- [ ] T046 [US3] `fetch_job_details` 契约：保 `tests/healthy_pipeline/test_pipeline_state.py` L351-595（回归最全）；`test_pipeline_guard`/`test_pipeline_pause_guard`/`test_pipeline_tasks_cleanup`/`tests/test_detail_attempts_v4.py` 只留独有断言
-- [ ] T047 [US3] 损坏断点→failed：保 `tests/test_task_pause_support.py` L110-226（含 store 层唯一断言）；`healthy_pipeline/test_pipeline_pause_resume.py` L633-696 与 `tests/test_resume_continue.py` L282-342 三处减到两处
-- [ ] T048 [US3] 续跑文案：保 `tests/test_resume_continue.py` L522-777；`healthy_pipeline/test_pipeline_pause_resume.py` L2336-2593 收敛
-- [ ] T049 [US3] 换号审计/双门槛：保 `tests/webui_app/test_resume_account_gate.py`（040 审查补丁修正路径，2026-09-12；原写作 `tests/`）；`tests/test_resume_continue.py` L141-158 与 taskrun 集成层各留 1 条
-- [ ] T050 [US3] scrape_only 建轮/原地升级：保 `tests/test_scrape_only.py`（API 层）；`test_scrape_only_store.py`、`tests/test_result_rounds.py` L153-242 收敛
-- [ ] T051 [US3] 删最新不复活：保 store 层（`tests/webui_store/test_store_domains.py` L69-97）；`tests/test_result_history.py` L134-146 收敛
-- [ ] T052 [US3] 发布摘要过滤：保 `tests/test_updater.py` L194-218；`tests/test_release_summary.py` L15-30 收敛
-- [ ] T053 [US3] 详情预算 60：`tests/test_workbench.py` L123-135、`tests/test_webui_runner.py` L158、`tests/test_workbench_api.py` L413、`tests/webui_store/test_store_domains.py` L468 各层收 1 条
-- [ ] T054 [US3] 窗口控制原语：保 `tests/test_window_controls.py` L53-127；`tests/test_desktop_shell_wiring.py` L446-487 收敛
-- [ ] T055 [US3] size_guard：保 `tests/test_desktop_window_state.py` L507-516；`tests/test_desktop_shell_wiring.py` L362-381 收敛
-- [ ] T056 [US3] Chrome 路径：`tests/test_env_check.py` L112-129 ↔ `tests/chrome_setup/test_chrome_setup.py` L863-877 二选一
-- [ ] T057 [US3] 环境检查四行夹具（逐字相同）：`tests/test_env_check.py` L252-261 ↔ 审计记 `runtime.py` L1826-1836（实施时按内容定位）——合并
-- [ ] T058 [US3] 轮询/建 app 三件套：`tests/test_cross_platform_dedupe.py` L239-281/L270-281 ↔ `tests/healthy_pipeline/harness.py` L47-78——合并回 harness
-- [ ] T059 [US3] `_make_ai_run`：`tests/test_screen_flow.py` L35-51 ↔ `tests/webui_store/test_store_screen_resume.py` L8-24——合并
-- [ ] T060 [US3] TaskProgress 用时/暂停：保 `webui/src/components/__tests__/TaskProgress.spec.ts` L215-231/L233-256（多一条"暂停后推进 30 秒不回流"）；删 `TaskContinue.spec.ts` L527-544/L546-562
-- [ ] T061 [US3] 完成/进行中计数派生：保 `TaskProgressB039.spec.ts`（page_done）+ `TaskProgress.spec.ts` L567-585；`TaskContinue.spec.ts` L788-807 / `TaskProgress.spec.ts` L93-108 收敛
-- [ ] T062 [US3] 平台徽章：保 `TaskProgress.spec.ts` L872-912；`TaskContinue.spec.ts` L110-179 收敛
-- [ ] T063 [US3] 按钮矩阵：组件级（`ScreenRoundActions.spec.ts` L34-79）为主；`DiscoveryView.spec.ts` L4946-4995 集成留 1 条
-- [ ] T064 [US3] recrawl 三态：保 `RecrawlContinue.spec.ts` L133-189（带 `job_ids`）；`DiscoveryView.spec.ts` L3650-3657 与 `DiscoveryRecovery.spec.ts` L114-139 收敛
-- [ ] T065 [US3] pending 胶囊：单元保 `PendingRecrawlCapsule.spec.ts` L16-47；`DiscoveryView.spec.ts` L5088-5156 只留"切平台/页签不重弹"
-- [ ] T066 [US3] 提醒角标文案/99+：保纯函数层（`useReminderBadge.spec.ts` L92-101）；`App.spec.ts` L457-515 收敛
-- [ ] T067 [US3] 主题切换：保 `useTheme.spec.ts`；`App.spec.ts` L760-825 留 1 条接线
-- [ ] T068 [US3] T505 schema 竞态：保逻辑层（`discovery.spec.ts` L383）；`DiscoveryView.spec.ts` L1467 收敛（视图层注释自认重复）
-- [ ] T069 [US3] 批三收尾：逐组指纹记录汇总 + 全量 + 前端 + 构建 + 卫生；统计对比（重点：全量时长不增）；批末报告；**停止等用户指令**
+- [x] T039 [US3] AI 重试/错误码：保 `tests/ai/test_ai_calls.py`（门面 + 原始日志）；`tests/ai/test_ai_retry.py` 收敛至独有项（60s 上限/策略表）；合并 `tests/ai/harness.py` 与 `_mock_chat_response`
+- [x] T040 [US3] profile_facts 纯函数：保 `tests/test_profile_facts.py`；`tests/ai/test_ai_match.py` L1387-1448 收敛
+- [x] T041 [US3] prompt 文案：保 `tests/test_ai_prompts.py`；集成侧（`test_ai_match.py` L1122-1305/L1632-1691）只留"三层注入"指纹
+- [x] T042 [US3] 招聘者活跃 10 天归一：保 `tests/source/test_recruiter_activity_capture.py`（多一层合并链）；`tests/test_recruiter_activity.py` L123-138 收敛
+- [x] T043 [US3] `_classify_failed_code`：保 `tests/source/test_source_boss.py` L1190-1262（最全）；`tests/webui_app/test_webui_app_core.py` L774-829、`tests/test_scrape_block_classification.py`、`tests/test_risk_signal_tiers.py` 收敛为冒烟
+- [x] T044 [US3] 登录空间隔离：保 `tests/test_platforms.py` L833-1005；`tests/chrome_setup/test_scraper_contracts.py` L30-127 收敛
+- [x] T045 [US3] 版本一致性：保 `tests/test_repo_hygiene.py` L126-150；`tests/test_bump_version.py` L35-37 保留一处调用
+- [x] T046 [US3] `fetch_job_details` 契约：保 `tests/healthy_pipeline/test_pipeline_state.py` L351-595（回归最全）；`test_pipeline_guard`/`test_pipeline_pause_guard`/`test_pipeline_tasks_cleanup`/`tests/test_detail_attempts_v4.py` 只留独有断言
+- [x] T047 [US3] 损坏断点→failed：保 `tests/test_task_pause_support.py` L110-226（含 store 层唯一断言）；`healthy_pipeline/test_pipeline_pause_resume.py` L633-696 与 `tests/test_resume_continue.py` L282-342 三处减到两处
+- [x] T048 [US3] 续跑文案：保 `tests/test_resume_continue.py` L522-777；`healthy_pipeline/test_pipeline_pause_resume.py` L2336-2593 收敛
+- [x] T049 [US3] 换号审计/双门槛：保 `tests/webui_app/test_resume_account_gate.py`（040 审查补丁修正路径，2026-09-12；原写作 `tests/`）；`tests/test_resume_continue.py` L141-158 与 taskrun 集成层各留 1 条
+- [x] T050 [US3] scrape_only 建轮/原地升级：保 `tests/test_scrape_only.py`（API 层）；`test_scrape_only_store.py`、`tests/test_result_rounds.py` L153-242 收敛
+- [x] T051 [US3] 删最新不复活：保 store 层（`tests/webui_store/test_store_domains.py` L69-97）；`tests/test_result_history.py` L134-146 收敛
+- [x] T052 [US3] 发布摘要过滤：保 `tests/test_updater.py` L194-218；`tests/test_release_summary.py` L15-30 收敛
+- [x] T053 [US3] 详情预算 60：`tests/test_workbench.py` L123-135、`tests/test_webui_runner.py` L158、`tests/test_workbench_api.py` L413、`tests/webui_store/test_store_domains.py` L468 各层收 1 条
+- [x] T054 [US3] 窗口控制原语：保 `tests/test_window_controls.py` L53-127；`tests/test_desktop_shell_wiring.py` L446-487 收敛
+- [x] T055 [US3] size_guard：保 `tests/test_desktop_window_state.py` L507-516；`tests/test_desktop_shell_wiring.py` L362-381 收敛
+- [x] T056 [US3] Chrome 路径：`tests/test_env_check.py` L112-129 ↔ `tests/chrome_setup/test_chrome_setup.py` L863-877 二选一
+- [x] T057 [US3] 环境检查四行夹具（逐字相同）：`tests/test_env_check.py` L252-261 ↔ 审计记 `runtime.py` L1826-1836（实施时按内容定位）——合并
+- [x] T058 [US3] 轮询/建 app 三件套：`tests/test_cross_platform_dedupe.py` L239-281/L270-281 ↔ `tests/healthy_pipeline/harness.py` L47-78——合并回 harness
+- [x] T059 [US3] `_make_ai_run`：`tests/test_screen_flow.py` L35-51 ↔ `tests/webui_store/test_store_screen_resume.py` L8-24——合并
+- [x] T060 [US3] TaskProgress 用时/暂停：保 `webui/src/components/__tests__/TaskProgress.spec.ts` L215-231/L233-256（多一条"暂停后推进 30 秒不回流"）；删 `TaskContinue.spec.ts` L527-544/L546-562
+- [x] T061 [US3] 完成/进行中计数派生：保 `TaskProgressB039.spec.ts`（page_done）+ `TaskProgress.spec.ts` L567-585；`TaskContinue.spec.ts` L788-807 / `TaskProgress.spec.ts` L93-108 收敛
+- [x] T062 [US3] 平台徽章：保 `TaskProgress.spec.ts` L872-912；`TaskContinue.spec.ts` L110-179 收敛
+- [x] T063 [US3] 按钮矩阵：组件级（`ScreenRoundActions.spec.ts` L34-79）为主；`DiscoveryView.spec.ts` L4946-4995 集成留 1 条
+- [x] T064 [US3] recrawl 三态：保 `RecrawlContinue.spec.ts` L133-189（带 `job_ids`）；`DiscoveryView.spec.ts` L3650-3657 与 `DiscoveryRecovery.spec.ts` L114-139 收敛
+- [x] T065 [US3] pending 胶囊：单元保 `PendingRecrawlCapsule.spec.ts` L16-47；`DiscoveryView.spec.ts` L5088-5156 只留"切平台/页签不重弹"
+- [x] T066 [US3] 提醒角标文案/99+：保纯函数层（`useReminderBadge.spec.ts` L92-101）；`App.spec.ts` L457-515 收敛
+- [x] T067 [US3] 主题切换：保 `useTheme.spec.ts`；`App.spec.ts` L760-825 留 1 条接线
+- [x] T068 [US3] T505 schema 竞态：保逻辑层（`discovery.spec.ts` L383）；`DiscoveryView.spec.ts` L1467 收敛（视图层注释自认重复）
+- [x] T069 [US3] 批三收尾：逐组指纹记录汇总 + 全量 + 前端 + 构建 + 卫生；统计对比（重点：全量时长不增）；批末报告；**停止等用户指令**
 
 > 每组施工前先建指纹 A（R2）；对不上的组回退并在报告登记"不可合并"。`webui_app_semantics` 双跑消除在批四（T070）。
 
@@ -171,17 +173,17 @@
 **Goal**: 状态还原、真实资源隔离、临时目录、定时器/unmount 清理、构建指纹、钩子路径；只做局部小修。
 **Independent Test**: 单独/换序/重复跑一致；真实资源零触碰；改 spec 不触发前端重建。
 
-- [ ] T070 [US4] `tests/webui_app/test_webui_app_semantics.py` 两子类改组合，消除同一批全链路整跑 3 遍（研究决策 9；先建指纹，保留各自独有断言）
-- [ ] T071 [US4] `webui/src/test/setup.ts` 测试基建修复：`IntersectionObserver` 假件（0 引用）处置（接线或删除）、`matchMedia` 默认与状态跨用例复位、animate 桩补 `finished`
-- [ ] T072 [US4] `webui/vite.config.ts` 构建指纹候选集排除测试文件（研究决策 2）；验证：改一个 spec 文件后 frontend 指纹不变、改源码仍变
-- [ ] T073 [US4] `hooks/pre-commit` 移除本机硬编码解释器路径（研究决策 3）；验证：路径 0 命中、卫生检查照常
-- [ ] T074 [US4] §5.2 影子实现复核定性（逐条给出"保留/加注释/升级"结论并落注释，不做深度重构）：`tests/tuning/builders.py::_expected_path_digest`、`tests/test_pipeline_job_identity.py::FakeJobStore`、`tests/healthy_pipeline/test_pipeline_pause_resume.py::_record_mock_scrape_completion`、`tests/source/test_source_boss.py` 产物 schema、`tests/source/test_recruiter_activity_capture.py::_exec_config`
-- [ ] T075 [US4] 真实外部资源分级处置（§5.8）：`tests/chrome_setup/*` 真子进程 4 处、`tests/test_process_executor.py` 真 taskkill、`tests/test_repo_hygiene.py` 读本地 git——逐条复核边界（不用真实用户目录、不残留进程），必要时 docstring 注明；runtime/桌面壳已在批一修
-- [ ] T076 [US4] `tests/test_task_pause_support.py` L336-360 线程竞争 75 轮 → 3-5 轮（竞态窗口来自 Barrier 不来自轮数）；先验证稳定性
-- [ ] T077 [US4] `tests/test_detail_scrape_finalize.py` 真睡 5-10s 的 stagger 改显式小值（保持目录生命周期断言语义）
-- [ ] T078 [US4] 前端测试 unmount/全局清理：`LocationPicker.spec.ts`（0 unmount + innerHeight 泄漏）、`App.spec.ts`（42 例仅 2 次 unmount）、`DiscoveryView.spec.ts`（117 例仅 21 次 unmount）——补统一 `afterEach` 清理
-- [ ] T079 [US4] `tests/test_start_bat.py` 定性：保留既有文案断言（唯一护栏）并在文件头注明"文本断言、行为覆盖有限"；游离脚本 `tests/run_isolated_webui.py`、`tests/sc002_24h_monitor.py` 头部注明"手动资产，不进 CI"
-- [ ] T080 [US4] 批四收尾：单独/换序/重复跑验证 + 全量 + 前端 + 构建 + 卫生；统计对比；批末报告（含不做清单确认：巨型文件拆分/CI 重做/包加载改造未动）；**停止等用户指令**
+- [x] T070 [US4] `tests/webui_app/test_webui_app_semantics.py` 两子类改组合，消除同一批全链路整跑 3 遍（研究决策 9；先建指纹，保留各自独有断言）
+- [x] T071 [US4] `webui/src/test/setup.ts` 测试基建修复：`IntersectionObserver` 假件（0 引用）处置（接线或删除）、`matchMedia` 默认与状态跨用例复位、animate 桩补 `finished`
+- [x] T072 [US4] `webui/vite.config.ts` 构建指纹候选集排除测试文件（研究决策 2）；验证：改一个 spec 文件后 frontend 指纹不变、改源码仍变
+- [x] T073 [US4] `hooks/pre-commit` 移除本机硬编码解释器路径（研究决策 3）；验证：路径 0 命中、卫生检查照常
+- [x] T074 [US4] §5.2 影子实现复核定性（逐条给出"保留/加注释/升级"结论并落注释，不做深度重构）：`tests/tuning/builders.py::_expected_path_digest`、`tests/test_pipeline_job_identity.py::FakeJobStore`、`tests/healthy_pipeline/test_pipeline_pause_resume.py::_record_mock_scrape_completion`、`tests/source/test_source_boss.py` 产物 schema、`tests/source/test_recruiter_activity_capture.py::_exec_config`
+- [x] T075 [US4] 真实外部资源分级处置（§5.8）：`tests/chrome_setup/*` 真子进程 4 处、`tests/test_process_executor.py` 真 taskkill、`tests/test_repo_hygiene.py` 读本地 git——逐条复核边界（不用真实用户目录、不残留进程），必要时 docstring 注明；runtime/桌面壳已在批一修
+- [x] T076 [US4] `tests/test_task_pause_support.py` L336-360 线程竞争 75 轮 → 3-5 轮（竞态窗口来自 Barrier 不来自轮数）；先验证稳定性
+- [x] T077 [US4] `tests/test_detail_scrape_finalize.py` 真睡 5-10s 的 stagger 改显式小值（保持目录生命周期断言语义）
+- [x] T078 [US4] 前端测试 unmount/全局清理：`LocationPicker.spec.ts`（0 unmount + innerHeight 泄漏）、`App.spec.ts`（42 例仅 2 次 unmount）、`DiscoveryView.spec.ts`（117 例仅 21 次 unmount）——补统一 `afterEach` 清理
+- [x] T079 [US4] `tests/test_start_bat.py` 定性：保留既有文案断言（唯一护栏）并在文件头注明"文本断言、行为覆盖有限"；游离脚本 `tests/run_isolated_webui.py`、`tests/sc002_24h_monitor.py` 头部注明"手动资产，不进 CI"
+- [x] T080 [US4] 批四收尾：单独/换序/重复跑验证 + 全量 + 前端 + 构建 + 卫生；统计对比；批末报告（含不做清单确认：巨型文件拆分/CI 重做/包加载改造未动）；**停止等用户指令**
 
 ---
 
@@ -190,18 +192,29 @@
 **Goal**: 按登记册回收产品死代码；清单先过目、逐项同意后删除。
 **Independent Test**: 删除后全量 + 前端 + 构建全绿；符号 0 命中。
 
-- [ ] T081 [US5] 整理 `dead-code-registry.md` 为待删清单（含第 1~4 批新登记项），交用户过目并逐项取得同意记录
-- [ ] T082 [US5] 按同意结果删除：`webui/semantic.py` + `tests/test_semantic.py`（D001/D002）；`webui/src/discovery.ts` 五个孤儿导出 + `discovery.spec.ts` 对应测试段（D003）；`webui/src/screenFlow.ts` `primaryActionLabel` + spec 段（D004）；`webui/src/location.ts` `locationCombinationCount` + spec 段（D005）——逐项小步
-- [ ] T083 [US5] 删除后验证：全量 + 前端 + 构建 + 卫生；被删符号全仓 0 命中复核；构建通过即证明无残留引用（构建失败→立即恢复并上报）
-- [ ] T084 [US5] 更新登记册状态（已删除/不同意/剔除及原因）；未同意项保留并注明
-- [ ] T085 [US5] 批五收尾：统计对比 + 批末报告；**停止等用户指令**
+- [x] T081 [US5] 整理 `dead-code-registry.md` 为待删清单（含第 1~4 批新登记项），交用户过目并逐项取得同意记录
+
+### 批五附加：查漏审查并入（2026-09-12 用户裁定，与 T082 一并实施、统一纳入 T083/T085 批末验证）
+
+> 依据：批五前置全量查漏报告（2026-09-12，只读）。行号为该审查时点值（R7）。全部为测试侧改动，不新增文件；B1–B5 采用跨文件引用（wiring 引 shell）而非抽新 helper 文件。
+
+- [x] T088 [US5] 桌面壳假零件收敛（B1–B6）：`tests/test_desktop_shell_wiring.py` 的 `_FakeWebview`（L63-85）、`_FakeApp`（L88-97）、`_RecordingMessageBox`（L100-105）、`_RecordingLogger`（L108-113）、`_make_deps`（L116-132）五段与 `tests/test_desktop_shell.py`（L51-73 / L76-85 / L105-112 / L115-122 / L125-141）逐字相同，wiring 改为从 shell 引用；`_FakeEvent`（wiring L32-44，带 fire）与 `_FakeWindow`（wiring L50-60，五事件）为 shell 版（L28-48，仅 closing）超集——先逐用例验证 shell 侧复用超集无隐性依赖，失败则仅登记"不可合并"保留双份；验证：两文件单跑 + 倒序 + 正序全绿（53 例），断言零变化
+- [x] T089 [US5] `_AccountBook` 收敛（B7）：`tests/test_detail_attempts_v4.py` L64-87 硬编码版删除，改引用 `tests/test_r2_rotation_v4.py` L18-43 的参数化版（`_AccountBook(("a", "b"), r2_quota=2)` 等价）；验证：该文件 11 例全绿、临时目录行为不变
+- [x] T090 [US5] 零引用死常量删除（C1/C2）：`tests/test_webui_browser.py` L22 `DISCOVERY`（模块加载白读 DiscoveryView.vue，全仓零引用）、`tests/test_pipeline_job_identity.py` L39 `ZHILIAN_URL_OTHER`（全仓零引用）——R1 全仓复查 0 命中后删除；验证：两文件全绿
+- [x] T091 [US5] migration 27 僵尸用例改造（A1）：`tests/webui_store/test_store_migrations.py` L777-823 `test_failed_migration_27_rolls_back_schema_and_version` 依赖 `CAREER_SCOUT_V26_BACKUP`（全仓无任何设置渠道，实测恒 skip）——默认方案：仿同文件 migration 28 同构用例（L777 上方，自构造数据可跑）构造 v26 假库改造，使该用例真实执行；若构造 v26 终态 schema 成本超预期，停下报告，由用户裁定是否降级为"文件头标注手动验证资产"；验证：改造后用例真实执行（非 skip），注入"失败后仍写版本"故障时变红
+- [x] T092 [US5] inprocess 卡死模拟缩短（D1）：`tests/test_inprocess_execution.py` L330/L349/L557 三处 `time.sleep(2)`（配 in_process_timeout=0.3，模拟卡死）——先实测该文件时长与超时后线程收尾行为，确认等待不依赖 sleep 自然结束后缩至约 1.2s；连跑 3 次全绿才保留，不稳定则不改并登记
+
+- [x] T082 [US5] 按同意结果删除：`webui/semantic.py` + `tests/test_semantic.py`（D001/D002）；`webui/src/discovery.ts` 五个孤儿导出 + `discovery.spec.ts` 对应测试段（D003）；`webui/src/screenFlow.ts` `primaryActionLabel` + spec 段（D004）；`webui/src/location.ts` `locationCombinationCount` + spec 段（D005）——逐项小步
+- [x] T083 [US5] 删除后验证：全量 + 前端 + 构建 + 卫生；被删符号全仓 0 命中复核；构建通过即证明无残留引用（构建失败→立即恢复并上报）
+- [x] T084 [US5] 更新登记册状态（已删除/不同意/剔除及原因）；未同意项保留并注明
+- [x] T085 [US5] 批五收尾：统计对比 + 批末报告；**停止等用户指令**
 
 ---
 
 ## Final Phase: 收尾（全部批次完成后）
 
-- [ ] T086 全量对账：后端/前端 文件数·行数·用例数·时长 与基线对比；逐条核对 SC-001~SC-008 并给证据摘要
-- [ ] T087 更新 [quickstart.md](./quickstart.md) 结果记录区与 [dead-code-registry.md](./dead-code-registry.md) 终态；输出总报告；提交与推送等待用户指令
+- [x] T086 全量对账：后端/前端 文件数·行数·用例数·时长 与基线对比；逐条核对 SC-001~SC-008 并给证据摘要
+- [x] T087 更新 [quickstart.md](./quickstart.md) 结果记录区与 [dead-code-registry.md](./dead-code-registry.md) 终态；输出总报告；提交与推送等待用户指令
 
 ---
 
@@ -221,7 +234,7 @@
 
 ## Notes
 
-- 本清单共 87 项任务（批一 23 / 批二 15 / 批三 31 / 批四 11 / 批五 5 / 收尾 2）。
+- 本清单共 92 项任务（批一 23 / 批二 15 / 批三 31 / 批四 11 / 批五 10（含 2026-09-12 查漏并入的 T088–T092）/ 收尾 2）。
 - 所有位置（文件:行号）为审计时点证据，实施时以内容定位。
 - 禁碰红线断言（见 spec.md）在所有任务中不得删除或弱化。
 - 三件不做事项（巨型测试文件拆分、CI 流水线重做、测试包加载方式改造）只在本清单与 plan 中登记，不生成任务。

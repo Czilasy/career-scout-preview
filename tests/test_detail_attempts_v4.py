@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
 import os
 import tempfile
@@ -11,6 +10,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 import webui.account_round_robin as robin_mod
+
+# 040 T089：账号池夹具与 tests/test_r2_rotation_v4.py 共用参数化正本
+# （差异：账号 name 为“账号-a/b”、临时目录前缀 cs_v4_accounts_、JSON 按
+# ensure_ascii=False 写入；本文件用例只断言事件流与计数，不涉及这些差异）。
+from tests.test_r2_rotation_v4 import _AccountBook
 from webui.account_round_robin_observability import RoundRobinWhitebox
 from webui.source import SourceOutcome
 from webui.source_breaker import SourceCircuitBreaker
@@ -59,32 +63,6 @@ class _AlwaysRestartRecovery:
 
     def mark_progress(self):
         return None
-
-
-class _AccountBook:
-    def __init__(self):
-        self.root = tempfile.TemporaryDirectory(prefix="cs_v4_attempt_accounts_")
-        self.path = os.path.join(self.root.name, "browser_accounts.json")
-        accounts = {}
-        for order, account_id in enumerate(("a", "b")):
-            accounts[account_id] = {
-                "id": account_id,
-                "name": account_id,
-                "profile_dir": os.path.join(self.root.name, f"profile-{account_id}"),
-                "builtin": account_id == "a",
-                "pool": {
-                    "selected": True,
-                    "order": order,
-                    "r1_quota": 25,
-                    "r2_quota": 2,
-                },
-                "rate_limited": False,
-            }
-        with open(self.path, "w", encoding="utf-8") as handle:
-            json.dump(accounts, handle)
-
-    def close(self):
-        self.root.cleanup()
 
 
 class DetailAttemptsV4Tests(unittest.TestCase):
@@ -228,7 +206,7 @@ class DetailAttemptsV4Tests(unittest.TestCase):
         from webui.pipeline_exec_accounts import set_browser_accounts_path
         from webui.pipeline_exec_details import fetch_job_details
 
-        book = _AccountBook()
+        book = _AccountBook(("a", "b"), r2_quota=2)
         self.addCleanup(book.close)
         set_browser_accounts_path(book.path)
         self.addCleanup(
@@ -282,7 +260,7 @@ class DetailAttemptsV4Tests(unittest.TestCase):
         from webui.pipeline_exec_accounts import set_browser_accounts_path
         from webui.pipeline_exec_details import fetch_job_details
 
-        book = _AccountBook()
+        book = _AccountBook(("a", "b"), r2_quota=2)
         self.addCleanup(book.close)
         set_browser_accounts_path(book.path)
         self.addCleanup(
@@ -361,7 +339,7 @@ class DetailAttemptsV4Tests(unittest.TestCase):
         from webui.pipeline_exec_accounts import set_browser_accounts_path
         from webui.pipeline_exec_details import fetch_job_details
 
-        book = _AccountBook()
+        book = _AccountBook(("a", "b"), r2_quota=2)
         self.addCleanup(book.close)
         set_browser_accounts_path(book.path)
         self.addCleanup(
@@ -410,7 +388,7 @@ class DetailAttemptsV4Tests(unittest.TestCase):
         from webui.pipeline_exec_accounts import set_browser_accounts_path
         from webui.pipeline_exec_details import fetch_job_details
 
-        book = _AccountBook()
+        book = _AccountBook(("a", "b"), r2_quota=2)
         self.addCleanup(book.close)
         set_browser_accounts_path(book.path)
         self.addCleanup(

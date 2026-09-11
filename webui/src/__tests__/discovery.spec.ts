@@ -1,7 +1,5 @@
 import {
-  backfillJobPlatform,
   buildSearchScriptParams,
-  classifyTaskSize,
   createAsyncResourceLoader,
   createPlatformState,
   DEFAULT_PLATFORM,
@@ -9,16 +7,12 @@ import {
   normalizeScopePreview,
   partitionPipelineResult,
   projectResumeSuggestionToSchema,
-  recoverSelectionSettings,
   historyStatusLabel,
-  integrityLabel,
-  normalizeIntegrity,
   roundScopeLabel,
   shouldConfirmNationalScope,
   type PipelineResult,
 } from "../discovery";
 import type {
-  AdvancedSettingsState,
   JobItem,
   Platform,
   PlatformFilterSchema,
@@ -61,21 +55,6 @@ describe("discovery helpers", () => {
     expect(shouldConfirmNationalScope(["Python"], ["上海"])).toBe(false);
   });
 
-  it.each([
-    [1, "small"],
-    [14, "small"],
-    [15, "medium"],
-    [30, "medium"],
-    [31, "large"],
-    [200, "large"],
-  ] as const)("classifies %i planned pages as %s", (pages, expected) => {
-    expect(classifyTaskSize(pages)).toBe(expected);
-  });
-
-  it.each([0, 201])("rejects %i planned pages outside the valid range", (pages) => {
-    expect(() => classifyTaskSize(pages)).toThrow(RangeError);
-  });
-
   it("normalizes the backend-authoritative scope preview", () => {
     const response: ScopePreviewResponse = {
       ok: true,
@@ -112,43 +91,6 @@ describe("discovery helpers", () => {
       company_nature: ["1"],
     });
     expect(projected.stage).toBeUndefined();
-  });
-
-  it("restores all execution custom fields including pages", () => {
-    const settings = {
-      pages: 3,
-      inter_combo_delay: 10,
-      detail_batch_size: 15,
-      detail_interval: 2,
-      detail_reset_every: 4,
-      detail_batch_cooldown: 5,
-      detail_tab_pool_size: 5,
-      screen_batch_size: 50,
-      screen_concurrency: 5,
-      match_batch_size: 4,
-      match_concurrency: 10,
-    };
-    const state: AdvancedSettingsState = {
-      ok: true,
-      selection: "stable",
-      settings,
-      last_custom: { config_digest: "sha256:custom", settings: { ...settings, detail_batch_size: 8 } },
-      mode_version: {
-        id: "mode-v1",
-        version_digest: "sha256:mode",
-        available_modes: ["stable", "balanced", "extreme"],
-      },
-      manual_ranges: {},
-      config_schema_version: 1,
-    };
-
-    expect(recoverSelectionSettings(state, "custom")).toEqual({
-      ...settings,
-      detail_batch_size: 8,
-    });
-    expect(recoverSelectionSettings(state, "stable")).toEqual(settings);
-    // R4：pages 属于自定义保存字段，恢复时必须保留
-    expect(recoverSelectionSettings(state, "custom")).toHaveProperty("pages", 3);
   });
 
   // ------------------------------------------------------------------
@@ -211,30 +153,6 @@ describe("discovery helpers", () => {
       "boss",
     );
     expect(result.jobs).toHaveLength(0);
-  });
-
-  it("backfills missing job platform from the authoritative task platform", () => {
-    const result = backfillJobPlatform(
-      {
-        jobs: [
-          { job_id: "x1", title: "无平台" },
-          { job_id: "x2", platform: "zhilian", title: "有平台" },
-        ] as JobItem[],
-        dropped: [{ job_id: "x3", title: "剔除无平台" }] as JobItem[],
-      },
-      "boss",
-    );
-    expect(result.jobs?.[0]).toMatchObject({ platform: "boss" });
-    expect(result.jobs?.[1]).toMatchObject({ platform: "zhilian" }); // 不回填已有平台
-    expect(result.dropped?.[0]).toMatchObject({ platform: "boss" });
-  });
-
-  it("backfill with no platform leaves jobs untouched", () => {
-    const result = backfillJobPlatform(
-      { jobs: [{ job_id: "x1", title: "无平台" }] as JobItem[] },
-      undefined,
-    );
-    expect(result.jobs?.[0]).not.toHaveProperty("platform");
   });
 });
 
@@ -513,23 +431,6 @@ describe("historyStatusLabel (B038)", () => {
     expect(historyStatusLabel("partial", 3)).toBe("部分结果");
     // 017-US3: 标签只有三种；未知状态不渲染（失败/取消轮已不再产生）
     expect(historyStatusLabel("failed", 3)).toBe("");
-  });
-});
-
-describe("integrity parsing (033 V2)", () => {
-  it("normalizes all six backend conclusions and rejects unknown values", () => {
-    const expected = new Map([
-      ["succeeded", "完整成功"], ["empty", "已完成，没有找到岗位"],
-      ["partial", "部分完成，部分结果可能缺失"], ["failed", "执行失败"],
-      ["unverifiable", "无法确认是否完成"], ["interrupted", "任务已中断"],
-    ]);
-    for (const [conclusion, label] of expected) {
-      const normalized = normalizeIntegrity({ conclusion, primary_reason: "reason", revision: 7 });
-      expect(normalized?.conclusion).toBe(conclusion);
-      expect(normalized?.label).toBe(label);
-      expect(integrityLabel({ conclusion })).toBe(label);
-    }
-    expect(normalizeIntegrity({ conclusion: "unknown" })).toBeNull();
   });
 });
 

@@ -4,7 +4,6 @@ import {
   isRoundClosedSaved,
   isResumableStatus,
   normalizeRoundContext,
-  primaryActionLabel,
   roundConditionsRestored,
 } from "../screenFlow";
 import type { RoundContext } from "../types";
@@ -96,11 +95,6 @@ describe("screenFlow", () => {
     expect(deriveScreenPrimaryAction({
       screenStatus: "paused", recrawlStatus: "failed", hasScreenRun: true, hasUncertain: true,
     })).toEqual({ kind: "continue-recrawl", label: "继续重抓" });
-  });
-
-  it("maps primary action labels", () => {
-    expect(primaryActionLabel({ kind: "start", label: "开始 AI 筛选" })).toBe("开始 AI 筛选");
-    expect(primaryActionLabel({ kind: "none" })).toBe("");
   });
 
   it("continueTargets returns both platforms on all filter", () => {

@@ -18,118 +18,24 @@ if str(_PROJECT_ROOT) not in sys.path:
 from packaging import desktop
 from packaging import window_state as ws
 
+# 040 T088：桌面壳替身与 tests/test_desktop_shell.py 共用一份正本（本文件原
+# 为逐字复制）；_FakeEvent/_FakeWindow 为扩展版（全部窗口事件可 fire）。
+from tests.test_desktop_shell import (
+    _FakeApp,
+    _FakeEvent,
+    _FakeWebview,
+    _FakeWindow,
+    _RecordingLogger,
+    _RecordingMessageBox,
+    _make_deps,
+)
+
 
 def _state_dir(case):
     """为用例建立临时 state_dir 并登记清理（不写真实用户目录、不残留）。"""
     tmp = tempfile.TemporaryDirectory(prefix="cs-window-state-")
     case.addCleanup(tmp.cleanup)
     return tmp.name
-
-
-# ---------------------------------------------------------------------------
-# 测试替身（编排层用；扩展版：全部窗口事件可 fire）
-# ---------------------------------------------------------------------------
-class _FakeEvent:
-    """模拟 pywebview window.events.* 事件（支持 += 注册与 fire）。"""
-
-    def __init__(self):
-        self.handlers = []
-
-    def __iadd__(self, handler):
-        self.handlers.append(handler)
-        return self
-
-    def fire(self, *args):
-        for handler in list(self.handlers):
-            handler(*args)
-
-
-_EVENT_NAMES = ("closing", "resized", "moved", "maximized", "restored")
-
-
-class _FakeWindow:
-    """模拟 pywebview Window 对象（属性可变，事件可 fire）。"""
-
-    def __init__(self, **kwargs):
-        self.width = kwargs.get("width", desktop.DEFAULT_WIDTH)
-        self.height = kwargs.get("height", desktop.DEFAULT_HEIGHT)
-        self.x = kwargs.get("x", 100)
-        self.y = kwargs.get("y", 100)
-        self.events = type(
-            "Events", (), {name: _FakeEvent() for name in _EVENT_NAMES}
-        )()
-
-
-class _FakeWebview:
-    """模拟 pywebview 模块。"""
-
-    def __init__(self, start_raises=None, fire_closing=False):
-        self.start_raises = start_raises
-        self.fire_closing = fire_closing
-        self.windows = []
-        self.create_window_calls = []
-        self.start_called = False
-
-    def create_window(self, **kwargs):
-        self.create_window_calls.append(kwargs)
-        win = _FakeWindow(**kwargs)
-        self.windows.append(win)
-        return win
-
-    def start(self, **kwargs):
-        self.start_called = True
-        if self.fire_closing and self.windows:
-            for handler in list(self.windows[0].events.closing.handlers):
-                handler()
-        if self.start_raises:
-            raise self.start_raises
-
-
-class _FakeApp:
-    """模拟 Flask app。"""
-
-    def __init__(self, runners=None):
-        self.config = {}
-        for key, runner in (runners or {}).items():
-            self.config[key] = runner
-
-    def run(self, **kwargs):
-        pass
-
-
-class _RecordingMessageBox:
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, title, text):
-        self.calls.append((title, text))
-
-
-class _RecordingLogger:
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, message):
-        self.calls.append(message)
-
-
-def _make_deps(**overrides):
-    """构造 run_desktop_shell 的 deps，默认全部注入安全替身（正常路径）。"""
-    deps = {
-        "mutex_factory": lambda name: (object(), 0),
-        "messagebox": _RecordingMessageBox(),
-        "create_app": lambda config: _FakeApp(),
-        "pick_free_port": lambda: 50000,
-        "http_get": lambda url: (200, b"ok"),
-        "logger": _RecordingLogger(),
-        "state_dir": None,
-        "workarea_provider": lambda: [(0, 0, 1920, 1080)],
-        "version": "9.9.9",
-        "webview_module": _FakeWebview(),
-        "ready_timeout": 0.5,
-    }
-    deps.update(overrides)
-    return deps
 
 
 def _write_state(state_dir, data):

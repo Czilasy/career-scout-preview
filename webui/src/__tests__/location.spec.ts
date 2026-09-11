@@ -1,6 +1,5 @@
 import {
   buildLocationPayload,
-  locationCombinationCount,
   locationLabel,
   locationSummary,
   normalizeLocationDraft,
@@ -46,11 +45,6 @@ describe("location pure functions", () => {
     expect(payload[0]).not.toHaveProperty("label");
     expect(payload[0].business_code).toBe("154");
     expect(payload[1]).not.toHaveProperty("business_code");
-  });
-
-  it("counts only district-level locations", () => {
-    expect(locationCombinationCount([location(), location()])).toBe(2);
-    expect(locationCombinationCount([{} as LocationCondition])).toBe(0);
   });
 
   it("joins summaries with Chinese separator", () => {

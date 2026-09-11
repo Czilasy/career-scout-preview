@@ -592,6 +592,25 @@ class Migration27SchemaTests(unittest.TestCase):
             if row["sql"]
         ).lower()
 
+    def _build_v26_database(self):
+        """自构造 v26 假库（040 T091，仿 _build_v27_database 同构手法）。
+
+        patch 掉 migration 27~32 后 schema_migrations 停在 26；migration 33
+        有"库真实达到 32 才执行"的守卫（store_migrations_v1._migrate），冻结
+        夹具不会误建白箱表。_mark_stale_runs_interrupted 更新的
+        interruption_kind 列由 migration 27 引入，v26 库尚无该列，一并短路。
+        """
+        with patch.object(TaskStore, "_migration_027", return_value=None), \
+                patch.object(TaskStore, "_migration_028", return_value=None), \
+                patch.object(TaskStore, "_migration_029", return_value=None), \
+                patch.object(TaskStore, "_migration_030", return_value=None), \
+                patch.object(TaskStore, "_migration_031", return_value=None), \
+                patch.object(TaskStore, "_migration_032", return_value=None), \
+                patch.object(TaskStore, "_mark_stale_runs_interrupted", return_value=None):
+            store = TaskStore(self.db_path)
+        self.assertEqual(store.schema_version(), 26)
+        return store
+
     def test_jobs_has_platform_and_dual_identity_fields(self):
         """jobs 必须新增 platform、platform_job_id、experience、degree、extra_json。"""
         store = TaskStore(self.db_path)
@@ -781,24 +800,13 @@ class Migration27SchemaTests(unittest.TestCase):
         schema_migrations 版本记录必须在失败时不写入 27，确保下次构造
         会重试 migration。守恒检查（外键/重复身份/URL 唯一）也必须
         阻断版本推进。
-        """
-        import os
-        v26_path = os.environ.get("CAREER_SCOUT_V26_BACKUP", "")
-        if not v26_path:
-            self.skipTest("未设置 CAREER_SCOUT_V26_BACKUP 环境变量，跳过 migration 27 回滚测试")
-        v26_src = pathlib.Path(v26_path)
-        if not v26_src.exists():
-            self.skipTest("v26 备份库不存在，跳过 migration 27 回滚测试")
-        import shutil
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(v26_src, self.db_path)
 
-        # 确认 v26 库版本和列结构
-        with sqlite3.connect(self.db_path) as conn:
-            pre_version = conn.execute(
-                "SELECT MAX(version) FROM schema_migrations"
-            ).fetchone()[0]
-        self.assertEqual(pre_version, 26, "备份库必须是 v26")
+        040 T091（2026-09-12）：原实现依赖环境变量 CAREER_SCOUT_V26_BACKUP
+        指向真实 v26 备份库，该变量全仓无任何设置渠道、实测恒 skip（从未
+        真实执行）；现仿 migration 28 同构用例自构造 v26 假库，使本用例
+        在任意环境真实执行。
+        """
+        self._build_v26_database()
 
         # 注入失败：第一次 _add_column_if_missing 成功后立即抛错
         original_add_column = TaskStore._add_column_if_missing

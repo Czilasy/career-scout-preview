@@ -19,7 +19,6 @@ DIALOG = (SRC / "components" / "BaseDialog.vue").read_text(encoding="utf-8")
 JOBS = (SRC / "components" / "JobWorkspace.vue").read_text(encoding="utf-8")
 AI = (SRC / "components" / "AiSettingsDialog.vue").read_text(encoding="utf-8")
 NOTICE = (SRC / "components" / "NoticeBar.vue").read_text(encoding="utf-8")
-DISCOVERY = (SRC / "views" / "DiscoveryView.vue").read_text(encoding="utf-8")
 CSS = (SRC / "styles.css").read_text(encoding="utf-8")
 ALL_VUE = "\n".join(path.read_text(encoding="utf-8") for path in SRC.rglob("*.vue"))
 

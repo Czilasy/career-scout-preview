@@ -96,10 +96,6 @@ export function deriveScreenPrimaryAction(
   return { kind: "none" };
 }
 
-export function primaryActionLabel(action: ScreenPrimaryAction): string {
-  return action.kind === "none" ? "" : action.label;
-}
-
 export function withoutRecrawl(action: ScreenPrimaryAction): ScreenPrimaryAction {
   // 03 页 AI 筛选卡片只显示 AI 筛选自身的动作；重抓（含暂停/继续重抓）
   // 由 ScreenRecrawlProgress 单独展示，避免重复按钮且无事件绑定的假按钮。

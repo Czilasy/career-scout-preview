@@ -326,8 +326,8 @@ class TaskRunnerInProcessTests(unittest.TestCase):
         self._create_scrape_task("t12", detail=False)
 
         def fake_run(**kwargs):
-            # 不响应 cancel_event，模拟卡死在 CDP 调用
-            time.sleep(2)
+            # 不响应 cancel_event，模拟卡死在 CDP 调用（1.2s > 0.3s 超时上限）
+            time.sleep(1.2)
 
         with mock.patch.object(boss, "run_search_programmatic", side_effect=fake_run):
             runner._execute("t12")
@@ -346,7 +346,7 @@ class TaskRunnerInProcessTests(unittest.TestCase):
         self._create_scrape_task("t13", detail=False)
 
         def fake_run(**kwargs):
-            kwargs["cancel_event"].wait(timeout=2)
+            kwargs["cancel_event"].wait(timeout=1.2)
             raise boss.SearchCancelled()
 
         with mock.patch.object(boss, "run_search_programmatic", side_effect=fake_run):
@@ -554,7 +554,7 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         ]
 
         def fake_run(**kwargs):
-            time.sleep(2)
+            time.sleep(1.2)
 
         with mock.patch.object(boss, "run_search_programmatic", side_effect=fake_run):
             with self.assertRaises(subprocess.TimeoutExpired):
