@@ -1,6 +1,8 @@
 import hashlib
 import json
+import os
 import pathlib
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -8,12 +10,33 @@ from datetime import datetime
 from unittest.mock import patch
 from webui.store import TaskStore, _now
 
+# 040 审查补丁（2026-09-12）：迁移 bootstrap 会在 Windows 上持有 sqlite 句柄直到
+# 测试进程结束，即时清理必然失败（rmtree / ignore_cleanup_errors / atexit 均已实测
+# 无效；进程退出后文件可删）。折中：临时目录带固定前缀 + 进程号，每次运行开头清扫
+# 其它进程（此前的运行）遗留的目录——目标进程已退出、文件锁已释放，可安全删除；
+# 本进程自己的目录在运行期间删不掉，留到下次运行被清扫，不会无限累积。
+_STALE_TMP_PREFIX = "cs-migration-"
+_PROCESS_TMP_PREFIX = f"{_STALE_TMP_PREFIX}{os.getpid()}-"
+
+
+def _sweep_stale_migration_tmp() -> None:
+    base = pathlib.Path(tempfile.gettempdir())
+    for stale in base.glob(_STALE_TMP_PREFIX + "*"):
+        if stale.name.startswith(_PROCESS_TMP_PREFIX):
+            continue  # 本进程自己的目录，运行期间无法删除
+        shutil.rmtree(stale, ignore_errors=True)
+
+
+_sweep_stale_migration_tmp()
+
 
 class Migration28SchemaTests(unittest.TestCase):
     """Task 001 migration 28 contract tests."""
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.temp = tempfile.TemporaryDirectory(
+            prefix=_PROCESS_TMP_PREFIX, ignore_cleanup_errors=True,
+        )
         self.db_path = pathlib.Path(self.temp.name) / "state" / "webui.db"
         self._cleanup_shared_backup_dir()
 
@@ -350,7 +373,7 @@ class MigrationBootstrapBackupTests(unittest.TestCase):
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(
-            ignore_cleanup_errors=True
+            prefix=_PROCESS_TMP_PREFIX, ignore_cleanup_errors=True,
         )
         self.root = pathlib.Path(self.temp.name)
         self.db_path = self.root / "state" / "webui.db"
@@ -358,6 +381,8 @@ class MigrationBootstrapBackupTests(unittest.TestCase):
         self._cleanup_shared_backup_dir()
 
     def tearDown(self):
+        # Windows：bootstrap 迁移的 sqlite 句柄在测试进程内不释放，这里删不掉；
+        # 由下次运行开头的 _sweep_stale_migration_tmp() 清扫（见模块头说明）。
         self.temp.cleanup()
 
     def _cleanup_shared_backup_dir(self) -> None:

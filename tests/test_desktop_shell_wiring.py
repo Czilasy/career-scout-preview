@@ -462,6 +462,46 @@ class WindowControlJsApiTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True, "error": None})
         self.assertEqual(win.calls, ["minimize"])
 
+    def test_window_toggle_maximize_from_normal(self):
+        """普通态 window_toggle_maximize → maximize()，返回 maximized=True。
+
+        040 审查补丁（2026-09-12）：恢复批三收敛时被删除的接线层正向断言。
+        """
+        js_api, win = self._run_with_api()
+        win.__dict__.pop("_cs_maximized", None)  # 保证读构造快照而非事件实时标记
+        win.calls = []
+        win.maximized = False
+        win.maximize = lambda: win.calls.append("maximize")
+        win.restore = lambda: win.calls.append("restore")
+        result = js_api.window_toggle_maximize()
+        self.assertEqual(
+            result, {"ok": True, "error": None, "maximized": True}
+        )
+        self.assertEqual(win.calls, ["maximize"])
+
+    def test_window_toggle_maximize_from_maximized(self):
+        """最大化态 window_toggle_maximize → restore()，返回 maximized=False。"""
+        js_api, win = self._run_with_api()
+        win.__dict__.pop("_cs_maximized", None)
+        win.calls = []
+        win.maximized = True
+        win.maximize = lambda: win.calls.append("maximize")
+        win.restore = lambda: win.calls.append("restore")
+        result = js_api.window_toggle_maximize()
+        self.assertEqual(
+            result, {"ok": True, "error": None, "maximized": False}
+        )
+        self.assertEqual(win.calls, ["restore"])
+
+    def test_window_is_maximized_reads_window_state(self):
+        """window_is_maximized 返回窗口当前最大化状态（FR-004 图标切换）。"""
+        js_api, win = self._run_with_api()
+        win.__dict__.pop("_cs_maximized", None)
+        win.maximized = True
+        self.assertEqual(js_api.window_is_maximized(), {"ok": True, "maximized": True})
+        win.maximized = False
+        self.assertEqual(js_api.window_is_maximized(), {"ok": True, "maximized": False})
+
     def test_window_control_without_window_returns_no_window(self):
         """未注入 window → {ok: False, error: no_window}。"""
         js_api = desktop.DesktopJsApi()

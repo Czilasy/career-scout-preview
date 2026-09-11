@@ -45,19 +45,24 @@ class ValidateProfileFactsTests(unittest.TestCase):
         self.assertEqual(facts["degree"], "本科")
         self.assertEqual(facts["week_off"], "双休")
         self.assertEqual(facts["overtime"], "能够加班")
+        # 040 审查补丁（2026-09-12）：合法项目 / 全职枚举 / 语言保留（原 test_ai_match 集成侧断言）
+        self.assertEqual(facts["projects"][0]["name"], "P")
+        self.assertEqual(facts["job_type"], "全职")
+        self.assertEqual(facts["languages"], ["英语"])
 
     def test_drops_invalid_items(self):
         facts = validate_profile_facts({
             "core_skills": ["Python", 123, ""],
-            "projects": [{"stack": "无name"}, "not-dict"],
+            "projects": [{"name": "好项目", "role": "后端"}, {"stack": "无name"}, "not-dict"],
             "job_type": "不限",  # 非法枚举
-            "languages": [None, 5],
+            "languages": [None, "英语"],
             "week_off": 42,
         })
         self.assertEqual(facts["core_skills"], ["Python"])
-        self.assertNotIn("projects", facts)
+        # 040 审查补丁（2026-09-12）：混合输入时合法项目 / 合法语言保留（原 test_ai_match 集成侧断言）
+        self.assertEqual([p["name"] for p in facts["projects"]], ["好项目"])
         self.assertNotIn("job_type", facts)
-        self.assertNotIn("languages", facts)
+        self.assertEqual(facts["languages"], ["英语"])
         self.assertNotIn("week_off", facts)
         # 040 批三迁移：空/非字符串 degree 丢弃（原 test_ai_match 集成侧断言）
         self.assertNotIn("degree", validate_profile_facts({"degree": ""}))

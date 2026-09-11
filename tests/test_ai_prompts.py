@@ -30,6 +30,30 @@ class BuildResumeAnalysisPromptTests(unittest.TestCase):
         self.assertNotIn("不接受996", prompt)
         self.assertNotIn("期望双休", prompt)
 
+    def test_resume_prompt_copy_migrated_from_integration_cases(self):
+        """040 审查补丁（2026-09-12）：批三收敛时未迁移的集成侧简历提示词断言。"""
+        prompt = build_resume_analysis_prompt("keyword: 示例\ncity: 示例")
+        self.assertIn("必须固定输出以下五个段落", prompt)
+        for section in (
+            "1. 求职方向：",
+            "2. 核心能力：",
+            "3. 工作与项目经历：",
+            "4. 学历与基本条件：",
+            "5. 岗位偏好与排除项：",
+        ):
+            self.assertIn(section, prompt)
+        self.assertIn("冒号后只能写无", prompt)
+        self.assertIn("自然语言", prompt)
+        self.assertIn("简历里明确写了就填，没写的字段留空", prompt)
+        self.assertIn("简历写了什么就写什么，没写的不补", prompt)
+        self.assertIn("projects：只列简历明确写出的项目/工作/实习经历", prompt)
+        self.assertIn("不得因为技能、经历或职业方向自行推断偏好和排除项", prompt)
+        self.assertIn("工作/项目方向、个人角色和所用技术栈", prompt)
+        self.assertIn("summary 只写简历明确给出的职责或成果一句话", prompt)
+        self.assertNotIn("最终总共5-10句", prompt)
+        self.assertNotIn("随机挑1-3个自然补充", prompt)
+        self.assertNotIn("不一次全塞", prompt)
+
 
 class BuildMatchSystemPromptTests(unittest.TestCase):
     def _prompt(self):
@@ -111,6 +135,26 @@ class BuildMatchSystemPromptTests(unittest.TestCase):
         self.assertIn("以意愿为准", prompt)
         self.assertIn("岗位靠谱判定", prompt)
         self.assertIn("flags 为必填字段", prompt)
+
+    def test_match_prompt_copy_migrated_from_integration_cases(self):
+        """040 审查补丁（2026-09-12）：批三收敛时未迁移的集成侧精筛提示词断言。"""
+        prompt = self._prompt()
+        self.assertIn("用户明确写'不限/都可以/接受xx'", prompt)
+        self.assertIn("默认匹配，不得写'候选人未知'", prompt)
+        self.assertIn("技术栈硬冲突", prompt)
+        self.assertIn("hard_ok", prompt)
+        self.assertNotIn("fulltime_ok", prompt)
+        self.assertIn("必须具备 Python 3年以上生产环境开发经验", prompt)
+        self.assertIn("2-3年及以上", prompt)
+        self.assertIn("硬性要求与已选条件冲突时", prompt)
+        self.assertIn(
+            "已确认的筛选条件（薪资/经验/学历/规模/融资/行业）是硬约束", prompt,
+        )
+        self.assertIn("flags 为必填字段，无命中输出空数组", prompt)
+        self.assertIn(
+            "不得把 AI 已识别出的方向冲突、硬性不满足只写进 caveats 后仍判 match",
+            prompt,
+        )
 
 
 if __name__ == "__main__":

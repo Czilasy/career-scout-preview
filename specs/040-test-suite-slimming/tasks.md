@@ -78,7 +78,7 @@
 - [x] T018 [US1] `tests/webui_app/test_webui_app_semantics.py` L432-445 恒真断言（`assertNotEqual(status, 404)`）改真断言
 - [x] T019 [US1] `tests/webui_store/test_scrape_only_store.py` L160-167 断言从未被创建的 run：修夹具真创建或改断言
 - [x] T020 [US1] `tests/test_desktop_shell_wiring.py` L424 依赖日志中文关键词"事件"改结构化断言（事件名/字段）
-- [x] T021 [US1] `webui/src/components/__tests__/App.spec.ts` L679/974/987/1001（`.notice-bar`）与 L1076（`task-completed-toast`）定性处置：前者保留并加说明注释（防误接回的墓碑）；后者（无对应元素）改真断言或删
+- [x] T021 [US1] `webui/src/__tests__/App.spec.ts`（040 审查补丁修正路径，2026-09-12；原写作 `components/__tests__/`）L679/974/987/1001（`.notice-bar`）与 L1076（`task-completed-toast`）定性处置：前者保留并加说明注释（防误接回的墓碑）；后者（无对应元素）改真断言或删
 - [x] T022 [US1] `tests/test_candidate.py` L658-659、`tests/test_execution_config.py` L722-723 将 `unittest.main()` 挪至文件末尾（修复直跑丢例）
 - [x] T023 [US1] 批一收尾：受影响子集 + 全量 + 前端 + 构建 + 卫生；统计对比基线；按契约第 4 节写批末报告（含每条注入验证记录、`types.spec.ts` 定性说明）；**停止等用户指令**
 
@@ -140,7 +140,7 @@
 - [ ] T046 [US3] `fetch_job_details` 契约：保 `tests/healthy_pipeline/test_pipeline_state.py` L351-595（回归最全）；`test_pipeline_guard`/`test_pipeline_pause_guard`/`test_pipeline_tasks_cleanup`/`tests/test_detail_attempts_v4.py` 只留独有断言
 - [ ] T047 [US3] 损坏断点→failed：保 `tests/test_task_pause_support.py` L110-226（含 store 层唯一断言）；`healthy_pipeline/test_pipeline_pause_resume.py` L633-696 与 `tests/test_resume_continue.py` L282-342 三处减到两处
 - [ ] T048 [US3] 续跑文案：保 `tests/test_resume_continue.py` L522-777；`healthy_pipeline/test_pipeline_pause_resume.py` L2336-2593 收敛
-- [ ] T049 [US3] 换号审计/双门槛：保 `tests/test_resume_account_gate.py`；`tests/test_resume_continue.py` L141-158 与 taskrun 集成层各留 1 条
+- [ ] T049 [US3] 换号审计/双门槛：保 `tests/webui_app/test_resume_account_gate.py`（040 审查补丁修正路径，2026-09-12；原写作 `tests/`）；`tests/test_resume_continue.py` L141-158 与 taskrun 集成层各留 1 条
 - [ ] T050 [US3] scrape_only 建轮/原地升级：保 `tests/test_scrape_only.py`（API 层）；`test_scrape_only_store.py`、`tests/test_result_rounds.py` L153-242 收敛
 - [ ] T051 [US3] 删最新不复活：保 store 层（`tests/webui_store/test_store_domains.py` L69-97）；`tests/test_result_history.py` L134-146 收敛
 - [ ] T052 [US3] 发布摘要过滤：保 `tests/test_updater.py` L194-218；`tests/test_release_summary.py` L15-30 收敛
