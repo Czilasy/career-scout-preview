@@ -17,6 +17,19 @@
 | D004 | `webui/src/screenFlow.ts` 导出 `primaryActionLabel`(L99) | 主操作文案派生 | 生产代码零引用；仅 `screenFlow.spec.ts` L102-103 引用 | 同上 |
 | D005 | `webui/src/location.ts` 导出 `locationCombinationCount`(L85) | 地点组合计数 | 生产代码零引用；仅 `location.spec.ts` L52-53 引用 | 同上 |
 
+## 待删清单（T081，2026-09-12 复核，逐项待用户同意）
+
+> 复核口径：全仓检索 `webui/`、`scripts/`、`packaging/`、`tests/`、`webui/src/`；
+> 排除 `specs/**`（历史文档）与本文档自身。删除按"项"为单位，逐项同意后才执行；
+> 未同意项保留并注明原因（T084）。
+
+| 项 | 待删内容（精确范围） | 2026-09-12 复核（检索式 → 结果） | 删除动作 | 预计影响 |
+|---|---|---|---|---|
+| D001+D002 | `webui/semantic.py` 整文件（283 行）+ `tests/test_semantic.py` 整文件（223 行 / 21 例） | `(from\|import).*semantic` → 仅 `tests/test_semantic.py:16`；`semantic` 在 `webui/*.py` 的其余 11 处命中均为英文注释里的 "semantics"（无导入）；`scripts/`、`packaging/` → 0 命中 | 删两个文件 | 后端 -21 例 / -506 行；无生产引用 |
+| D003 | `webui/src/discovery.ts` 五个导出（`normalizeIntegrity` L43-58、`integrityLabel` L60-63、`backfillJobPlatform` L120-132、`classifyTaskSize` L173-180、`recoverSelectionSettings` L210-219）；连带孤立：`INTEGRITY_LABELS`（L33-40，仅被 `normalizeIntegrity` 使用）与 5 个类型导入（`IntegrityConclusion` / `AdvancedSettingsState` / `ExecutionSelection` / `ExecutionSettings` / `TaskSize`）；`webui/src/__tests__/discovery.spec.ts` 对应测试段 | `normalizeIntegrity\|integrityLabel\|backfillJobPlatform\|classifyTaskSize\|recoverSelectionSettings\|INTEGRITY_LABELS` → 仅 `discovery.ts` 定义处与 `discovery.spec.ts` 测试处；`DynamicIsland.vue` 的同名 `integrityLabel` 是组件内局部 computed（自读 props.status.integrity），非引用本导出 | 删函数 + 孤立常量/导入 + 测试段 | 前端 -12 例（classifyTaskSize 8、recoverSelectionSettings 1、backfillJobPlatform 2、integrity parsing 1） |
+| D004 | `webui/src/screenFlow.ts` 的 `primaryActionLabel`（L99-101）+ `screenFlow.spec.ts` 的导入项与 `it("maps primary action labels")` 用例 | `primaryActionLabel` → 仅 `screenFlow.ts` 定义处 + `screenFlow.spec.ts`（L7 导入、L102-103 断言） | 删函数 + 测试用例 | 前端 -1 例 |
+| D005 | `webui/src/location.ts` 的 `locationCombinationCount`（L85-87）+ `location.spec.ts` 的导入项与 `it("counts only district-level locations")` 用例 | `locationCombinationCount` → 仅 `location.ts` 定义处 + `location.spec.ts`（L3 导入、L52-53 断言）；私有 `hasDistrict` 另被 `locationSummary` 使用，保留 | 删函数 + 测试用例 | 前端 -1 例 |
+
 ## 已排除（复核后判定保留）
 
 | # | 位置 | 结论 | 依据 |
