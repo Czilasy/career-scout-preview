@@ -334,10 +334,14 @@ class StopModePriorityTests(unittest.TestCase):
                 )
 
     def test_concurrent_pause_and_terminal_stop_never_leaves_pause(self):
-        """A terminal request wins even when pause and finish/cancel race."""
+        """A terminal request wins even when pause and finish/cancel race.
+
+        批四 T076：竞态窗口来自 Barrier(2) 的同步起跑，不来自重复轮数；
+        3 轮 × 3 种终态已覆盖同一交叠场景，原 25 轮只是重复消耗。
+        """
         for terminal_mode in (
                 STOP_MODE_CANCEL, STOP_MODE_FINISH, STOP_MODE_TERMINATE):
-            for _ in range(25):
+            for _ in range(3):
                 task = {}
                 stop_event = threading.Event()
                 start = threading.Barrier(2)

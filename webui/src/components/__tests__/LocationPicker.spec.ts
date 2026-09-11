@@ -1,6 +1,17 @@
-import { flushPromises, mount } from "@vue/test-utils";
+import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import LocationPicker from "../LocationPicker.vue";
 import type { LocationCondition } from "../../types";
+
+// 批四 T078：统一用例收尾——此前本文件 0 次 unmount，组件的 resize 监听与
+// 测量状态会跨用例泄漏；窄屏用例改写过的 window.innerHeight 也在此复位。
+enableAutoUnmount(afterEach);
+afterEach(() => {
+  Object.defineProperty(window, "innerHeight", {
+    configurable: true,
+    writable: true,
+    value: 768,
+  });
+});
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });

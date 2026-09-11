@@ -1,4 +1,9 @@
-"""Static regression checks for tools/start.bat safety rules."""
+"""Static regression checks for tools/start.bat safety rules.
+
+批四 T079 定性：保留（唯一护栏）。断言对象是 start.bat 的文本片段，行为覆盖
+有限——脚本真实执行（进程匹配、健康检查等待）不在测试内跑；它防的是关键安全
+字句被误删（如重新引入对端口监听进程的 taskkill）。
+"""
 
 from __future__ import annotations
 

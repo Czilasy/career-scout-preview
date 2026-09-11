@@ -28,11 +28,28 @@ def _backend_files() -> list[Path]:
     return sorted(files, key=lambda path: path.relative_to(PROJECT_ROOT).as_posix())
 
 
+def _is_test_artifact(path: Path) -> bool:
+    """测试文件不参与产物构建，也不参与前端指纹（批四 T072）。
+
+    口径必须与 ``webui/vite.config.ts`` 的 ``isTestArtifact`` 完全一致：
+    两边各算一份同一算法的指纹并比对，集合不同就会永远"不同步"。
+    """
+    relative_path = path.relative_to(HERE).as_posix()
+    return (
+        relative_path.startswith("src/test/")
+        or "/__tests__/" in relative_path
+        or relative_path.endswith(".spec.ts")
+    )
+
+
 def _frontend_files() -> list[Path]:
     files: list[Path] = []
     src_dir = HERE / "src"
     if src_dir.is_dir():
-        files.extend(path for path in src_dir.rglob("*") if path.is_file())
+        files.extend(
+            path for path in src_dir.rglob("*")
+            if path.is_file() and not _is_test_artifact(path)
+        )
     for extra in ("index.html", "vite.config.ts"):
         path = HERE / extra
         if path.is_file():

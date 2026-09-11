@@ -33,11 +33,23 @@ function collectFiles(dir: string): string[] {
   return files;
 }
 
+// 批四 T072：测试文件不参与产物构建，也不该让“只改测试”触发 pre-push 重建。
+// 口径必须与 webui/ensure_frontend_sync.py 的 _frontend_files() 完全一致
+// （两边各算一份同一算法的指纹并比对），改这里必须同步改那边。
+function isTestArtifact(path: string): boolean {
+  const relativePath = relative(projectRoot, path).replaceAll("\\", "/");
+  return (
+    relativePath.startsWith("webui/src/test/")
+    || relativePath.includes("/__tests__/")
+    || relativePath.endsWith(".spec.ts")
+  );
+}
+
 const frontendCandidates = [
   ...collectFiles(join(projectRoot, "webui", "src")),
   join(projectRoot, "webui", "index.html"),
   join(projectRoot, "webui", "vite.config.ts"),
-].filter((path: string) => existsSync(path));
+].filter((path: string) => existsSync(path) && !isTestArtifact(path));
 
 function sourceDigest(files: string[], root: string): string {
   const digest = createHash("sha256");

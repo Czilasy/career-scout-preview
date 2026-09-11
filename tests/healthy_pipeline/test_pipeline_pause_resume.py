@@ -14,7 +14,13 @@ from webui.task_pause_support import request_stop
 
 
 def _record_mock_scrape_completion(call_kwargs, combo_key, jobs, *, finalize=False):
-    """Make a run_search replacement produce the same whitebox facts as the real path."""
+    """Make a run_search replacement produce the same whitebox facts as the real path.
+
+    批四 T074 定性：保留（影子实现）。``run_search`` 被整体替换后白箱事实不会
+    自然落库；本助手按真实路径的同一事件契约补写 page/scope 完成事实，否则
+    "成功必须有完整证据"的白箱规则会把用例判成失败。它只服务 mock 路径，
+    真实侧同一事件契约由 ``tests/test_whitebox_integration.py`` 直接覆盖。
+    """
     store = call_kwargs.get("task_event_store")
     task_id = call_kwargs.get("task_id")
     if store is None or not task_id:

@@ -29,3 +29,4 @@
 
 - 2026-09-11（Spec 开工前复核）：D001–D005 确认；`validate_job_assessment` 连测试都没有，属模块内死段；`DynamicIsland.vue` 同名函数经核为局部实现（区分成功，不入册）。
 - 2026-09-11（批一）：无新增候选。批一清理的均为测试侧死件/恒真引用（`_FakeWhitebox` 假件、`continue-ai-from-results` 恒真断言），按规则不入册。
+- 2026-09-12（批四）：无新增候选。批四触碰的均为测试侧基建与测试文件（含 `tests/run_isolated_webui.py`、`tests/sc002_24h_monitor.py` 两个手动资产的头部标注）；`webui/ensure_frontend_sync.py` 虽被审查触及，但属现役同步校验（非死代码），不入册。

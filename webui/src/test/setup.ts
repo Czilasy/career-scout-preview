@@ -50,9 +50,11 @@ const mockIntersectionObservers: MockIntersectionObserver[] = [];
 // 037 D 批：jsdom 不实现 Web Animations API；提供记录用 no-op 桩。
 // 灵动岛弹跳走 Element.animate（CSS attribute 递增不会重启动画），
 // 动画开启态测试用 vi.spyOn(Element.prototype, "animate") 计数调用。
+// 批四 T071：补 `finished`——Animation 合同里调用方可能等动画结束，
+// 缺它会拿到 undefined 而不是 thenable。
 if (typeof (Element.prototype as unknown as { animate?: unknown }).animate !== "function") {
   (Element.prototype as unknown as { animate: unknown }).animate = function () {
-    return { cancel() {} };
+    return { cancel() {}, finished: Promise.resolve() };
   };
 }
 
@@ -107,3 +109,13 @@ function matchesFor(query: string): boolean {
   reducedMedia = reduced;
   for (const cb of listenersFor("(prefers-reduced-motion: reduce)")) cb({ matches: reduced });
 };
+
+// 批四 T071：模块级测试替身跨用例复位（声明全部就绪后注册）。
+// matchMedia 的窄屏/减少动效开关与已注册监听、以及 IntersectionObserver
+// 假件实例都必须逐用例归零，否则前一用例的设置/实例会泄漏到后面的用例。
+beforeEach(() => {
+  narrowMedia = false;
+  reducedMedia = true;
+  mediaListeners.clear();
+  mockIntersectionObservers.length = 0;
+});

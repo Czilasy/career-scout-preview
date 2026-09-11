@@ -111,6 +111,42 @@ describe("JobWorkspace company insight buttons (B058/B065)", () => {
   });
 });
 
+describe("JobWorkspace infinite scroll sentinel", () => {
+  // 批四 T071：把 setup.ts 里的 IntersectionObserver 假件真正接线——哨兵
+  // 进入视口自动展开下一批是用户可见行为，此前没有任何用例触发过该假件。
+  function manyJobs(count: number): JobItem[] {
+    return Array.from({ length: count }, (_, index) => job({ job_id: `j${index + 1}` }));
+  }
+
+  function lastObserver(): { trigger: (isIntersecting: boolean) => void } {
+    const observers = (globalThis as unknown as {
+      __mockIntersectionObservers: Array<{ trigger: (isIntersecting: boolean) => void }>;
+    }).__mockIntersectionObservers;
+    expect(observers.length).toBeGreaterThan(0);
+    return observers.at(-1)!;
+  }
+
+  it("loads the next batch only when the sentinel enters the viewport", async () => {
+    const wrapper = mount(JobWorkspace, {
+      props: { jobs: manyJobs(5), batchSize: 2, emptyMessage: "暂无岗位" },
+    });
+    const rows = () => wrapper.findAll('[data-testid="job-row"]');
+    expect(rows()).toHaveLength(2);
+
+    lastObserver().trigger(false);
+    await wrapper.vm.$nextTick();
+    expect(rows()).toHaveLength(2);
+
+    lastObserver().trigger(true);
+    await wrapper.vm.$nextTick();
+    expect(rows()).toHaveLength(4);
+
+    lastObserver().trigger(true);
+    await wrapper.vm.$nextTick();
+    expect(rows()).toHaveLength(5); // 展示数封顶在岗位总数，不越界渲染
+  });
+});
+
 describe("JobWorkspace detail scroll boundary", () => {
   it("keeps the detail shell fixed and places only the JD in its scroll window", () => {
     const wrapper = mount(JobWorkspace, {

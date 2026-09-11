@@ -30,6 +30,13 @@ def _sample_nine_fields(**overrides) -> dict:
 
 
 def _expected_path_digest(path: pathlib.Path) -> str:
+    """独立复算的文件/目录摘要（审校用 oracle）。
+
+    批四 T074 定性：保留（影子实现）。与生产 ``webui/tuning_digest.sha256_path``
+    同算法但刻意不复用——这里要的是独立算出的期望值，避免"用生产函数算期望值
+    再与生产比对"的同源自证。生产算法若变更，本函数须作为合同方独立核对后再
+    同步；未同步时相关用例变红，属预期信号。
+    """
     if path.is_file():
         return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
     digest = hashlib.sha256()

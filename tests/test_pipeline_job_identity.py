@@ -75,6 +75,11 @@ class FakeJobStore:
 
     Mirrors the branch structure of ``TaskStore.upsert_job_with_connection``
     so the orchestration can be verified without the real store.
+
+    批四 T074 定性：保留（影子实现）。生产双索引分支本身由
+    ``tests/webui_store/test_store_domains.py`` 直接覆盖；本替身只承担
+    "编排层在协议上零副作用"的验证，两者分工不重复。协议增删字段时本替身
+    需同步，未同步会被编排层用例暴露。
     """
 
     def __init__(self):

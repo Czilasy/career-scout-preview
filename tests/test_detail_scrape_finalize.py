@@ -71,9 +71,12 @@ def _slow_sleep(seconds, label=None):
     time.sleep(seconds)
 
 
-def _run(list_data, *, tab_pool_size=2, finalize_timeout=600, sleeper=_no_sleep):
+def _run(list_data, *, tab_pool_size=2, finalize_timeout=600, sleeper=_no_sleep,
+         stagger_range=(0.01, 0.02)):
     # 031 B5：boss 子模块去门面回溯，_facade patch 面撤销；会话经
     # session_factory 注入替身，运行态走 scripts.boss.runtime 真实默认值。
+    # 批四 T077：错峰等待显式化（生产默认 5~10s，真睡完太久）；需要慢跑的
+    # 用例单独传自己的小值。
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "details.json")
         results = ds.scrape_details(
@@ -82,6 +85,7 @@ def _run(list_data, *, tab_pool_size=2, finalize_timeout=600, sleeper=_no_sleep)
             session_factory=lambda cdp_port=None: _FakeSession(),
             sleeper=sleeper,
             inter_job_gap_range=(0.02, 0.05),
+            stagger_range=stagger_range,
             finalize_timeout=finalize_timeout,
         )
         exists = os.path.exists(out)
@@ -112,6 +116,10 @@ class DetailScrapeFinalizeRegressionTests(unittest.TestCase):
             tab_pool_size=2,
             finalize_timeout=1.5,
             sleeper=_slow_sleep,
+            # 显式错峰 2.0~2.2s（生产默认 5~10s 真睡太贵）。超时分支的触发
+            # 不依赖这个值：worker 每 3 个岗位的会话重置真睡 8~14s，1.5s 的
+            # deadline 必然撞上，"worker 超时未退出"照旧真实出现。
+            stagger_range=(2.0, 2.2),
         )
         # 修复前：超时抛 RuntimeError → 本测试直接失败。
         # 修复后：不抛，且已抓结果非空、已落盘。

@@ -269,8 +269,14 @@ def _zl_job(job_id, *, company="字节跳动", title="python 开发",
     }
 
 
-class CrossPlatformDedupeIntegrationTests(unittest.TestCase):
-    """T006：后跑平台筛选输入组装处的跨平台剔除（US1 主链路）。"""
+class _ZhilianScreenHarness:
+    """共享夹具与运行器（mixin，非 TestCase）：集成用例与续跑用例复用。
+
+    批四 T070：原实现让续跑用例继承 `CrossPlatformDedupeIntegrationTests`，
+    使同一批重型全链路用例在每个子类里各整跑一遍（同一批被跑 3 遍）。这里把
+    环境搭建与夹具抽成普通 mixin，测试类按需组合；mixin 不是 TestCase，
+    unittest 不会收集它，集成用例也不会被带进子类。
+    """
 
     def setUp(self):
         self.app, self.temp = _make_app()
@@ -288,7 +294,7 @@ class CrossPlatformDedupeIntegrationTests(unittest.TestCase):
         register_platform(self._original_zhilian_registry)
         self.temp.cleanup()
 
-    # -- 构造 --------------------------------------------------------------
+    # -- 构造（mixin 夹具，续跑用例共用） ----------------------------------
 
     def _save_boss_round(self, jobs, *, days_ago=1.0, dropped=None):
         finished_ms = int(
@@ -460,6 +466,10 @@ class CrossPlatformDedupeIntegrationTests(unittest.TestCase):
             task_id = response.get_json()["task_id"]
             finished = _wait_for_pipeline_task(self.client, task_id)
         return finished, seen, task_id
+
+
+class CrossPlatformDedupeIntegrationTests(_ZhilianScreenHarness, unittest.TestCase):
+    """T006：后跑平台筛选输入组装处的跨平台剔除（US1 主链路）。"""
 
     def test_zhilian_ai_child_inherits_complete_parent_frozen_identity(self):
         """AI 子任务激活前必须继承父抓取 run 的完整登录空间身份。"""

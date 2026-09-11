@@ -10,9 +10,9 @@ run_hygiene() {
     if uv run python -m unittest tests.test_repo_hygiene 2>/dev/null; then
         return 0
     fi
-    # 回退：uv 在部分环境（如 d: 装入点）无法解析 venv 时，显式指定解释器
+    # 回退：uv 在部分环境无法解析 venv 时，显式指定解释器候选
+    # （只列通用安装位置，不写本机专属路径——公开仓库文件边界）
     for py in \
-        "D:/ana/python.exe" \
         "C:/Python311/python.exe" \
         "C:/Python312/python.exe" \
         "C:/Python313/python.exe" \

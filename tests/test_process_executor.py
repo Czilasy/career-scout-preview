@@ -1,3 +1,12 @@
+"""ScraperExecutor 进程控制合同测试。
+
+批四 T075 定性：保留（真实资源依赖＝测试语义本身）。本模块用真实子进程
+（``sys.executable -c ...``）验证取消能整树终止、输出管道不泄漏；取消用例会
+真实走进程树终止路径，Windows 下 taskkill 的参数断言则 mock ``subprocess.run``
+只验 flags。子进程都是瞬时 Python 且用例自证已死，pid 中转文件写系统临时
+目录，不触碰用户目录。
+"""
+
 import gc
 import os
 import pathlib

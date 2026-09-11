@@ -1,8 +1,12 @@
-import { flushPromises, mount } from "@vue/test-utils";
+import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import App from "../App.vue";
 import DiscoveryView from "../views/DiscoveryView.vue";
 import { expectedBackendBuildHash, resetSessionStateForTests } from "../api";
 import { toggleTheme } from "../composables/useTheme";
+
+// 批四 T078：用例结束统一卸载（此前 42 例仅 2 次显式 unmount，其余挂载的
+// 组件与全局监听会跨用例残留）。
+enableAutoUnmount(afterEach);
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {

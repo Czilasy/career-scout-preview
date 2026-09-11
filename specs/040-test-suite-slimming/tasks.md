@@ -11,6 +11,19 @@
 - **批三（T039–T068）已完成**；其中 T045（版本一致性现状即满足）、T046（4 个文件的 guard 编排/清理/尝试记录与正本非重复）、T048（统一/重抓路由的检查器路径与正本旧路由非逐字重复）、T055（wiring 已无 size_guard 用例）、T059（两侧 `_make_ai_run` 默认夹具语义不同，硬合并会改测试数据）、T068（组件层独有 data-loaded 断言）**复核后保留，未删除**，依据见批末报告。
 - **T056 已完成（2026-09-11，用户裁定方案 A）**：将"默认配置目录"断言迁入 `tests/test_env_check.py` 的路径优先用例后，删除 `tests/chrome_setup/test_chrome_setup.py` 的重复用例；受影响两模块 100 例全绿。
 - T069 收尾同 T038 一并执行。
+- **批四（T070–T080）已完成（2026-09-12），T072 回退待裁定**：
+  - T070 组合化：`tests/test_cross_platform_dedupe.py` 共享夹具抽为非 TestCase 的 `_ZhilianScreenHarness` mixin，集成用例类与 `tests/webui_app/test_webui_app_semantics.py` 两个续跑子类改为组合它；两文件 103→81 例（-22）、81.9s→58.9s。故障注入指纹：改动前 17 条变红（去重后 9 个唯一用例体）＝改动后 9 条变红（A=B，唯一保护未减）。
+  - T071 已完成：IntersectionObserver 假件接线（`JobWorkspace.spec.ts` 新增哨兵展开用例，可注入打红）；`matchMedia` 与假件实例逐用例复位；animate 桩补 `finished`。
+  - **T072 已完成（2026-09-12，用户裁定方案②：破例授权在批四内配对修改）**：`webui/vite.config.ts` 排除测试文件；同步把 `webui/ensure_frontend_sync.py` 的 `_frontend_files()` 加上同一套排除（同一算法、同一候选集，两边注释互相指向，改一边必须改另一边）。实测四项：改测试文件后 `--check` 仍"已同步"且重建指纹不变（b2cbd6e898ab）；改源码后 `--check` 报"不同步"、重建指纹变为 3511ca8028b9；还原源码后重建指纹回到 b2cbd6e898ab。`scripts/release_check.ps1` 全过（含标签纪律、版本一致性、前端重建、卫生、空白检查）。
+  - T073 已完成：钩子移除 `"D:/ana/python.exe"`；全仓 0 命中；Git 自带 bash 实跑钩子通过。
+  - T074 已完成：5 处影子实现逐条定性并落注释（均保留）。
+  - T075 已完成：chrome_setup 真子进程、process_executor 真子进程/进程树终止、repo_hygiene 读本地 git 逐条复核边界并落 docstring；衍生小修：chrome_setup 三处真实 CLI 调用改显式 UTF-8 解码（带/不带 `PYTHONIOENCODING` 均绿）。
+  - T076 已完成：竞态轮数 25→3（3 轮 × 3 终态）；连跑 3 次全绿。
+  - T077 已完成：`_run` 新增显式 `stagger_range`（默认 (0.01,0.02)），超时用例传 (2.0,2.2)；实测超时分支仍真实触发（"worker 超时未退出"照旧出现）。
+  - T078 已完成：LocationPicker/App/DiscoveryView 补 `enableAutoUnmount(afterEach)`（另复位 `innerHeight`）；三文件 173 例全绿、无重复卸载告警。
+  - T079 已完成：`test_start_bat.py` 定性注明；`run_isolated_webui.py`、`sc002_24h_monitor.py` 标注"手动资产，不进 CI"。
+  - T080 已完成：受影响 15 文件逐个单跑 + 倒序 + 正序重跑均 616 例全绿；后端全量 3084 例（-22）、前端 52 文件 872 例（+1）、构建成功、卫生 14 例；真实用户目录前后快照 13,980 项零变化；独立审查（子代理只读）发现 1 项阻断（T072）+ 4 项文档级不准确，阻断按方案②配对修复并复验、文档问题全部修正后重测。
+  - 批四产品代码改动清单（唯一一处，经用户逐项授权）：`webui/ensure_frontend_sync.py` 前端候选集排除测试文件（与 `webui/vite.config.ts` 同口径），不改算法、不改比较逻辑、不改重建行为。
 - 下方 `[ ]` 未逐条勾选：以本节状态为准，逐条结果与偏差见 `quickstart.md` 结果记录区与批末报告。
 
 ## 全局规则（对每条任务都适用）

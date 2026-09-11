@@ -13,6 +13,16 @@ from tests.chrome_setup.harness import SCRIPT_PATH, load_module, tempfile_profil
 
 
 class ChromeSetupTests(unittest.TestCase):
+    """Chrome/CDP 装配链路的合同测试。
+
+    批四 T075 定性：保留（真实资源依赖＝测试语义本身）。本类有 4 处真实
+    CLI 子进程（--help、--copy-login-state --check、--import-boss-session、
+    GBK 编码下的 --check），全部落在被测脚本的早期拒绝/纯展示分支：端口固定
+    用 1/2（不可能有监听者），不启动浏览器、不读写用户 profile；子进程带
+    timeout 且 capture_output，不残留。日志目录由 harness 重定向到本进程
+    专属临时目录（tests/chrome_setup/harness.py）。
+    """
+
     def test_launch_chrome_closes_parent_stderr_handle_after_spawn(self):
         module = load_module()
         spawned = object()
@@ -1069,7 +1079,11 @@ class ChromeSetupTests(unittest.TestCase):
                 "--cdp-port", "1",
             ],
             capture_output=True,
-            text=True,
+            # 批四 T075：显式按 UTF-8 解码（子进程输出为 UTF-8），不再依赖
+            # 宿主 locale——子进程输出非 GBK 时（如 PYTHONIOENCODING=utf-8），
+            # 默认的 GBK 解码会直接失败。
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
 
@@ -1237,7 +1251,8 @@ class ChromeSetupTests(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), "--help"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
 
@@ -1262,7 +1277,8 @@ class ChromeSetupTests(unittest.TestCase):
                 "--cdp-port", "1",
             ],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
 

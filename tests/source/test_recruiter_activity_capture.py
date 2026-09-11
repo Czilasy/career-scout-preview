@@ -156,6 +156,13 @@ class _FakeSource:
 
 
 def _exec_config():
+    """详情链路的执行配置替身（SimpleNamespace 形状）。
+
+    批四 T074 定性：保留（影子实现）。生产用 ``ExecutionConfigSnapshot``；
+    此处只需要 ``fetch_job_details`` 实际读取的几个字段，用最小替身避免把
+    配置对象的构造约束带进本文件的用例。字段名与生产契约一致，改字段名会被
+    用例直接暴露。
+    """
     return SimpleNamespace(
         detail_batch_size=5, detail_interval=0,
         detail_reset_every=0, detail_batch_cooldown=0,

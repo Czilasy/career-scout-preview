@@ -10,7 +10,7 @@ from unittest import mock
 from webui.app import create_app
 
 from tests.test_cross_platform_dedupe import (  # noqa: E402
-    CrossPlatformDedupeIntegrationTests,
+    _ZhilianScreenHarness,
     _boss_kept_job,
     _wait_for_pipeline_task,
     _zl_job,
@@ -1347,7 +1347,7 @@ class B054LocationApiTests(unittest.TestCase):
 # ===========================================================================
 
 
-class ResumeDedupSingleSideTests(CrossPlatformDedupeIntegrationTests):
+class ResumeDedupSingleSideTests(_ZhilianScreenHarness, unittest.TestCase):
     """断点内已保留岗位 + 本轮新命中跨平台重复 → 岗位只在剔除侧。"""
 
     def _run_first_round_paused_at_fine(self, scrape_task_id, rough_seen):
@@ -1473,7 +1473,7 @@ class ResumeDedupSingleSideTests(CrossPlatformDedupeIntegrationTests):
 # ===========================================================================
 
 
-class ResumeVerdictCoverageChainTests(CrossPlatformDedupeIntegrationTests):
+class ResumeVerdictCoverageChainTests(_ZhilianScreenHarness, unittest.TestCase):
     """多 run 链：run1 粗筛 dropped → run2 接管只写精筛判定（数量够但
     键集不覆盖断点）→ run3 续跑。覆盖口径下必须合并，dropped 不复活。"""
 
@@ -1607,9 +1607,8 @@ class ResumeVerdictCoverageChainTests(CrossPlatformDedupeIntegrationTests):
         self.assertEqual(events[0]["payload"]["missing"], 1)
 
 
-# 删除基类名字，避免 unittest 把 import 进命名空间的基类再收集一遍
-# （子类仍经 __bases__ 持有它，继承重跑不受影响）
-del CrossPlatformDedupeIntegrationTests
+# 批四 T070：共享夹具改为 mixin（非 TestCase），不再需要删除基类名字——
+# unittest 不会收集 mixin，集成用例也不会被重复收集/重复整跑。
 
 
 if __name__ == "__main__":

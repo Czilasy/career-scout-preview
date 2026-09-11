@@ -1,4 +1,9 @@
-"""Repo hygiene guard for the public release."""
+"""Repo hygiene guard for the public release.
+
+批四 T075 定性：保留（真实资源依赖＝测试语义本身）。本模块真实读取本地
+git（ls-files / check-ignore / log / config）以校验仓库卫生与钩子配置，属
+设计内依赖；全程只读，不写文件、不改 git 状态、不触碰用户目录。
+"""
 
 from __future__ import annotations
 

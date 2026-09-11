@@ -405,7 +405,14 @@ class BossCdpSourcePlatformTests(unittest.TestCase):
 
 
 class BossCdpSourceInProcessTests(unittest.TestCase):
-    """T026：BossCdpSource in_process=True argv 翻译执行器。"""
+    """T026：BossCdpSource in_process=True argv 翻译执行器。
+
+    批四 T074 定性：保留（产物 schema 影子实现）。本类手写列表/详情产物
+    JSON（list: ``{"jobs": [...]}``；detail: ``[{"job_id", "jd", ...}]``）来
+    复刻抓取脚本的落盘契约——被测方读的就是这个形状，手写即独立合同样本，
+    不引用生产写盘代码。脚本侧写盘契约另有
+    ``tests/chrome_setup/test_scraper_contracts.py`` 覆盖。
+    """
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
