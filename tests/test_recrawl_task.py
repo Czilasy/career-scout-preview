@@ -219,6 +219,99 @@ class RecrawlTargetResolvedTests(unittest.TestCase):
         ))
 
 
+class RecrawlBatchSignalTests(unittest.TestCase):
+    """025 B076：补抓的 JD 批次同样要有批内信号与「立即停止」能力。
+
+    补抓与 AI 筛选的抓 JD 是同一件事、同一套批次机制；此前补抓没接批次登记
+    和批内信号，前端弹不出二选一、后端"立即停止"也杀不到正在跑的批次。
+    """
+
+    def test_recrawl_registers_batch_signal_and_guard(self):
+        task_id = "recrawl-batch-signal"
+        targets = [{"job_id": "J1", "jd": "", "source_url": TARGET_URL}]
+        ctx = _FakeCtx(targets, task_id)
+        guard = object()
+        ctx.pipeline_guard = guard
+        calls: dict = {}
+        snapshots = []
+
+        def fake_fetch(_jobs, _source, **kwargs):
+            calls.update(kwargs)
+            batch_progress = kwargs.get("batch_progress")
+            progress = kwargs.get("progress")
+            batch_progress(1, 2)
+            progress(1, 2)  # 条级进度刷新（不带批内信号）
+            with ctx.lock:
+                snapshots.append(dict(ctx.tasks[task_id]["progress"]))
+            batch_progress(None, None)  # 批结束
+            with ctx.lock:
+                snapshots.append(dict(ctx.tasks[task_id]["progress"]))
+            return {"jobs": []}
+
+        def fake_match_jds(chunk, profile_summary, endpoint, api_key, **kwargs):
+            return {"verdicts": {}}
+
+        with mock.patch("webui.ai.match_jds", side_effect=fake_match_jds), \
+                mock.patch("webui.ai.retrieve_api_key", return_value="sk-test"), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                           return_value=(True, None)), \
+                mock.patch("webui.pipeline_exec.fetch_job_details",
+                           side_effect=fake_fetch), \
+                mock.patch("webui.pipeline_exec.failed_code_label",
+                           return_value="抓取失败"), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"), \
+                mock.patch("webui.result_rounds.apply_recrawl_writeback"):
+            run_recrawl_task(
+                ctx, task_id,
+                job_ids=[str(t.get("job_id")) for t in targets],
+                profile_summary="3 年 Python 后端，熟悉 FastAPI",
+                source_run_id="src-b080",
+            )
+
+        self.assertIs(calls.get("guard"), guard, "补抓批次必须登记给卡死防护（立即停止据此杀批）")
+        self.assertEqual(calls.get("task_id"), task_id)
+        self.assertEqual(calls.get("batch_key_prefix"), f"recrawl-jd-{task_id}")
+        self.assertTrue(callable(calls.get("batch_progress")))
+        self.assertEqual(
+            snapshots[0].get("jd_batch"), {"current": 1, "total": 2},
+            "条级进度刷新不得冲掉批内信号（否则暂停二选一弹不出来）",
+        )
+        self.assertIsNone(snapshots[1].get("jd_batch"), "批结束必须清空批内信号")
+
+    def test_finish_stop_leaves_finalization_to_api(self):
+        """补抓 JD 期间点「结束保存」：worker 不得抢先记成已取消。"""
+        task_id = "recrawl-finish-stop"
+        targets = [{"job_id": "J1", "jd": "", "source_url": TARGET_URL}]
+        ctx = _FakeCtx(targets, task_id)
+        writes = []
+        ctx.write_run = lambda *args, **kwargs: writes.append(dict(kwargs))
+        ctx.tasks[task_id]["stop_mode"] = "finish"
+        ctx.tasks[task_id]["stop_event"].set()
+
+        with mock.patch("webui.ai.match_jds"), \
+                mock.patch("webui.ai.retrieve_api_key", return_value="sk-test"), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                           return_value=(True, None)), \
+                mock.patch("webui.pipeline_exec.fetch_job_details",
+                           return_value={"jobs": [], "stopped": True}), \
+                mock.patch("webui.pipeline_exec.failed_code_label",
+                           return_value="抓取失败"), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"), \
+                mock.patch("webui.result_rounds.apply_recrawl_writeback"):
+            run_recrawl_task(
+                ctx, task_id,
+                job_ids=["J1"],
+                profile_summary="3 年 Python 后端",
+                source_run_id="src-finish",
+            )
+
+        self.assertEqual(
+            [w for w in writes if w.get("status") == "cancelled"], [],
+            "结束保存由接口定稿，worker 不能把它写成已取消",
+        )
+        self.assertNotEqual(ctx.tasks[task_id].get("status"), "cancelled")
+
+
 class RecrawlOutcomeScopeTests(unittest.TestCase):
     """B098：本次重抓的成败只看本次目标，不被整轮其他待确认岗位拖成失败。"""
 

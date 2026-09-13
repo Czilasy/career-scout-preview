@@ -248,7 +248,8 @@ describe("DynamicIsland 点击派发（无通知 → 直达导航）", () => {
       progress: { phase: "scraping", done: 1, total: 10 },
     }));
     await wrapper.get('[data-testid="dynamic-island-running"]').trigger("click");
-    expect(wrapper.emitted("navigate")?.[0]).toEqual(["task"]);
+    // Spec041 返工：按真实进度派生目标原样发出（抓取→task-scrape），不再压成 "task"。
+    expect(wrapper.emitted("navigate")?.[0]).toEqual(["task-scrape"]);
   });
 
   it("completed 点击去结果页", async () => {
@@ -266,7 +267,9 @@ describe("DynamicIsland 点击派发（无通知 → 直达导航）", () => {
       attention: { kind: "paused", message: "任务已暂停" },
     }));
     await wrapper.get('[data-testid="dynamic-island-attention"]').trigger("click");
-    expect(wrapper.emitted("navigate")?.[0]).toEqual(["attention"]);
+    // Spec041 返工：卡住那步页直接作为目标（默认无 stuckAt → task-screen），
+    // 落点裁决交给桥接层，信息不再在这一层丢失。
+    expect(wrapper.emitted("navigate")?.[0]).toEqual(["task-screen"]);
   });
 });
 
@@ -978,6 +981,60 @@ describe("DynamicIsland 037 组件级 carousel + 宽度 spring + 数字弹动", 
       wrapper.unmount();
     } finally {
       computedStyle.mockRestore();
+      offsetWidth.mockRestore();
+    }
+  });
+
+  // 038 复审（真机现象）：点击后 pill 左侧一条长空白、右侧文案被裁。
+  // 根因 = 轨道按"最宽那条 lane"撑开、lane 却在轨道里居中；pill 宽度又只按
+  // 当前展示的那条算 → 队列里残留更宽的 lane 时当前这条被推右并被 overflow 裁。
+  it("038 复审：轨道左对齐（lane 不再被居中推进 pill 里）", () => {
+    const source = readFileSync(resolve(process.cwd(), "src/components/DynamicIsland.vue"), "utf8");
+    const trackRule = source.match(/\.island-carousel-track \{[\s\S]*?\n\}/)?.[0] ?? "";
+
+    expect(trackRule).toContain("align-items: flex-start;");
+    expect(trackRule).not.toContain("align-items: center;");
+  });
+
+  it("038 复审：宽度按队列里最宽的那条 lane 算，不只看当前展示的", async () => {
+    // jsdom 无布局：用文案长度桩出"不同宽度的 lane"。
+    const offsetWidth = vi
+      .spyOn(HTMLElement.prototype, "offsetWidth", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        if (!this.classList.contains("island-lane")) return 0;
+        return (this.textContent || "").trim().length * 10;
+      });
+    try {
+      const wrapper = mountIsland(makeStatus({ state: "idle", platform: "boss" }));
+      await nextTick();
+      const pill = wrapper.get(".island-pill");
+      // 只有主干 "BOSS"（40）：40 + 8 + 36 + 2 = 86
+      expect(Number(pill.attributes("data-pill-width"))).toBeGreaterThanOrEqual(86);
+
+      // 先来一条长的打断（展示位就是它）：90 + 8 + 36 + 2 + 30(角标) = 166
+      wrapper.carousel.pushInterrupt({
+        content: { title: "很长的一条打断提示", tone: "warning", target: "task" },
+        duration: 100000,
+      });
+      await nextTick();
+      await nextTick();
+      await nextTick();
+      expect(Number(pill.attributes("data-pill-width"))).toBeGreaterThanOrEqual(166);
+
+      // 再来一条短打断抢到展示位（长的那条还留在队列里）：pill 必须仍按最宽的 90 撑，
+      // 而不是缩回短的那条（旧实现会缩到 10 + 46 + 30 = 86）。
+      wrapper.carousel.pushInterrupt({
+        content: { title: "短", tone: "warning", target: "task" },
+        duration: 100000,
+      });
+      await nextTick();
+      await nextTick();
+      await nextTick();
+      expect(Number(pill.attributes("data-pill-width"))).toBeGreaterThanOrEqual(166);
+
+      wrapper.carousel.reset();
+      wrapper.unmount();
+    } finally {
       offsetWidth.mockRestore();
     }
   });

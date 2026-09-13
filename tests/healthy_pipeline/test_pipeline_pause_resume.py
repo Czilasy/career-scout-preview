@@ -1904,11 +1904,13 @@ class ScrapePauseResumeContractTests(unittest.TestCase):
                                              cdp_port=9222 if platform == "boss" else 9223)
 
                     def fake_search(*_args, **_kwargs):
+                        # 中途停止场景：白箱结论不是「完整成功」，停止语义才会
+                        # 生效（完整成功时按收尾族事实优先规则定稿）。
                         return {
                             "ok": True, "jobs": [], "total_scraped": 0,
                             "total_matched": 0, "combinations": 6,
                             "completed_combos": ["前端|全国"], "error": "",
-                            "integrity": {"conclusion": "succeeded"},
+                            "integrity": {"conclusion": "partial"},
                         }
 
                     with mock.patch.object(ctx, "activate_task_browser"), \
@@ -2324,6 +2326,11 @@ class ResumeSourceFailureMessageTests(unittest.TestCase):
                     ctx = app.config["PIPELINE_CONTEXT"]
                     with mock.patch(
                         "webui.pipeline_exec.probe_chrome_ready",
+                        return_value=(False, raw_diagnostic),
+                    ), mock.patch(
+                        # 继续自愈会先尝试拉起浏览器；本用例验证「拉起也失败」时的
+                        # 文案映射，必须显式桩掉拉起，避免测试环境真的启动浏览器。
+                        "webui.pipeline_exec.ensure_chrome_ready",
                         return_value=(False, raw_diagnostic),
                     ), mock.patch.object(ctx, "activate_run_browser"), \
                             mock.patch.object(ctx.executor, "submit") as submit, \

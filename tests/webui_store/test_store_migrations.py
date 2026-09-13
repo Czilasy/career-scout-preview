@@ -271,6 +271,18 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertIn("flags_json", result_columns)
         self.assertGreaterEqual(store.schema_version(), 31)
 
+    def test_migration_034_adds_page2_draft_column(self):
+        """第 2 页输入随画像持久化：画像表补 page2_draft_json 一列。"""
+        store = TaskStore(self.db_path)
+        with store._connection() as conn:
+            columns = {
+                row["name"] for row in conn.execute(
+                    "PRAGMA table_info(candidate_profiles)"
+                ).fetchall()
+            }
+        self.assertIn("page2_draft_json", columns)
+        self.assertGreaterEqual(store.schema_version(), 34)
+
     def test_save_pipeline_result_persists_facts_and_flags(self):
         """新轮次：画像事实写入 screening_runs、flags 写入 screening_results，读回一致。"""
         store = TaskStore(self.db_path)

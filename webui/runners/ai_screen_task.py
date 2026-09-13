@@ -11,6 +11,7 @@ from webui import ai as ai_service
 import threading
 import time
 from webui.diagnostics import record_failure
+from webui.task_runner_support import _carry_batch_signal
 from webui.task_runners import _split_resume_verdicts
 from webui.runners.ai_screen_rough import run_rough_stage
 from webui.runners.ai_screen_jd import run_jd_stage
@@ -156,13 +157,19 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
             task = ctx.tasks.get(task_id)
             if task is None:
                 return
-            task['progress'] = kw
+            task['progress'] = _carry_batch_signal(task.get('progress'), kw, stage)
             msg = kw.get('message')
             if msg:
                 task['logs'].append(msg)
 
     def _stop_requested():
         return stop_event is not None and stop_event.is_set()
+
+    def _raw_stop_mode():
+        """停在任务上的原始停止原因（pause/cancel/finish/terminate/空）。"""
+        with ctx.lock:
+            t = ctx.tasks.get(task_id)
+        return str((t or {}).get('stop_mode') or '')
 
     def _stop_mode():
         with ctx.lock:
@@ -187,6 +194,13 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
                 ctx.release_worker_resume_claims(t)
 
     def _handle_user_stop():
+        if _raw_stop_mode() in ('finish', 'terminate'):
+            # 结束保存/终止由对应接口负责定稿（接口自己写终态与部分快照）。
+            # worker 只释放续跑占位，不写任何终态，避免与接口抢写。
+            with ctx.lock:
+                t = ctx.tasks.get(task_id)
+            ctx.release_worker_resume_claims(t)
+            return
         if _stop_mode() == 'pause':
             _mark_paused()
         else:
@@ -256,7 +270,7 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         if source_result.get('hard_stop'):
             _hs_code = source_result.get('hard_stop_code') or 'source_blocked'
             _completed_combos = source_result.get('completed_combos') or []
-            ctx.store.create_screening_run(task_id, frozen_filters=screening_fields, source_count=len(source_result.get('jobs') or []), execution_params={'scrape_task_id': scrape_task_id, 'profile_summary': profile_summary or '', 'profile_facts': profile_facts, 'browser_account': frozen_browser_account or ctx.account_for_run(), 'active_account_at_freeze': str(task.get('active_account_at_freeze') or '') or ctx.account_for_run(), 'execution_config': execution_config.to_dict(), 'frozen_scope': frozen_scope.to_dict(), 'platform': frozen_platform, 'cdp_port': frozen_cdp_port, 'profile_key': frozen_profile_key, 'task_input_digest': ai_task_input_digest, 'cross_platform_dedupe': cross_platform_dedupe}, backend_version=ctx.backend_version)
+            ctx.store.create_screening_run(task_id, frozen_filters=screening_fields, source_count=len(source_result.get('jobs') or []), profile_id=str(task.get('profile_id') or '') or None, execution_params={'scrape_task_id': scrape_task_id, 'profile_summary': profile_summary or '', 'profile_facts': profile_facts, 'browser_account': frozen_browser_account or ctx.account_for_run(), 'active_account_at_freeze': str(task.get('active_account_at_freeze') or '') or ctx.account_for_run(), 'execution_config': execution_config.to_dict(), 'frozen_scope': frozen_scope.to_dict(), 'platform': frozen_platform, 'cdp_port': frozen_cdp_port, 'profile_key': frozen_profile_key, 'task_input_digest': ai_task_input_digest, 'cross_platform_dedupe': cross_platform_dedupe}, backend_version=ctx.backend_version)
             ctx.store.save_filter_snapshot(task_id, platform=frozen_platform, task_input_digest=ai_task_input_digest)
             ctx.write_run(task_id, status='running', current_stage='scrape')
             ctx.write_run(task_id, status='paused', error_code=_hs_code, current_stage='scrape')
@@ -279,7 +293,7 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         if not raw_jobs:
             raise RuntimeError('empty_scrape_result')
         if resume_from_run_id != task_id:
-            ctx.store.create_screening_run(task_id, frozen_filters=screening_fields, source_count=len(raw_jobs), execution_params={'scrape_task_id': scrape_task_id, 'profile_summary': profile_summary, 'profile_facts': profile_facts, 'browser_account': frozen_browser_account or ctx.account_for_run(), 'active_account_at_freeze': str(task.get('active_account_at_freeze') or '') or ctx.account_for_run(), 'execution_config': execution_config.to_dict(), 'frozen_scope': frozen_scope.to_dict(), 'platform': frozen_platform, 'cdp_port': frozen_cdp_port, 'profile_key': frozen_profile_key, 'task_input_digest': ai_task_input_digest, 'cross_platform_dedupe': cross_platform_dedupe}, backend_version=ctx.backend_version)
+            ctx.store.create_screening_run(task_id, frozen_filters=screening_fields, source_count=len(raw_jobs), profile_id=str(task.get('profile_id') or '') or None, execution_params={'scrape_task_id': scrape_task_id, 'profile_summary': profile_summary, 'profile_facts': profile_facts, 'browser_account': frozen_browser_account or ctx.account_for_run(), 'active_account_at_freeze': str(task.get('active_account_at_freeze') or '') or ctx.account_for_run(), 'execution_config': execution_config.to_dict(), 'frozen_scope': frozen_scope.to_dict(), 'platform': frozen_platform, 'cdp_port': frozen_cdp_port, 'profile_key': frozen_profile_key, 'task_input_digest': ai_task_input_digest, 'cross_platform_dedupe': cross_platform_dedupe}, backend_version=ctx.backend_version)
             ctx.store.save_filter_snapshot(task_id, platform=frozen_platform, task_input_digest=ai_task_input_digest)
             ctx.write_run(task_id, status='running', current_stage='ai_rough')
         else:
@@ -304,7 +318,11 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         resume_fine_verdicts = {}
         if resume_from_run_id:
             resume_fine_verdicts, _ = _split_resume_verdicts(resume_verdicts)
-        _dedupe = apply_to_screening_input(ctx.store, raw_jobs, frozen_platform, profile_summary, enabled=cross_platform_dedupe)
+        # Spec041：去重判定源按当前画像取轮，别的画像的历史轮不参与；老任务无画像时保持旧口径。
+        _dedupe = apply_to_screening_input(
+            ctx.store, raw_jobs, frozen_platform, profile_summary,
+            profile_id=str(task.get('profile_id') or '') or None,
+            enabled=cross_platform_dedupe)
         _dup_entries = _dedupe.dropped_entries
         _dup_ids = {str(e.get('job_id') or '') for e in _dup_entries}
         if _dup_entries:

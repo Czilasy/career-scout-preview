@@ -3,9 +3,89 @@
 // ---------------------------------------------------------------------------
 
 import type { ErrorCode } from "./errorCodes";
+import type { FilterState, SortKey } from "./listFilter";
 
 /** 平台稳定键。注册表权威来源是后端 `webui/platforms.py`。 */
 export type Platform = "boss" | "zhilian";
+
+/** Spec041：页面现场归属的三段身份。任一段变化都代表另一份现场。 */
+export interface SceneIdentity {
+  profileId: string;
+  runEpoch: string;
+  platform: Platform;
+}
+
+/** Spec041：城市面板的可恢复现场。目录本身留在前端，避免重复加载。 */
+export interface CityPanelScene {
+  open: boolean;
+  districts: LocationCatalogEntry[];
+  cityCode: string;
+}
+
+/** Spec041：当前轮次页面内的操作现场。 */
+export interface PageScene {
+  profileInputHeight: number | null;
+  /** 算出 profileInputHeight 时的输入框宽度；宽度变了就不沿用旧高度。 */
+  profileInputWidth: number | null;
+  /** 算出 profileInputHeight 时的文本内容；内容变了就重算。 */
+  profileInputContent: string;
+  cityPanels: Record<string, CityPanelScene>;
+  cardOpenStates: Record<string, boolean>;
+  cardScrollTops: Record<string, number>;
+  sortKey: SortKey;
+  listFilterDraft: FilterState;
+  visibleCount: number;
+  selectedJobKey: string | null;
+  userSelectedDetail: boolean;
+  detailOpen: boolean;
+  jdScrollTop: number;
+  listScrollTop: number;
+}
+
+export type IslandNavTarget =
+  | "home"
+  | "task-scrape"
+  | "task-screen"
+  | "results"
+  | "reminders";
+
+export type ResumeAnalysisPhase = "idle" | "analyzing" | "succeeded" | "failed";
+
+export type IslandPhase =
+  | "scraping"
+  | "jd"
+  | "screening"
+  | "analyzing"
+  | "completed"
+  | "idle"
+  | "attention";
+
+/** 旧组件仍使用的名称，统一指向新的落点口径。 */
+export type CapsuleTarget = IslandNavTarget;
+
+/** 灵动岛展示状态；analyzing 是简历分析尚未结束的真实状态。 */
+export type DynamicIslandState =
+  | { state: "idle"; platform: Platform }
+  | {
+      state: "analyzing";
+      platform: Platform;
+      progress?: { done: number; total?: number };
+    }
+  | {
+      state: "running";
+      platform: Platform;
+      progress: { phase: "scraping" | "jd" | "screening"; done: number; total?: number };
+    }
+  | {
+      state: "completed";
+      platform: Platform;
+      results: { matched: number; pending: number };
+    }
+  | {
+      state: "attention";
+      platform: Platform;
+      attention: { kind: "paused" | "error" | "pending"; message: string };
+    };
 
 /**
  * 任务 API 公共状态映射（http-api.md 公共状态映射表）。
@@ -303,6 +383,8 @@ export interface CandidateProfile {
   id: string;
   name: string;
   confirmed_fields?: Record<string, unknown>;
+  /** 第 2 页输入（关键词/城市/画像文本）：随画像持久化，切平台复用、换会话不丢。 */
+  page2_draft?: Record<string, unknown> | null;
 }
 
 export interface JobItem {

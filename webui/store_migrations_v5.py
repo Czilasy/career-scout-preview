@@ -1,4 +1,4 @@
-"""Schema migration 033 for the task completion evidence whitebox."""
+"""Schema migrations 033（任务完成证据白箱）与 034（第 2 页输入随画像持久化）。"""
 
 from __future__ import annotations
 
@@ -106,4 +106,23 @@ class StoreMigrationsV5Mixin:
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at, description)
                     VALUES (33, CURRENT_TIMESTAMP, 'task completion evidence whitebox');
                 """
+            )
+
+    def _migration_034(self):
+        """第 2 页输入随画像持久化（用户拍板：第 2 页内容要一直在、切平台复用）。
+
+        落在 candidate_profiles 上（一个画像一行）：关键词、勾选关键词、关键词输入框、
+        城市文本、城市输入框、画像文本。老库补列；表不存在（测试冻结库）时跳过，
+        读取方按缺列容错。
+        """
+        with self._connection() as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(candidate_profiles)")}
+            if columns and "page2_draft_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE candidate_profiles ADD COLUMN page2_draft_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (34, ?, 'candidate profiles page2 draft')",
+                (_now(),),
             )

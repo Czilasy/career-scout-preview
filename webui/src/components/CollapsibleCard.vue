@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { ChevronDown } from "@lucide/vue";
-import { ref, watch } from "vue";
+import { nextTick, onBeforeUnmount, ref, watch } from "vue";
+import type { SceneIdentity } from "../types";
+import { useDiscoverySceneState } from "../composables/useDiscoverySceneState";
 
 const props = defineProps<{
   title: string;
   modelValue: boolean;
   /** static 模式：常驻展开，卡头不可点击、不显示折叠箭头（如步骤 2 双栏卡）。 */
   static?: boolean;
+  /** Spec041：可选的步骤页现场身份与卡片键。 */
+  sceneIdentity?: SceneIdentity;
+  sceneCardKey?: string;
 }>();
 
 const emit = defineEmits<{
@@ -18,11 +23,59 @@ function toggle() {
   emit("update:modelValue", !props.modelValue);
 }
 
-// 收起前把内部滚动位置归零，避免高级执行设置收拢后仍露出一截底部内容。
 const innerEl = ref<HTMLElement | null>(null);
-watch(() => props.modelValue, (open) => {
-  if (!open && innerEl.value) innerEl.value.scrollTop = 0;
-});
+const sceneStore = useDiscoverySceneState();
+let sceneReady = false;
+
+function restoreCardScene(): void {
+  sceneReady = false;
+  const identity = props.sceneIdentity;
+  if (!identity || !props.sceneCardKey) {
+    sceneReady = true;
+    return;
+  }
+  const scene = sceneStore.getCurrent(identity);
+  const top = scene.cardScrollTops[props.sceneCardKey] || 0;
+  if (!props.static && Object.prototype.hasOwnProperty.call(scene.cardOpenStates, props.sceneCardKey)) {
+    emit("update:modelValue", Boolean(scene.cardOpenStates[props.sceneCardKey]));
+  }
+  sceneReady = true;
+  void nextTick(() => {
+    if (innerEl.value) innerEl.value.scrollTop = top;
+  });
+}
+
+function persistCardOpen(value: boolean): void {
+  if (!sceneReady || !props.sceneIdentity || !props.sceneCardKey || props.static) return;
+  const current = sceneStore.getCurrent(props.sceneIdentity);
+  sceneStore.saveCurrent(props.sceneIdentity, {
+    cardOpenStates: {
+      ...current.cardOpenStates,
+      [props.sceneCardKey]: value,
+    },
+  });
+}
+
+function persistCardScroll(): void {
+  if (!sceneReady || !props.sceneIdentity || !props.sceneCardKey) return;
+  const current = sceneStore.getCurrent(props.sceneIdentity);
+  sceneStore.saveCurrent(props.sceneIdentity, {
+    cardScrollTops: {
+      ...current.cardScrollTops,
+      [props.sceneCardKey]: innerEl.value?.scrollTop || 0,
+    },
+  });
+}
+
+watch(
+  () => [props.sceneIdentity?.profileId, props.sceneIdentity?.runEpoch, props.sceneIdentity?.platform, props.sceneCardKey],
+  restoreCardScene,
+  { immediate: true },
+);
+
+watch(() => props.modelValue, persistCardOpen);
+
+onBeforeUnmount(persistCardScroll);
 </script>
 
 <template>
@@ -46,7 +99,7 @@ watch(() => props.modelValue, (open) => {
       <slot name="actions" />
     </div>
     <div class="collapsible-body" :class="{ open: modelValue || static }">
-      <div class="collapsible-inner" ref="innerEl">
+      <div class="collapsible-inner" ref="innerEl" @scroll="persistCardScroll">
         <div class="collapsible-content">
           <slot />
         </div>

@@ -83,6 +83,15 @@ function cancelBusyState(): boolean {
 function anyActionBusy(): boolean {
   return Boolean(props.busy || props.finishBusy || props.cancelBusy);
 }
+
+function cancelDisabled(): boolean {
+  // 暂停等待期间（暂停按钮已变灰、任务仍在收尾）必须保留「放弃本轮/终止」
+  // 这条出路，否则任务长时间不收尾时整个操作区被锁死、用户只能刷新页面。
+  if (props.busy && props.busyAction === "pause-scrape") {
+    return Boolean(props.cancelBusy || props.finishBusy);
+  }
+  return anyActionBusy();
+}
 </script>
 
 <template>
@@ -124,7 +133,7 @@ function anyActionBusy(): boolean {
       class="button danger"
       type="button"
       :data-testid="cancelTestId()"
-      :disabled="anyActionBusy()"
+      :disabled="cancelDisabled()"
       @click="emit('cancel')"
     >
       <LoaderCircle

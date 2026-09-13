@@ -40,13 +40,13 @@ describe("DiscoveryView", () => {
     }));
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({
+      if (url.includes("/api/latest-running-task")) return response({
         ok: true, has_task: true, task_id: "screen-b068", kind: "ai_screen", status: "running",
         platform: "boss", scrape_task_id: "scrape-b068", scrape_completed: true,
         frozen_filters: { salary: ["999"] }, profile_summary: "接口返回的画像不应覆盖 02",
         progress: { message: "AI 筛选中" }, logs: [],
       });
-      if (url.endsWith("/api/task-state/screen-b068")) return response({ status: "running", progress: { message: "AI 筛选中" }, logs: [] });
+      if (url.includes("/api/task-state/screen-b068")) return response({ status: "running", progress: { message: "AI 筛选中" }, logs: [] });
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: true, source_run_id: "old-result", result: { jobs: [{ job_id: "old", title: "旧结果" }], dropped: [], total_kept: 1, total_dropped: 0 } });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -72,7 +72,7 @@ describe("DiscoveryView", () => {
   it("auto-grows the profile summary and hides the textarea scrollbar", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response({ labels: {} });
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -131,7 +131,7 @@ describe("DiscoveryView", () => {
       const url = String(input);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response({ task: null });
+      if (url.includes("/api/latest-running-task")) return response({ task: null });
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -177,6 +177,57 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
+  it("re-measures the profile summary when a hidden search step becomes visible", async () => {
+    sessionStorage.setItem("career-scout-workflow:profile-grow-visible", JSON.stringify({
+      version: 2,
+      unfinished: true,
+      activeStep: "upload",
+      analysisReady: true,
+      keywords: [],
+      selectedKeywords: [],
+      cityText: "",
+      filterValues: { boss: {}, zhilian: {} },
+      profileSummary: "一段已经存在且需要撑高展示的求职画像内容",
+      profileFacts: {},
+      scrapeTaskId: "pending-draft",
+      screenTaskId: "",
+      scrapeCompleted: false,
+      resultLoaded: false,
+      resultsPageSeen: false,
+    }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response({ labels: {} });
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", cities: [] });
+      if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: {}, defaults: {} });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "scrollHeight");
+    Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() {
+        const section = (this as HTMLElement).closest("section");
+        return section?.getAttribute("style")?.includes("display: none") ? 0 : 180;
+      },
+    });
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-grow-visible" } });
+    await flushPromises();
+    const input = wrapper.get(".profile-summary-input").element as HTMLTextAreaElement;
+    expect(input.style.height).toBe("96px");
+    const searchStep = wrapper.findAll("button").find((button) => button.text().includes("广泛抓取"));
+    await searchStep!.trigger("click");
+    await flushPromises();
+    expect(input.style.height).toBe("180px");
+
+    if (descriptor) Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", descriptor);
+    else delete (HTMLTextAreaElement.prototype as unknown as { scrollHeight?: number }).scrollHeight;
+    vi.unstubAllGlobals();
+  });
+
   it("keeps scope editable when only a completed historical result is restored", async () => {
     const settings = {
       inter_combo_delay: 10,
@@ -209,7 +260,7 @@ describe("DiscoveryView", () => {
         });
       }
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({
           ok: true,
@@ -276,7 +327,7 @@ describe("DiscoveryView", () => {
           finished_at: 2_000,
         });
       }
-      if (url.endsWith("/api/task-state/scrape-restored-039")) {
+      if (url.includes("/api/task-state/scrape-restored-039")) {
         return response({
           status: "completed_with_pending", stage: "done", total: 16,
           success_count: 14, fail_count: 2, unstarted_count: 0,
@@ -287,14 +338,14 @@ describe("DiscoveryView", () => {
           }],
         });
       }
-      if (url.endsWith("/api/task-state/screen-restored-039")) {
+      if (url.includes("/api/task-state/screen-restored-039")) {
         return response({
           status: "completed_with_pending", stage: "done", total: 2,
           success_count: 2, fail_count: 0, unstarted_count: 0, pending_count: 0,
         });
       }
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({
           ok: true,
@@ -343,8 +394,8 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
-      if (url.includes("/api/latest-pipeline-result") && url.includes("platform=boss")) {
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-pipeline-result")) {
         return response({
           ok: true,
           has_result: true,
@@ -362,8 +413,7 @@ describe("DiscoveryView", () => {
           finished_at: 2_000,
         });
       }
-      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
-      if (url.endsWith("/api/task-state/scrape-restored-039b")) {
+      if (url.includes("/api/task-state/scrape-restored-039b")) {
         return response({
           status: "completed_with_pending", stage: "done", total: 16,
           success_count: 14, fail_count: 2, unstarted_count: 0,
@@ -374,13 +424,13 @@ describe("DiscoveryView", () => {
           }],
         });
       }
-      if (url.endsWith("/api/task-state/screen-restored-039b")) {
+      if (url.includes("/api/task-state/screen-restored-039b")) {
         return response({
           status: "completed_with_pending", stage: "done", total: 2,
           success_count: 2, fail_count: 0, unstarted_count: 0, pending_count: 0,
         });
       }
-      if (url.endsWith("/api/result-history")) {
+      if ((url.includes("/api/result-history?") || url.endsWith("/api/result-history"))) {
         return response({
           ok: true,
           items: [{
@@ -392,7 +442,7 @@ describe("DiscoveryView", () => {
           }],
         });
       }
-      if (url.endsWith("/api/result-history/h1")) {
+      if ((url.includes("/api/result-history/h1?") || url.endsWith("/api/result-history/h1"))) {
         return response({
           ok: true, has_result: true, source_run_id: "h1", platform: "boss", status: "succeeded",
           started_at: 1_000, finished_at: 2_000,
@@ -425,7 +475,7 @@ describe("DiscoveryView", () => {
     await searchStep!.trigger("click");
     await flushPromises();
 
-    const panel = wrapper.find(".task-progress");
+    const panel = wrapper.findAll(".task-progress").find((item) => item.isVisible())!;
     expect(panel.exists()).toBe(true);
     expect(panel.text()).toContain("已完成 14 / 16");
     expect(panel.text()).toContain("未开始 0");
@@ -450,8 +500,8 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
-      if (url.includes("/api/latest-pipeline-result") && url.includes("platform=boss")) {
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-pipeline-result")) {
         return response({
           ok: true,
           has_result: true,
@@ -467,8 +517,7 @@ describe("DiscoveryView", () => {
           finished_at: 2_000,
         });
       }
-      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
-      if (url.endsWith("/api/task-state/scrape-039c")) {
+      if (url.includes("/api/task-state/scrape-039c")) {
         // 抓取任务：组合口径（2/2），03 面板不得混用该口径
         return response({
           status: "done", stage: "done", total: 2,
@@ -476,7 +525,7 @@ describe("DiscoveryView", () => {
           source_total: 3, scraped_count: 3,
         });
       }
-      if (url.endsWith("/api/task-state/run-039c")) {
+      if (url.includes("/api/task-state/run-039c")) {
         // 未筛选轮真实快照：尚未筛选 → 0 完成、3 未开始（N = 本轮已抓岗位）
         return response({
           status: "scraped_only", stage: "scrape", total: 3,
@@ -484,7 +533,7 @@ describe("DiscoveryView", () => {
           source_total: 3, scraped_count: 3,
         });
       }
-      if (url.endsWith("/api/result-history")) {
+      if ((url.includes("/api/result-history?") || url.endsWith("/api/result-history"))) {
         return response({
           ok: true,
           items: [{
@@ -496,7 +545,7 @@ describe("DiscoveryView", () => {
           }],
         });
       }
-      if (url.endsWith("/api/result-history/h1")) {
+      if ((url.includes("/api/result-history/h1?") || url.endsWith("/api/result-history/h1"))) {
         return response({
           ok: true, has_result: true, source_run_id: "h1", platform: "boss", status: "succeeded",
           started_at: 1_000, finished_at: 2_000,
@@ -528,7 +577,7 @@ describe("DiscoveryView", () => {
     await screenStep!.trigger("click");
     await flushPromises();
 
-    const panel = wrapper.find(".task-progress");
+    const panel = wrapper.findAll(".task-progress").find((item) => item.isVisible())!;
     expect(panel.exists()).toBe(true);
     expect(panel.find('[data-testid="task-counts"]').exists()).toBe(true);
     expect(panel.text()).toContain("已完成 0 / 3");
@@ -555,7 +604,7 @@ describe("DiscoveryView", () => {
       const url = String(input);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response({ task: null });
+      if (url.includes("/api/latest-running-task")) return response({ task: null });
       if (url.endsWith("/api/advanced-settings")) {
         return response({
           ok: true,
@@ -589,7 +638,7 @@ describe("DiscoveryView", () => {
         expect(JSON.parse(String(init?.body)).scope_digest).toBe("sha256:scope");
         return response({ ok: true, task_id: "scrape-locked" });
       }
-      if (url.endsWith("/api/task-state/scrape-locked")) return response({ status: "running", progress: {}, logs: [] });
+      if (url.includes("/api/task-state/scrape-locked")) return response({ status: "running", progress: {}, logs: [] });
       return response({});
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -641,7 +690,7 @@ describe("DiscoveryView", () => {
       const url = String(input);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -708,7 +757,7 @@ describe("DiscoveryView", () => {
       const url = String(input);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "custom", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -770,7 +819,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         return response({
           ok: true, has_task: true, task_id: "interrupted-run",
           kind: "ai_screen", status: "interrupted",
@@ -823,7 +872,7 @@ describe("DiscoveryView", () => {
     await flushPromises();
     // 失败/中断只保留错误事实并回到 02，不能把页面锁在旧的 AI 任务上。
     expect(wrapper.find('[data-testid="profile-confirm"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="continue-ai-screen"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="continue-ai-screen"]').isVisible()).toBe(false);
     expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("disabled")).toBeUndefined();
     await confirmProfile(wrapper, "3年Python后端工程师候选人");
@@ -855,7 +904,7 @@ describe("DiscoveryView", () => {
     // 由 T515 真实联调阶段修复；本会话只验证 schema/city/draft 三身份独立。
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         return response({
           ok: true, has_task: true, task_id: "zhilian-interrupted",
           kind: "ai_screen", status: "interrupted",
@@ -910,7 +959,7 @@ describe("DiscoveryView", () => {
     expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("aria-selected")).toBe("false");
 
     // 中断任务初始回到 02，旧任务不占用新任务入口；进入 03 才显示其 AI 动作。
-    expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="finish-save-results"]').isVisible()).toBe(false);
     expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("disabled")).toBeUndefined();
 
@@ -980,6 +1029,7 @@ describe("DiscoveryView", () => {
         // T508 只禁止提交 AI filters / screening_fields，不禁止 platform。
         expect(JSON.parse(String(init?.body))).toEqual({
           platform: "boss",
+          profile_id: "profile-1",
           script_params: { keyword: "Python 后端", city: ["上海"], filters: {} },
           scope_digest: "sha256:scope-existing",
           profile_summary: "Python 后端候选人",
@@ -987,7 +1037,7 @@ describe("DiscoveryView", () => {
         });
         return response({ ok: true, task_id: "scrape-1" });
       }
-      if (url.endsWith("/api/task-state/scrape-1")) {
+      if (url.includes("/api/task-state/scrape-1")) {
         return response({ status: "completed", progress: {}, logs: [], result: { jobs: [] } });
       }
       return response({});
@@ -1013,7 +1063,7 @@ describe("DiscoveryView", () => {
       "/api/result-history/archive-latest",
       expect.objectContaining({ method: "POST" }),
     );
-    expect(wrapper.find('[data-testid="start-ai-screen"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="start-ai-screen"]').isVisible()).toBe(false);
 
     await confirmProfile(wrapper);
     await wrapper.get('[data-testid="custom-city"]').setValue("上海");
@@ -1176,7 +1226,7 @@ describe("DiscoveryView", () => {
       const url = String(input);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response({ task: null });
+      if (url.includes("/api/latest-running-task")) return response({ task: null });
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -1214,7 +1264,7 @@ describe("DiscoveryView", () => {
       const url = String(input);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response({ task: null });
+      if (url.includes("/api/latest-running-task")) return response({ task: null });
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -1264,7 +1314,7 @@ describe("DiscoveryView", () => {
       const url = String(input);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response({ task: null });
+      if (url.includes("/api/latest-running-task")) return response({ task: null });
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -1308,7 +1358,7 @@ describe("DiscoveryView", () => {
       const url = String(input);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
-      if (url.endsWith("/api/latest-running-task")) return response({ task: null });
+      if (url.includes("/api/latest-running-task")) return response({ task: null });
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -1358,7 +1408,7 @@ describe("DiscoveryView", () => {
         const platform = url.includes("platform=boss") ? "boss" : "zhilian";
         return response({ ok: true, platform, city_mapping_version: 1, cities: [{ label: "上海", value: "上海" }] });
       }
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({
           ok: true, selection: "balanced", settings: {
@@ -1409,7 +1459,7 @@ describe("DiscoveryView", () => {
     // 这里 mock 一个运行中的 BOSS 抓取任务，再切草稿到智联，验证 BOSS 任务状态不被改写。
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         return response({
           ok: true, has_task: true, task_id: "boss-run-1",
           kind: "scrape", status: "running",
@@ -1562,7 +1612,7 @@ describe("DiscoveryView", () => {
   it("T513 empty state: no task and no result renders the default BOSS draft platform without task progress", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -1634,7 +1684,7 @@ describe("DiscoveryView", () => {
       }
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -1655,7 +1705,7 @@ describe("DiscoveryView", () => {
   it("T513 failed state: a failed scrape start surfaces the failed task status", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [{ label: "上海", value: "上海" }] });
@@ -1698,7 +1748,7 @@ describe("DiscoveryView", () => {
   it("D7: login-required failure shows an account login guide that opens the accounts panel", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [{ label: "上海", value: "上海" }] });
@@ -1747,7 +1797,7 @@ describe("DiscoveryView", () => {
   it("T513 paused state: a paused scrape task shows pause reason and cancel/finish actions", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         return response({
           ok: true, has_task: true, task_id: "paused-1", kind: "scrape", status: "paused",
           platform: "boss",
@@ -1792,7 +1842,7 @@ describe("DiscoveryView", () => {
           },
         });
       }
-      if (url.endsWith("/api/result-history")) {
+      if ((url.includes("/api/result-history?") || url.endsWith("/api/result-history"))) {
         return response({
           ok: true, items: [{
             run_id: "partial-run", platform: "boss", status: "completed_with_pending",
@@ -1802,7 +1852,7 @@ describe("DiscoveryView", () => {
           }],
         });
       }
-      if (url.endsWith("/api/result-history/partial-run")) {
+      if ((url.includes("/api/result-history/partial-run?") || url.endsWith("/api/result-history/partial-run"))) {
         return response({
           ok: true, has_result: true, source_run_id: "partial-run", platform: "boss",
           status: "completed_with_pending",
@@ -1814,7 +1864,7 @@ describe("DiscoveryView", () => {
       }
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -1827,7 +1877,7 @@ describe("DiscoveryView", () => {
 
     // 025 B078：完成态启动自动新一轮——干净 01 页，不再把结果糊到 04
     expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="custom-keyword"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="custom-keyword"]').isVisible()).toBe(false);
 
     // 上一轮结论通过历史查看：进入 completed_with_pending 历史轮 → 04 页 partial 状态
     (wrapper.vm as any).openHistoryDrawer();
@@ -1860,7 +1910,7 @@ describe("DiscoveryView", () => {
       }
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -1896,7 +1946,7 @@ describe("DiscoveryView", () => {
   it("T513 platform disabled: zhilian schema with enabled_for_new_tasks=false disables new task entry", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) {
         const platform = url.includes("platform=boss") ? "boss" : "zhilian";
@@ -2000,7 +2050,7 @@ describe("DiscoveryView", () => {
         // 轨迹浮窗自动加载事件：默认返回空轨迹。
         return response({ ok: true, events: [], next_after_sequence: 0 });
       }
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "custom", settings: {}, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       }
@@ -2236,7 +2286,7 @@ describe("DiscoveryView", () => {
   it("search panels are expanded by default, toggle together, and collapse on start", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -2300,7 +2350,7 @@ describe("DiscoveryView", () => {
     (globalThis as any).__setNarrowMatchMedia(true);
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -2347,7 +2397,7 @@ describe("DiscoveryView", () => {
   it("B040: search drawers stay collapsed when returning to step 2 while scraping", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -2393,7 +2443,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -2445,7 +2495,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -2492,7 +2542,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         // 025 B078：完成态启动已自动新一轮，结果页只通过未完成态恢复——
         // 暂停任务恢复是"已有结果、无任务在跑"的可达场景。
         return response({
@@ -2542,6 +2592,7 @@ describe("DiscoveryView", () => {
       fields: [
         { key: "experience", label: "经验要求", multiple: true, options: [{ value: "105", label: "3-5年" }] },
         { key: "stage", label: "融资阶段", multiple: true, options: [{ value: "804", label: "B轮" }] },
+        { key: "recruiter_activity", label: "招聘者上次活跃", multiple: false, options: [{ value: "month", label: "近一个月" }] },
       ],
     };
     const zhilianSchemaRich = {
@@ -2549,11 +2600,12 @@ describe("DiscoveryView", () => {
       fields: [
         { key: "experience", label: "经验要求", multiple: true, options: [{ value: "0305", label: "3-5年" }] },
         { key: "company_nature", label: "公司性质", multiple: true, options: [{ value: "1", label: "国企" }] },
+        { key: "recruiter_activity", label: "招聘者上次活跃", multiple: false, options: [{ value: "month", label: "近一个月" }] },
       ],
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) {
         return response(url.includes("platform=zhilian") ? zhilianSchemaRich : bossSchemaRich);
@@ -2569,7 +2621,7 @@ describe("DiscoveryView", () => {
         return response({
           ok: true, platform: "boss", filter_schema_version: 1,
           fields: { keyword: [{ word: "Python 后端", recommended: true }], city: ["上海"], experience: ["105"], stage: ["804"], company_nature: ["1"], profile_summary: "3年Python后端" },
-          semantic: { experience: ["3-5年"], stage: ["B轮"], company_nature: ["国企"] },
+          semantic: { experience: ["3-5年"], stage: ["B轮"], company_nature: ["国企"], "招聘者活跃时间": ["近一个月"] },
           labels: {},
         });
       }
@@ -2611,6 +2663,7 @@ describe("DiscoveryView", () => {
     expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("disabled")).toBeDefined();
     expect(chipsText).toContain("经验要求: 3-5年");
     expect(chipsText).toContain("公司性质: 国企");
+    expect(chipsText).toContain("招聘者上次活跃: 近一个月");
     expect(chipsText).not.toContain("融资阶段");
     expect(chipsText).not.toContain("105");
     expect(chipsText).not.toContain("0305");
@@ -2635,7 +2688,7 @@ describe("DiscoveryView", () => {
     let scrapeCount = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -2693,7 +2746,14 @@ describe("DiscoveryView", () => {
     await flushPromises();
     expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="platform-current-zhilian"]').exists()).toBe(true);
+    // Spec041 后续（用户拍板）：第 2 页输入两个平台共用——智联直接沿用 BOSS 的关键词/城市。
+    expect(wrapper.find('[data-testid="keyword-chip"]').exists()).toBe(true);
 
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(true);
@@ -2709,12 +2769,12 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
         return response({ ok: true, has_result: true, source_run_id: "run-results", status: "completed", result: { jobs: [], total_kept: 0, total_dropped: 0 } });
       }
       // 025 B078：完成态启动自动新一轮，结果页平台锁定经历史轮验证
-      if (url.endsWith("/api/result-history")) {
+      if ((url.includes("/api/result-history?") || url.endsWith("/api/result-history"))) {
         return response({
           ok: true, items: [{
             run_id: "run-results", platform: "boss", status: "completed",
@@ -2724,7 +2784,7 @@ describe("DiscoveryView", () => {
           }],
         });
       }
-      if (url.endsWith("/api/result-history/run-results")) {
+      if ((url.includes("/api/result-history/run-results?") || url.endsWith("/api/result-history/run-results"))) {
         return response({ ok: true, has_result: true, source_run_id: "run-results", platform: "boss", status: "completed", result: { jobs: [], total_kept: 0, total_dropped: 0 } });
       }
       if (url.includes("/api/filter-labels")) return response(bossSchema());
@@ -2749,7 +2809,7 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
-  it("R2: a completed live screen task merges both platform results instead of showing only one", async () => {
+  it("R2: a completed single-platform task shows only the newest result round", async () => {
     const settings = {
       pages: 3,
       inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
@@ -2760,9 +2820,19 @@ describe("DiscoveryView", () => {
     let screenDone = false;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
         if (!screenDone) return response({ ok: true, has_result: false });
+        if (!url.includes("platform=")) {
+          return response({
+            ok: true, has_result: true, source_run_id: "run-zhilian", platform: "zhilian",
+            status: "completed", started_at: 2_000, finished_at: 3_000,
+            result: {
+              jobs: [{ job_id: "z-1", platform: "zhilian", title: "智联岗位", company: "智联公司", verdict: "match" }],
+              total_scraped: 1, total_matched: 1, total_kept: 1, total_dropped: 0,
+            },
+          });
+        }
         if (url.includes("platform=zhilian")) {
           return response({
             ok: true, has_result: true, source_run_id: "run-zhilian", status: "completed",
@@ -2795,11 +2865,11 @@ describe("DiscoveryView", () => {
         });
       }
       if (url.endsWith("/api/execute-search")) return response({ ok: true, task_id: "scrape-r2" });
-      if (url.endsWith("/api/task-state/scrape-r2")) {
+      if (url.includes("/api/task-state/scrape-r2")) {
         return response({ ok: true, status: "completed", progress: {}, logs: [], platform: "boss" });
       }
       if (url.endsWith("/api/ai-screen")) return response({ ok: true, task_id: "screen-r2" });
-      if (url.endsWith("/api/task-state/screen-r2")) {
+      if (url.includes("/api/task-state/screen-r2")) {
         screenDone = true;
         return response({
           ok: true, status: "completed", progress: {}, logs: [], platform: "boss",
@@ -2827,16 +2897,17 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="start-ai-screen"]').trigger("click");
     await flushPromises();
 
-    // 完成路径必须拉两个平台的最近结果做合并（刷新路径的行为）
+    // 完成路径只读取当前画像的全局最新轮，不再分别读取两个平台再拼接。
     const mergeCalls = fetchMock.mock.calls
       .filter(([u]) => String(u).includes("/api/latest-pipeline-result"))
       .map(([u]) => String(u));
-    expect(mergeCalls.some((u) => u.includes("platform=boss"))).toBe(true);
-    expect(mergeCalls.some((u) => u.includes("platform=zhilian"))).toBe(true);
-    // 合并后两个平台的岗位同时在结果页可见（切平台筛选不再全 0）
+    expect(mergeCalls.length).toBeGreaterThanOrEqual(1);
+    expect(mergeCalls.every((u) => !u.includes("platform="))).toBe(true);
+    expect(mergeCalls.some((u) => u.includes("platform="))).toBe(false);
+    // 智联轮更新时间更晚，因此旧 BOSS 轮不得混入。
     const rows = wrapper.findAll('[data-testid="job-row"]');
     const rowText = rows.map((row) => row.text()).join(" | ");
-    expect(rowText).toContain("BOSS岗位");
+    expect(rowText).not.toContain("BOSS岗位");
     expect(rowText).toContain("智联岗位");
 
     vi.unstubAllGlobals();
@@ -2854,7 +2925,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       // 完成瞬间合并拉取恒为空：模拟快照尚未可见 / 请求瞬时失败的窗口
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
@@ -2870,11 +2941,11 @@ describe("DiscoveryView", () => {
         });
       }
       if (url.endsWith("/api/execute-search")) return response({ ok: true, task_id: "scrape-b044" });
-      if (url.endsWith("/api/task-state/scrape-b044")) {
+      if (url.includes("/api/task-state/scrape-b044")) {
         return response({ ok: true, status: "completed", progress: {}, logs: [], platform: "boss" });
       }
       if (url.endsWith("/api/ai-screen")) return response({ ok: true, task_id: "screen-b044" });
-      if (url.endsWith("/api/task-state/screen-b044")) {
+      if (url.includes("/api/task-state/screen-b044")) {
         // 与真实后端一致：内存完成态响应携带完整 result（与 status=done 同锁写入）
         return response({
           ok: true, status: "completed", progress: { message: "筛选完成" }, logs: [], platform: "boss",
@@ -2929,7 +3000,7 @@ describe("DiscoveryView", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -2963,7 +3034,7 @@ describe("DiscoveryView", () => {
   it("B027: failed scrape restores real count and can finish without jumping to results", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         return response({
           ok: true, has_task: true, task_id: "scrape-failed-1", kind: "scrape",
           status: "failed", platform: "boss", scraped_count: 1280, source_total: 3000,
@@ -2996,7 +3067,7 @@ describe("DiscoveryView", () => {
     expect(wrapper.get('[data-testid="scraped-count"]').text()).toContain("1280");
     await wrapper.get('[data-testid="finish-save-results"]').trigger("click");
     await flushPromises();
-    expect(wrapper.find(".results-stage").exists()).toBe(false);
+    expect(wrapper.find(".results-stage").isVisible()).toBe(false);
     await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="start-ai-screen"]').exists()).toBe(true);
@@ -3007,7 +3078,7 @@ describe("DiscoveryView", () => {
     let resolveFinish: (() => void) | undefined;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         return response({
           ok: true, has_task: true, task_id: "scrape-failed-1", kind: "scrape",
           status: "failed", platform: "boss", scraped_count: 1280, source_total: 3000,
@@ -3051,7 +3122,7 @@ describe("DiscoveryView", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       calls.push(url);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         return response({
           ok: true, has_task: true, task_id: "scrape-failed-1", kind: "scrape",
           status: "failed", platform: "boss", scraped_count: 1280, source_total: 3000,
@@ -3102,7 +3173,7 @@ describe("DiscoveryView", () => {
     let stateCalls = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         return response({
           ok: true, has_task: true, task_id: "screen-running-1", kind: "ai_screen",
           status: "running", platform: "boss", scrape_task_id: "scrape-parent",
@@ -3146,7 +3217,7 @@ describe("DiscoveryView", () => {
     await vi.advanceTimersByTimeAsync(300);
     await flushPromises();
     vi.useRealTimers();
-    expect(wrapper.find(".results-stage").exists()).toBe(false);
+    expect(wrapper.find(".results-stage").isVisible()).toBe(false);
     expect(wrapper.find('[data-testid="continue-ai-screen"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="view-screen-results"]').exists()).toBe(false);
@@ -3157,7 +3228,7 @@ describe("DiscoveryView", () => {
     let stateCalls = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         return response({
           ok: true, has_task: true, task_id: "screen-pause-1", kind: "ai_screen",
           status: "running", platform: "boss", scrape_task_id: "scrape-parent",
@@ -3217,13 +3288,13 @@ describe("DiscoveryView", () => {
     const viewBtn = wrapper.findAll("button").find((b) => b.text().includes("查看结果"));
     expect(viewBtn).toBeDefined();
     expect((viewBtn!.element as HTMLButtonElement).disabled).toBe(true);
-    expect(wrapper.find(".results-stage").exists()).toBe(false);
+    expect(wrapper.find(".results-stage").isVisible()).toBe(false);
     vi.unstubAllGlobals();
   });
   it("013: refreshed paused task keeps 04 closed until the task ends", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         return response({
           ok: true, has_task: true, task_id: "paused-screen-1", kind: "ai_screen",
           status: "paused", platform: "boss", scrape_task_id: "scrape-parent",
@@ -3275,7 +3346,7 @@ describe("DiscoveryView", () => {
     expect((stepBtn!.element as HTMLButtonElement).disabled).toBe(true);
     await stepBtn!.trigger("click");
     await flushPromises();
-    expect(wrapper.find(".results-stage").exists()).toBe(false);
+    expect(wrapper.find(".results-stage").isVisible()).toBe(false);
     expect(wrapper.text()).not.toContain("暂停部分岗位");
     expect(wrapper.find('[data-testid="continue-ai-from-results"]').exists()).toBe(false);
     vi.unstubAllGlobals();
@@ -3285,7 +3356,7 @@ describe("DiscoveryView", () => {
     let stateCalls = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         return response({
           ok: true, has_task: true, task_id: "screen-pause-stale", kind: "ai_screen",
           status: "running", platform: "boss", scrape_task_id: "scrape-current",
@@ -3358,7 +3429,7 @@ describe("DiscoveryView", () => {
   it("013: paused screen offers finish-save that ends the run", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         return response({
           ok: true, has_task: true, task_id: "paused-finish-1", kind: "ai_screen",
           status: "paused", platform: "boss", scrape_task_id: "scrape-parent",
@@ -3406,12 +3477,12 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
-  it("013: dual resumable platforms ask which one to continue from 04", async () => {
+  it("013: only the newest resumable platform can be continued from 04", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
-        if (url.includes("platform=zhilian")) {
+        if (url.includes("platform=zhilian") || !url.includes("platform=")) {
           return response({
             ok: true, has_result: true, source_run_id: "run-z", platform: "zhilian",
             status: "paused", scrape_task_id: "scrape-z", started_at: 2_000,
@@ -3463,24 +3534,22 @@ describe("DiscoveryView", () => {
     await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="continue-ai-screen"]').trigger("click");
-    expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(true);
-    await wrapper.get('[data-testid="continue-choose-zhilian"]').trigger("click");
     await flushPromises();
     const continueCall = fetchMock.mock.calls.find(
       ([u]) => String(u).includes("/api/task/continue/run-z"),
     );
     expect(continueCall).toBeTruthy();
     expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(false);
-    expect(wrapper.find(".results-stage").exists()).toBe(false);
+    expect(wrapper.find(".results-stage").isVisible()).toBe(false);
     vi.unstubAllGlobals();
   });
 
-  it("013: mixed states continue the only resumable platform from 04", async () => {
+  it("013: an older resumable platform is hidden behind a newer completed round", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
-        if (url.includes("platform=zhilian")) {
+        if (url.includes("platform=zhilian") || !url.includes("platform=")) {
           return response({
             ok: true, has_result: true, source_run_id: "run-z", platform: "zhilian",
             status: "succeeded", scrape_task_id: "scrape-z", started_at: 2_000,
@@ -3531,24 +3600,21 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
     await flushPromises();
-    const entry = wrapper.get('[data-testid="continue-ai-screen"]');
-    expect(entry.text()).toContain("继续 AI 筛选");
-    await entry.trigger("click");
-    await flushPromises();
+    expect(wrapper.find('[data-testid="continue-ai-screen"]').exists()).toBe(false);
     const continueCall = fetchMock.mock.calls.find(
       ([u]) => String(u).includes("/api/task/continue/run-b"),
     );
-    expect(continueCall).toBeTruthy();
+    expect(continueCall).toBeFalsy();
     expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(false);
-    expect(wrapper.find(".results-stage").exists()).toBe(false);
+    expect(wrapper.find(".results-stage").isVisible()).toBe(false);
     vi.unstubAllGlobals();
   });
 
-  it("013/035: starting a new round with resumable rounds jumps back to the task view, no confirm", async () => {
+  it("013/035: newest resumable round is handled without an obsolete platform chooser", async () => {
     const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(true);
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
         if (url.includes("platform=zhilian")) {
           return response({
@@ -3584,7 +3650,7 @@ describe("DiscoveryView", () => {
       if (url.endsWith("/api/result-history/archive-latest")) {
         return response({ ok: true, archived_run_ids: ["run-b", "run-z"] });
       }
-      if (url.endsWith("/api/result-history")) return response({ ok: true, items: [] });
+      if ((url.includes("/api/result-history?") || url.endsWith("/api/result-history"))) return response({ ok: true, items: [] });
       if (url.includes("/api/filter-labels")) return response(bossSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
       if (url.endsWith("/api/advanced-settings")) {
@@ -3600,22 +3666,22 @@ describe("DiscoveryView", () => {
     await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="continue-ai-screen"]').trigger("click");
-    expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(true);
-    // 03 的多平台引导仍展示在 04 的收口按钮区：先回结果页再发起新一轮。
+    expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(false);
+    // 返回结果页后仍可开始新一轮，且不会恢复过期平台选择器。
     await wrapper.findAll("button").find((b) => b.text().includes("查看结果"))!.trigger("click");
     await flushPromises();
     await wrapper.findAll("button").find((b) => b.text().includes("开始新一轮"))!.trigger("click");
     await flushPromises();
     // 035：未结束任务存在时开始新一轮跳回任务视图，不弹确认、不取消任务
     expect(confirmMock).not.toHaveBeenCalled();
-    expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(false);
     vi.unstubAllGlobals();
     confirmMock.mockRestore();
   });
   it("B027: latest result restores scrape task id and AI screen uses it", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         // 025 B078：完成态启动已自动新一轮；此场景改为"刷新时任务刚完成"——
         // running 任务轮询到 completed 后进入结果页（recrawl 等结果页功能仍可达）。
         return response({
@@ -3665,10 +3731,10 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
-  it("B030: all view guides platform selection and single platform recrawls by its own run", async () => {
+  it("B030: latest single-platform result recrawls its own run directly", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
         if (url.includes("platform=zhilian")) {
           return response({
@@ -3702,29 +3768,14 @@ describe("DiscoveryView", () => {
     expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(true);
     await wrapper.get('[data-testid="pending-recrawl"]').trigger("click");
     await flushPromises();
-    expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="recrawl-platform-guide"]').text()).toContain("BOSS 1 · 智联 1");
-    expect(wrapper.find(".results-stage").classes()).toContain("has-recrawl-guide");
-    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/pipeline/recrawl")).length).toBe(0);
-    await wrapper.findAll("button").find((b) => b.text().includes("匹配"))!.trigger("click");
-    await flushPromises();
     expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(false);
-    expect(wrapper.find(".results-stage").classes()).not.toContain("has-recrawl-guide");
-    await wrapper.findAll("button").find((b) => b.text().includes("待确认"))!.trigger("click");
-    await flushPromises();
-    expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(false);
-    await wrapper.get('[data-testid="pending-recrawl"]').trigger("click");
-    await flushPromises();
-    expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(true);
-    await wrapper.get('[data-testid="recrawl-choose-boss"]').trigger("click");
-    await flushPromises();
     expect(wrapper.find(".results-stage").classes()).not.toContain("has-recrawl-guide");
     const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/pipeline/recrawl"));
     expect(call).toBeTruthy();
     expect(JSON.parse(String(call![1]!.body))).toMatchObject({ source_run_id: "run-boss", job_ids: ["b1"] });
     await wrapper.get('[data-testid="result-platform-filter-zhilian"]').trigger("click");
     await flushPromises();
-    expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
     vi.unstubAllGlobals();
   });
 
@@ -3786,8 +3837,11 @@ describe("DiscoveryView", () => {
   function oneClickBase(overrides: Record<string, (url: string, init?: RequestInit) => Promise<Response> | Response> = {}) {
     return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      // 路由键按路径匹配，查询参数（如画像参数）不影响命中。
+      const route = url.split("?")[0];
       if (overrides[url]) return overrides[url](url, init);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (overrides[route]) return overrides[route](url, init);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response(oneClickSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -4030,7 +4084,7 @@ describe("DiscoveryView", () => {
           result: { jobs: [{ job_id: "old-1", title: "旧岗位" }], total_kept: 1, total_dropped: 0, profile_summary: "3年Python后端候选人" },
         });
       }
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/filter-labels")) return response(oneClickSchema());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
       if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
@@ -4386,7 +4440,7 @@ describe("DiscoveryView", () => {
   it("B033: recrawl updates merge flags back into current results", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         // 025 B078：完成态启动已自动新一轮；此场景改为"刷新时任务刚完成"
         return response({
           ok: true, has_task: true, task_id: "screen-b033", kind: "ai_screen",
@@ -4470,7 +4524,7 @@ describe("DiscoveryView", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/api/session")) return response({ token: "test" });
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response({ labels: {} });
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -4512,7 +4566,7 @@ describe("DiscoveryView", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/api/session")) return response({ token: "test" });
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response({ labels: {} });
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -4563,7 +4617,7 @@ describe("DiscoveryView", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/api/session")) return response({ token: "test" });
-      if (url.endsWith("/api/latest-running-task")) return response({
+      if (url.includes("/api/latest-running-task")) return response({
         ok: true, has_task: true, task_id: "scrape-done", kind: "scrape", status: "completed",
         platform: "boss", scrape_task_id: "scrape-done", scrape_completed: true, auto_screen: false,
         scraped_count: 1, source_total: 1, profile_summary: "测试画像", profile_facts: { years: 3 },
@@ -4605,7 +4659,7 @@ describe("DiscoveryView", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/api/session")) return response({ token: "test" });
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response({ labels: {} });
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -4666,7 +4720,7 @@ describe("DiscoveryView", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/api/session")) return response({ token: "test" });
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) return response({ labels: {} });
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
@@ -4743,7 +4797,7 @@ describe("DiscoveryView", () => {
         const runId = `screen-${platform}-${status}`;
         const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
           const url = String(input);
-          if (url.endsWith("/api/latest-running-task")) {
+          if (url.includes("/api/latest-running-task")) {
             return response({
               ok: true, has_task: true, task_id: runId, kind: "ai_screen", status,
               platform, scrape_task_id: `scrape-${platform}`, scrape_completed: true,
@@ -4799,8 +4853,8 @@ describe("DiscoveryView", () => {
           expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/task/continue/"))).toBe(false);
         } else {
           // failed/interrupted are visible facts, not an occupied task slot.
-          expect(wrapper.find('[data-testid="continue-ai-screen"]').exists()).toBe(false);
-          expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(false);
+          expect(wrapper.find('[data-testid="continue-ai-screen"]').isVisible()).toBe(false);
+          expect(wrapper.find('[data-testid="finish-save-results"]').isVisible()).toBe(false);
           expect(wrapper.find('[data-testid="start-scrape"]').exists()).toBe(true);
           expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("disabled")).toBeUndefined();
         }
@@ -4819,7 +4873,7 @@ describe("DiscoveryView", () => {
       const runId = `scrape-cleanup-${platform}`;
       const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.endsWith("/api/latest-running-task")) {
+        if (url.includes("/api/latest-running-task")) {
           return response({
             ok: true, has_task: true, task_id: runId, kind: "scrape", status: "failed",
             platform, scraped_count: 1, source_total: 1, progress: { message: "抓取失败" },
@@ -4871,7 +4925,7 @@ describe("DiscoveryView", () => {
       const runId = `paused-scrape-cleanup-${platform}`;
       const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
         const url = String(input);
-        if (url.endsWith("/api/latest-running-task")) {
+        if (url.includes("/api/latest-running-task")) {
           return response({
             ok: true, has_task: true, task_id: runId, kind: "scrape", status: "paused",
             platform, progress: {}, logs: [], error: "源平台暂停",
@@ -4954,7 +5008,7 @@ describe("DiscoveryView", () => {
     it("运行中：步骤 3 只显示 暂停筛选 + 结束并保存结果", async () => {
       const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.endsWith("/api/latest-running-task")) {
+        if (url.includes("/api/latest-running-task")) {
           return response({ ok: true, has_task: true, task_id: "matrix-running", kind: "ai_screen", status: "running", platform: "boss", scrape_task_id: "scrape-m", scrape_completed: true, progress: { message: "AI 筛选中" }, logs: [], error: "" });
         }
         if (url.includes("/api/task-state/matrix-running")) return response({ status: "running", progress: { message: "AI 筛选中" }, logs: [] });
@@ -4978,7 +5032,7 @@ describe("DiscoveryView", () => {
         const runId = `screen-abandon-${platform}`;
         const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
           const url = String(input);
-          if (url.endsWith("/api/latest-running-task")) {
+          if (url.includes("/api/latest-running-task")) {
             return response({
               ok: true, has_task: true, task_id: runId, kind: "ai_screen", status: "running",
               platform, scrape_task_id: `scrape-${platform}`, scrape_completed: true,
@@ -5028,7 +5082,7 @@ describe("DiscoveryView", () => {
     it("结束保存后刷新（B078）：完成态自动新一轮，干净 01 页、无上一轮胶囊糊脸", async () => {
       const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+        if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
         if (url.includes("/api/latest-pipeline-result")) {
           if (url.includes("platform=zhilian")) return response({ ok: true, has_result: false });
           return response({
@@ -5056,8 +5110,8 @@ describe("DiscoveryView", () => {
       // 025 B078：结束保存（完成态）后刷新 → 自动「开始新一轮」：
       // 干净 01 页、无上一轮结果/胶囊糊脸（想看结论去历史）。
       expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(true);
-      expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
-      expect(wrapper.text()).not.toContain("待确认岗位");
+      expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').isVisible()).toBe(false);
+      expect(wrapper.find(".results-stage").isVisible()).toBe(false);
       vi.unstubAllGlobals();
     });
   });
@@ -5066,7 +5120,7 @@ describe("DiscoveryView", () => {
   it("B074: dismissed capsule never reappears on platform/tab switches, only on new result epoch", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
       if (url.includes("/api/latest-pipeline-result")) {
         if (url.includes("platform=zhilian")) {
           return response({
@@ -5166,7 +5220,7 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
   function baseFetch(overrides: Record<string, unknown> = {}) {
     return vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) {
+      if (url.includes("/api/latest-running-task")) {
         return response(overrides.latestTask ?? NO_TASK_PAYLOAD);
       }
       if (url.includes("/api/latest-pipeline-result")) {
@@ -5204,7 +5258,7 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
     // 01 页上传区可见（自动新一轮后回到干净起点）
     expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(true);
     // 02 页草稿不出现、旧结果不糊脸
-    expect(wrapper.find('[data-testid="custom-keyword"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="custom-keyword"]').isVisible()).toBe(false);
     expect(wrapper.text()).not.toContain("旧结果");
     wrapper.unmount();
   });
@@ -5229,7 +5283,7 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
     await flushPromises();
 
     expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="custom-keyword"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="custom-keyword"]').isVisible()).toBe(false);
     expect(wrapper.text()).not.toContain("旧快照结果");
     wrapper.unmount();
   });
@@ -5246,7 +5300,7 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-b078-b" } });
     await flushPromises();
     expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="custom-keyword"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="custom-keyword"]').isVisible()).toBe(false);
     expect(wrapper.text()).not.toContain("旧结果");
     wrapper.unmount();
   });
@@ -5257,7 +5311,7 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-b078-c" } });
     await flushPromises();
     expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="custom-keyword"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="custom-keyword"]').isVisible()).toBe(false);
     wrapper.unmount();
   });
 
@@ -5274,7 +5328,7 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-b078-d" } });
     await flushPromises();
     // 恢复现场：03 页筛选区出现，且不触发新一轮（01 页不回归为主视图）
-    expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="resume-input"]').isVisible()).toBe(false);
     wrapper.unmount();
   });
 
@@ -5318,7 +5372,7 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-b078-e" } });
     await flushPromises();
     // 恢复现场：不回归 01 页上传
-    expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="resume-input"]').isVisible()).toBe(false);
     wrapper.unmount();
   });
 
@@ -5344,7 +5398,7 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
     // 01 页上传区可见（自动新一轮回到干净起点）
     expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(true);
     // 02 页不出现、无"服务重启被中断"提示、无恢复横幅
-    expect(wrapper.find('[data-testid="custom-keyword"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="custom-keyword"]').isVisible()).toBe(false);
     expect(wrapper.text()).not.toContain("服务重启被中断");
     expect(wrapper.find(".restore-banner").exists()).toBe(false);
     wrapper.unmount();
@@ -5403,11 +5457,11 @@ describe("DiscoveryView 035 界面收口（US1/US2 界面级）", () => {
     }));
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({
+      if (url.includes("/api/latest-running-task")) return response({
         ok: true, has_task: true, task_id: "scrape-035-t006", kind: "scrape",
         status: "running", platform: "boss", progress: { message: "正在抓取" }, logs: [],
       });
-      if (url.endsWith("/api/task-state/scrape-035-t006")) return response({
+      if (url.includes("/api/task-state/scrape-035-t006")) return response({
         status: "running", progress: { message: "正在抓取" }, logs: [],
       });
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
@@ -5427,7 +5481,7 @@ describe("DiscoveryView 035 界面收口（US1/US2 界面级）", () => {
     await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
     await flushPromises();
     // 03 页不得渲染旧一轮筛选进度卡与旧轮计数/文案
-    expect(wrapper.find('[data-testid="task-progress-announcement"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="task-progress-announcement"]').isVisible()).toBe(false);
     expect(wrapper.text()).not.toContain("旧一轮 AI 筛选完成");
 
     wrapper.unmount();
@@ -5440,16 +5494,16 @@ describe("DiscoveryView 035 界面收口（US1/US2 界面级）", () => {
   it("035 T012: 历史模式 04 页点「开始新一轮」→ 跳回 02、任务未被取消（真机问题②）", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/latest-running-task")) return response({
+      if (url.includes("/api/latest-running-task")) return response({
         ok: true, has_task: true, task_id: "scrape-035-t012", kind: "scrape",
         status: "running", platform: "boss", progress: { message: "正在抓取" }, logs: [],
       });
-      if (url.endsWith("/api/task-state/scrape-035-t012")) return response({
+      if (url.includes("/api/task-state/scrape-035-t012")) return response({
         status: "running", progress: { message: "正在抓取" }, logs: [],
       });
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
-      if (url.endsWith("/api/result-history")) return response({ ok: true, items: [historyItem035("h1")] });
-      if (url.endsWith("/api/result-history/h1")) return response(historyDetail035("h1"));
+      if ((url.includes("/api/result-history?") || url.endsWith("/api/result-history"))) return response({ ok: true, items: [historyItem035("h1")] });
+      if ((url.includes("/api/result-history/h1?") || url.endsWith("/api/result-history/h1"))) return response(historyDetail035("h1"));
       if (url.includes("/api/filter-labels")) return response(bossSchema035());
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
       if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: settings035, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });

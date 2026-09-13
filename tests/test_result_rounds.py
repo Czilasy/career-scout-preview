@@ -96,6 +96,20 @@ class SaveFinishedRoundTests(unittest.TestCase):
         self.assertEqual(items[0]["run_id"], run_id)
         self.assertEqual(items[0]["status"], "done")
 
+    def test_finished_round_inherits_career_profile_from_scrape_task(self):
+        self.store.create_screening_run(
+            SCRAPE_TASK_ID,
+            profile_id="career-profile-a",
+            execution_params={"platform": PLATFORM, "script_params": _script_params()},
+        )
+
+        run_id = save_finished_round(
+            self.store, _result(), _script_params(),
+            scrape_task_id=SCRAPE_TASK_ID, status="done", platform=PLATFORM,
+        )
+
+        self.assertEqual(_run_payload(self.store, run_id)["profile_id"], "career-profile-a")
+
     def test_finish_save_saves_one_partial_round(self):
         run_id = save_finished_round(
             self.store, _result(("uncertain",)), _script_params(),

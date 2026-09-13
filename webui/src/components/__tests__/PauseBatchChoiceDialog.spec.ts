@@ -2,7 +2,7 @@ import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import PauseBatchChoiceDialog from "../PauseBatchChoiceDialog.vue";
 
-describe("PauseBatchChoiceDialog（025 B076 批中暂停二选一，BaseDialog 外壳）", () => {
+describe("PauseBatchChoiceDialog（025 B076 批中二选一，迷你档）", () => {
   afterEach(() => {
     document.body.innerHTML = "";
     document.body.classList.remove("dialog-open");
@@ -29,29 +29,40 @@ describe("PauseBatchChoiceDialog（025 B076 批中暂停二选一，BaseDialog �
     return wrapper;
   }
 
-  it("渲染三按钮 + 当前批进度 + 平实提示文案", async () => {
+  it("迷你档：两个小键 + 一行说明（批次写进说明行）+ 平实文案", async () => {
     const wrapper = mountDialog({
       open: true,
       batchInfo: { current: 2, total: 4 },
     });
     await nextTick();
+    // 迷你宽度档（不是默认 620 大框）
+    expect(wrapper.get('[role="dialog"]').classes()).toContain("dialog-xs");
     expect(wrapper.get('[data-testid="pause-immediate"]').text()).toContain("立即停止");
     expect(wrapper.get('[data-testid="pause-graceful"]').text()).toContain("等这批抓完");
-    expect(wrapper.get('[data-testid="pause-cancel"]').text()).toContain("取消");
-    // 当前批进度（第几批/共几批）
-    expect(wrapper.text()).toContain("第 2/4 批");
-    // 平实提示文案，不渲染严重性/警告
-    expect(wrapper.text()).toContain(
-      "立即停止将放弃当前批次已抓取的内容，下次继续时需要重新抓取这一批",
-    );
+    // 批次 + 后果写成一行，不单独占一块
+    expect(wrapper.text()).toContain("第 2 批 / 共 4 批");
+    expect(wrapper.text()).toContain("现在停，这一批要重抓");
+    // 没有底部按钮条：取消 = 右上 ✕ / Esc
+    expect(wrapper.find('[data-testid="pause-cancel"]').exists()).toBe(false);
+    expect(wrapper.find(".dialog-header .icon-button").exists()).toBe(true);
+    // 配色身份：稳妥项淡主色底、有损失项中性底 + 危险色文字（不给主色实底）
+    expect(wrapper.get('[data-testid="pause-graceful"]').classes()).toContain("is-graceful");
+    expect(wrapper.get('[data-testid="pause-immediate"]').classes()).toContain("is-immediate");
+    // 平实文案：不出现严重性字样
     expect(wrapper.text()).not.toContain("警告");
     expect(wrapper.text()).not.toContain("危险");
   });
 
-  it("「立即停止」默认聚焦（回车可直接触发）", async () => {
+  it("只有一批时说明行写「当前只有这一批」", async () => {
+    const wrapper = mountDialog({ open: true, batchInfo: { current: 1, total: 1 } });
+    await nextTick();
+    expect(wrapper.text()).toContain("当前只有这一批");
+  });
+
+  it("默认聚焦右上 ✕：回车等于取消，不会误伤这一批", async () => {
     const wrapper = await openDialog({ current: 1, total: 2 });
-    const btn = wrapper.get('[data-testid="pause-immediate"]').element as HTMLButtonElement;
-    expect(document.activeElement).toBe(btn);
+    const close = wrapper.get(".dialog-header .icon-button").element as HTMLButtonElement;
+    expect(document.activeElement).toBe(close);
   });
 
   it("点击「立即停止」→ emit choose=immediate", async () => {
@@ -66,9 +77,9 @@ describe("PauseBatchChoiceDialog（025 B076 批中暂停二选一，BaseDialog �
     expect(wrapper.emitted("choose")?.[0]).toEqual(["graceful"]);
   });
 
-  it("点击「取消」→ emit close（不暂停，任务继续跑）", async () => {
+  it("点右上 ✕ → emit close（不暂停，任务继续跑）", async () => {
     const wrapper = mountDialog({ open: true, batchInfo: { current: 1, total: 2 } });
-    await wrapper.get('[data-testid="pause-cancel"]').trigger("click");
+    await wrapper.get(".dialog-header .icon-button").trigger("click");
     expect(wrapper.emitted("close")).toHaveLength(1);
     expect(wrapper.emitted("choose")).toBeUndefined();
   });
@@ -86,5 +97,45 @@ describe("PauseBatchChoiceDialog（025 B076 批中暂停二选一，BaseDialog �
     const wrapper = mountDialog({ open: false });
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
     expect(document.querySelector(".dialog-backdrop")).toBeNull();
+  });
+
+  it("kind=finish（结束并保存）：文案切换，迷你档一致", async () => {
+    const wrapper = mountDialog({
+      open: false,
+      kind: "finish",
+      batchInfo: { current: 2, total: 4 },
+    });
+    await wrapper.setProps({ open: true });
+    await nextTick();
+    await nextTick();
+    expect(wrapper.text()).toContain("结束并保存结果");
+    expect(wrapper.get('[data-testid="pause-graceful"]').text()).toContain("等这批抓完再保存");
+    expect(wrapper.get('[data-testid="pause-immediate"]').text()).toContain("立即保存");
+    expect(wrapper.text()).toContain("立即保存只存已落盘的");
+    const close = wrapper.get(".dialog-header .icon-button").element as HTMLButtonElement;
+    expect(document.activeElement).toBe(close);
+  });
+
+  it("kind 缺省仍是暂停文案（旧调用不受影响）", async () => {
+    const wrapper = mountDialog({ open: true, batchInfo: { current: 1, total: 2 } });
+    await nextTick();
+    expect(wrapper.text()).toContain("暂停 AI 筛选");
+    expect(wrapper.get('[data-testid="pause-immediate"]').text()).toContain("立即停止");
+  });
+
+  it("文案可用 props 覆盖（description 覆盖时不再拼批次）", async () => {
+    const wrapper = mountDialog({
+      open: true,
+      kind: "finish",
+      batchInfo: { current: 2, total: 4 },
+      title: "自定义标题",
+      description: "自定义说明",
+      immediateLabel: "马上存",
+    });
+    await nextTick();
+    expect(wrapper.text()).toContain("自定义标题");
+    expect(wrapper.text()).toContain("自定义说明");
+    expect(wrapper.text()).not.toContain("第 2 批 / 共 4 批");
+    expect(wrapper.get('[data-testid="pause-immediate"]').text()).toContain("马上存");
   });
 });

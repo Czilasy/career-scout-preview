@@ -124,8 +124,10 @@ class BossCdpSource(_BossCdpDetailMixin):
             return SourceOutcome.failure(failed_code='source_account_restricted', safe_log=f'boss_login_restricted{cache_note}{retry_note}')
         if state == 'not_logged_in':
             return SourceOutcome.failure(failed_code='source_login_required', safe_log=f'boss_login_required{cache_note}{retry_note}')
+        # 「无法判定」如实地报「暂时无法确认平台状态」，不冒充「连不上浏览器」：
+        # CDP 明明连得上、只是登录态没结论时，说成「连不上」会误导用户去查浏览器。
         return SourceOutcome.failure(
-            failed_code='source_cdp_unavailable',
+            failed_code='source_status_unclear',
             safe_log=f"boss_login_probe_unknown{retry_note or ' retry=1'}",
         )
 
@@ -153,8 +155,9 @@ class BossCdpSource(_BossCdpDetailMixin):
             return SourceOutcome.failure(failed_code='source_account_restricted', safe_log=f'recheck_restricted{retry_note}')
         if state == 'not_logged_in':
             return SourceOutcome.failure(failed_code='source_login_required', safe_log='recheck_not_logged_in')
+        # 同上：登录态复核「没结论」是「状态无法确认」，不是「连不上浏览器」。
         return SourceOutcome.failure(
-            failed_code='source_cdp_unavailable',
+            failed_code='source_status_unclear',
             safe_log=f'recheck_unknown{retry_note or " retry=1"}',
         )
 

@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import uuid
 import unittest
 from unittest import mock
@@ -338,6 +339,89 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(sp.get("keyword"), "Python")
         self.assertEqual(sp.get("city"), ["上海"])
         self.assertEqual(sp.get("locations"), ep["script_params"]["locations"])
+
+    def test_jd_batch_active_only_inside_fetch_stage(self):
+        """批内标记只在「抓 JD 阶段且批内信号非空」时成立。"""
+        from webui import task_continue_api
+        ctx = self.app.config["PIPELINE_CONTEXT"]
+        run_id = "batch-active-probe"
+        probe = {
+            "kind": "ai_screen", "status": "running", "logs": [], "result": None,
+            "error": "", "started_at": 0, "finished_at": None,
+            "stop_event": threading.Event(),
+            "progress": {"stage": "fetch_jd", "jd_batch": {"current": 1, "total": 2}},
+        }
+        with ctx.lock:
+            ctx.tasks[run_id] = probe
+        try:
+            self.assertTrue(task_continue_api._jd_batch_active(ctx, run_id))
+            probe["progress"] = {"stage": "fetch_jd", "jd_batch": None}
+            self.assertFalse(task_continue_api._jd_batch_active(ctx, run_id))
+            probe["progress"] = {"stage": "ai_fine", "jd_batch": {"current": 1, "total": 2}}
+            self.assertFalse(task_continue_api._jd_batch_active(ctx, run_id))
+            self.assertFalse(
+                task_continue_api._wait_for_jd_batch_settle(ctx, "no-such-run"),
+                "没有批内信号时不得等待",
+            )
+        finally:
+            with ctx.lock:
+                ctx.tasks.pop(run_id, None)
+
+    def test_finish_wait_for_batch_waits_and_reports(self):
+        """结束保存可选「等这批抓完」：批内时等待，并如实回报 waited_for_batch。"""
+        from webui import task_continue_api
+        from webui.whitebox import WhiteboxService
+
+        run_id = self._seed_paused_ai_screen()
+        WhiteboxService(self.store).begin("screening", run_id, {
+            "stages": ["ai_rough", "jd_detail", "ai_fine"],
+            "units": [
+                {"unit_key": "ai_rough", "unit_kind": "ai_stage", "stage": "ai_rough"},
+                {"unit_key": "jd_detail", "unit_kind": "ai_stage", "stage": "jd_detail"},
+                {"unit_key": "ai_fine", "unit_kind": "ai_stage", "stage": "ai_fine"},
+            ],
+        })
+        tasks = self.app.config["PIPELINE_TASKS"]
+        tasks[run_id] = {
+            "kind": "ai_screen", "status": "running", "logs": [], "result": None,
+            "error": "", "started_at": 1000, "finished_at": None,
+            "stop_event": threading.Event(),
+            "progress": {"stage": "fetch_jd", "current": 606, "total": 667,
+                         "jd_batch": {"current": 2, "total": 3}},
+        }
+        # 用例不真等：把等待上限与落盘余量压到 0，只验证接线与回报口径。
+        with mock.patch.object(task_continue_api, "_FINISH_BATCH_WAIT_TIMEOUT_S", 0), \
+                mock.patch.object(task_continue_api, "_FINISH_BATCH_SETTLE_GRACE_S", 0):
+            resp = self.client.post(
+                f"/api/task/finish/{run_id}", json={"wait_for_batch": True})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertTrue(resp.get_json()["waited_for_batch"])
+        self.assertEqual(tasks[run_id].get("stop_mode"), "finish")
+        self.assertTrue(tasks[run_id]["stop_event"].is_set())
+
+    def test_finish_without_wait_flag_does_not_report_waiting(self):
+        """不加 wait_for_batch 时保持原立即定稿语义（不等待、不报等待过）。"""
+        from webui.whitebox import WhiteboxService
+
+        run_id = self._seed_paused_ai_screen()
+        WhiteboxService(self.store).begin("screening", run_id, {
+            "stages": ["ai_rough", "jd_detail", "ai_fine"],
+            "units": [
+                {"unit_key": "ai_rough", "unit_kind": "ai_stage", "stage": "ai_rough"},
+                {"unit_key": "jd_detail", "unit_kind": "ai_stage", "stage": "jd_detail"},
+                {"unit_key": "ai_fine", "unit_kind": "ai_stage", "stage": "ai_fine"},
+            ],
+        })
+        tasks = self.app.config["PIPELINE_TASKS"]
+        tasks[run_id] = {
+            "kind": "ai_screen", "status": "running", "logs": [], "result": None,
+            "error": "", "started_at": 1000, "finished_at": None,
+            "stop_event": threading.Event(),
+            "progress": {"stage": "fetch_jd", "jd_batch": {"current": 2, "total": 3}},
+        }
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertFalse(resp.get_json()["waited_for_batch"])
 
     def test_finish_restart_interrupted_ai_screen_saves_partial_snapshot(self):
         """服务重启中断的任务也能直接结束并保存部分结果，无需先重新开始。"""
@@ -2222,6 +2306,203 @@ class JobDetailConcurrencyGuardTests(unittest.TestCase):
         self.assertIsNotNone(outcome)
         self.assertEqual(calls, [("rebind", "gate-jd-run")])
         chrome.assert_called_once()
+
+
+class FinalizeWindowGuardTests(unittest.TestCase):
+    """收尾族：worker 写终态期间的用户命令只回执/等待，不抢写状态。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _seed_running_scrape(self, run_id):
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={"platform": "boss"},
+        )
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape")
+        tasks = self.app.config["PIPELINE_TASKS"]
+        tasks[run_id] = {
+            "kind": "scrape", "status": "running", "progress": {},
+            "logs": [], "result": None, "error": "",
+            "started_at": 1000, "finished_at": None,
+            "stop_event": threading.Event(),
+        }
+        return tasks[run_id]
+
+    def test_pause_during_finalize_is_acknowledged_not_executed(self):
+        """收尾窗口点暂停：只回执「正在收尾」，不置停止旗子、不改状态。"""
+        run_id = "finalize-pause"
+        task = self._seed_running_scrape(run_id)
+        task["finalizing"] = True
+
+        resp = self.client.post(
+            f"/api/task/pause/{run_id}", json={"mode": "graceful"})
+
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["status"], "finalizing")
+        self.assertFalse(task["stop_event"].is_set())
+        self.assertNotIn("stop_mode", task)
+        self.assertEqual(
+            self.store.get_screening_run(run_id)["status"], "running")
+
+    def test_cancel_during_finalize_waits_instead_of_overwriting(self):
+        """收尾窗口点取消：等待上限内仍收尾中 → 回执不写「已取消」。"""
+        from webui import task_continue_api
+
+        run_id = "finalize-cancel"
+        task = self._seed_running_scrape(run_id)
+        task["finalizing"] = True
+
+        with mock.patch.object(task_continue_api, "_FINALIZE_WAIT_TIMEOUT_S", 0):
+            resp = self.client.post(f"/api/task/cancel/{run_id}")
+
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["status"], "finalizing")
+        self.assertEqual(
+            self.store.get_screening_run(run_id)["status"], "running")
+
+    def test_finish_during_finalize_waits_then_reports_terminal(self):
+        """收尾窗口点结束保存：等 worker 定稿后如实答复已完成，不造假快照。"""
+        run_id = "finalize-finish-late"
+        task = self._seed_running_scrape(run_id)
+        task["finalizing"] = True
+
+        def _settle():
+            time.sleep(0.2)
+            task.pop("finalizing", None)
+            self.store.update_screening_run(
+                run_id, status="succeeded", current_stage="scrape",
+                processed_count=1, source_count=1,
+            )
+
+        worker = threading.Thread(target=_settle)
+        worker.start()
+        try:
+            resp = self.client.post(f"/api/task/finish/{run_id}")
+        finally:
+            worker.join(timeout=2)
+
+        self.assertEqual(resp.status_code, 409, resp.get_json())
+        self.assertEqual(resp.get_json()["error"], "already_terminal")
+        run = self.store.get_screening_run(run_id)
+        self.assertEqual(run["status"], "succeeded")
+        self.assertNotEqual(run.get("error_code"), "user_finished")
+
+    def test_finish_during_finalize_times_out_with_explicit_receipt(self):
+        """收尾迟迟不结束：结束保存明确回执「正在收尾」，不抢写。"""
+        from webui import task_continue_api
+
+        run_id = "finalize-finish-timeout"
+        task = self._seed_running_scrape(run_id)
+        task["finalizing"] = True
+
+        with mock.patch.object(task_continue_api, "_FINALIZE_WAIT_TIMEOUT_S", 0):
+            resp = self.client.post(f"/api/task/finish/{run_id}")
+
+        self.assertEqual(resp.status_code, 409, resp.get_json())
+        self.assertEqual(resp.get_json()["error"], "finalizing")
+        self.assertEqual(
+            self.store.get_screening_run(run_id)["status"], "running")
+
+    def _seed_paused_scrape(self, run_id):
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={"platform": "boss", "browser_account": "a",
+                              "cdp_port": 9222, "profile_key": "boss:a"},
+        )
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="scrape",
+            error_code="user_paused", error_reason="用户已暂停，结果已保留",
+        )
+        return self.store.get_screening_run(run_id)
+
+    def test_resume_check_launches_browser_before_giving_up(self):
+        """继续自检：探测不到浏览器时先拉起（不再只看一眼就判死）。"""
+        run = self._seed_paused_scrape("resume-selfheal")
+        ctx = self.app.config["PIPELINE_CONTEXT"]
+
+        with mock.patch(
+            "webui.pipeline_exec.probe_chrome_ready",
+            return_value=(False, "调试浏览器尚未就绪"),
+        ), mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready",
+            return_value=(True, ""),
+        ) as ensure:
+            ctx.check_resume_block(run)
+
+        # 自愈动作必须发生；测试环境没有真实浏览器，后续探测在此之后另行判定。
+        ensure.assert_called_once()
+
+    def test_resume_check_reports_unavailable_when_launch_also_fails(self):
+        """拉起也失败：仍如实报「连不上浏览器」，错误码不变。"""
+        run = self._seed_paused_scrape("resume-launch-fail")
+        ctx = self.app.config["PIPELINE_CONTEXT"]
+
+        with mock.patch(
+            "webui.pipeline_exec.probe_chrome_ready",
+            return_value=(False, "调试浏览器尚未就绪"),
+        ), mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready",
+            return_value=(False, "调试浏览器启动后立即退出"),
+        ):
+            passed, code, reason = ctx.check_resume_block(run)
+
+        self.assertFalse(passed)
+        self.assertEqual(code, "source_cdp_unavailable")
+        self.assertTrue(reason)
+
+    def test_continue_selfcheck_settles_completed_scrape(self):
+        """继续前自检：事实已完成的 paused 抓取 → 纠正为完成并明确答复，不连浏览器。"""
+        from webui import task_continue_api
+
+        run_id = "continue-selfcheck"
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={"platform": "boss"},
+        )
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="scrape",
+            error_code="user_paused", error_reason="用户已暂停，结果已保留",
+        )
+        tasks = self.app.config["PIPELINE_TASKS"]
+        tasks[run_id] = {
+            "kind": "scrape", "status": "paused", "progress": {},
+            "logs": [], "result": None, "error": "",
+            "started_at": 1000, "finished_at": None,
+            "stop_event": threading.Event(),
+        }
+
+        with mock.patch.object(
+                task_continue_api, "scrape_completion_evidence",
+                return_value=True):
+            resp = self.client.post(f"/api/task/continue/{run_id}")
+
+        self.assertEqual(resp.status_code, 409, resp.get_json())
+        self.assertEqual(resp.get_json()["error"], "already_completed")
+        run = self.store.get_screening_run(run_id)
+        self.assertEqual(run["status"], "succeeded")
+        self.assertIsNone(run["error_code"])
+        self.assertEqual(tasks[run_id]["status"], "done")
 
 
 if __name__ == "__main__":

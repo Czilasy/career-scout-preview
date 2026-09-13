@@ -31,6 +31,7 @@ import type {
   DiscoveryProps,
   MergedLatestResult,
   OneClickLaunch,
+  StepId,
   TaskSnapshot,
 } from "./useDiscoveryState";
 
@@ -59,6 +60,8 @@ export interface RoundFlowLike {
     platform: Platform,
     payload: Partial<RoundContext> | null | undefined,
   ) => void;
+  /** 025 B076：03 面板批内「结束并保存」的二选一入口；返回是否已接管（未接管=直接保存）。 */
+  openScreenFinishChoice: () => boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +124,8 @@ export interface ResultsDeps {
   loadLatestResult: (opts?: { skipTerminalSnapshot?: boolean }) => Promise<void>;
   setPipelineResult: (result: PipelineResult) => void;
   fetchMergedLatestResult: () => Promise<MergedLatestResult | null>;
-  returnToLatest: () => Promise<void>;
+  /** Spec041 返工：返回退出历史后的真实落点步骤；空 = 本次未完成退出（勿改步骤）。 */
+  returnToLatest: () => Promise<StepId | null | void>;
   restoreLocationsFromContext: (ctx?: Partial<RoundContext> | null) => void;
   jobId: (job: JobItem) => string;
 }
@@ -163,6 +167,7 @@ export type SearchNeeds = Pick<
   | "enterSearchStep"
   | "notify"
   | "openOneClickDialog"
+  | "props"
   | "restoreRunningTask"
   | "startScrape"
 >;
@@ -182,6 +187,7 @@ export type ExecutionNeeds = Pick<
   | "persistFinishedState"
   | "pollRecrawl"
   | "pollTask"
+  | "props"
   | "refreshScopePreview"
   | "requireProfileConfirmed"
   | "restoreLocationsFromContext"

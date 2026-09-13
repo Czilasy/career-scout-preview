@@ -62,6 +62,34 @@ class ChromeAccountProfileSwitchTests(unittest.TestCase):
         uses.assert_called_once()
         close.assert_called_once()
 
+    def test_ensure_chrome_ready_stops_when_task_stop_requested(self):
+        """任务已停止：不启动浏览器、不重试，立即返回失败（收尾族）。"""
+        from webui import pipeline_exec
+        from webui import pipeline_exec_chrome
+        stop_event = mock.Mock()
+        stop_event.is_set.return_value = True
+        with mock.patch.object(
+            pipeline_exec_chrome, "resolve_executable",
+            return_value=("C:/spec040-test/browser.exe", ""),
+        ), mock.patch.object(
+            pipeline_exec_chrome, "_cdp_data_dir",
+            return_value="C:/spec040-test/profile",
+        ), mock.patch.object(
+            pipeline_exec.boss, "is_cdp_ready", return_value=False,
+        ), mock.patch.object(
+            pipeline_exec.boss, "prepare_cdp_profile",
+            return_value={"path": "C:/profiles/stop"},
+        ), mock.patch.object(
+            pipeline_exec.boss, "stop_cdp_chrome",
+        ), mock.patch.object(
+            pipeline_exec.boss, "launch_chrome",
+        ) as launch:
+            ok, msg = pipeline_exec.ensure_chrome_ready(
+                9333, stop_event=stop_event)
+        self.assertFalse(ok)
+        self.assertIn("停止", msg)
+        launch.assert_not_called()
+
     def test_ensure_chrome_ready_refuses_unknown_profile(self):
         """端口被非 A/B 的 Chrome 占用时禁止自动关闭，避免误伤主 Chrome。"""
         from webui import pipeline_exec

@@ -13,6 +13,8 @@ import { requestCapsuleNavigation, type CapsuleStatusPayload } from "./composabl
 import { createIslandNotices } from "./composables/useIslandNotices";
 import { useIslandCarousel, type IslandInterruptContent, type IslandLane } from "./composables/useIslandCarousel";
 import { useReminderBadge } from "./composables/useReminderBadge";
+import { useDiscoverySceneState } from "./composables/useDiscoverySceneState";
+import { hydratePage2Draft } from "./composables/useSearchDraftSlots";
 import DiscoveryView from "./views/DiscoveryView.vue";
 import { apiRequest, currentRuntimeMode, errorMessage, GITHUB_REPO_URL, initializeSession, openExternalLink, updateApi, type UpdateCheckResult } from "./api";
 import { safeCanonicalUrl } from "./jobFeedback";
@@ -71,6 +73,7 @@ const discoveryRef = ref<{
   toggleHistoryDrawer: () => void;
   closeHistoryDrawer: () => void;
 } | null>(null);
+const sceneStore = useDiscoverySceneState();
 
 // ---------------------------------------------------------------------------
 // 037 灵动岛 v3：通知池由胶囊状态跃迁派生（App 持有）；面板开闭由
@@ -276,6 +279,11 @@ onMounted(async () => {
       profiles.value = [created];
     }
     const saved = localStorage.getItem("career-scout-current-profile") || "";
+    // 第 2 页输入（关键词/城市/画像文本）随画像存在数据库里：打开应用先回填，
+    // 换浏览器/清过站点数据都能拿回来（hydratePage2Draft 内部每个画像只填一次）。
+    for (const profile of profiles.value) {
+      hydratePage2Draft(profile.id, profile.page2_draft);
+    }
     currentProfileId.value = profiles.value.some((profile) => profile.id === saved)
       ? saved
       : profiles.value[0]?.id || "";
@@ -505,9 +513,22 @@ onBeforeUnmount(() => {
 });
 
 function selectProfile(profileId: string) {
+  if (profileId && profileId !== currentProfileId.value) {
+    sceneStore.clearForProfileSwitch();
+  }
+  // 切画像同样回填第 2 页输入（画像列表里已带数据库那份）。
+  const target = profiles.value.find((profile) => profile.id === profileId);
+  if (target) hydratePage2Draft(target.id, target.page2_draft);
   currentProfileId.value = profileId;
   if (profileId) localStorage.setItem("career-scout-current-profile", profileId);
 }
+
+// 037 复审：同一条提示短时间内重复到达只播报一次——暂停是最典型的现场：
+// 「点暂停后的即时对账」与「轮询循环下一拍」会各发一次同样的任务错误，
+// 不拦就会在灵动岛面板里留下两条一模一样的行（用户反馈）。
+const NOTICE_DEDUPE_WINDOW_MS = 10_000;
+let lastNoticeKey = "";
+let lastNoticeAt = 0;
 
 function showNotice(next: Notice) {
   // 037 复审补齐：所有信息提示融入灵动岛，不再有独立 notice toast 浮窗
@@ -517,6 +538,11 @@ function showNotice(next: Notice) {
   // 经 pushInterruptOrDefer 顺延到回到最新（复审 P2-5）。
   const tone: "warning" | "error" =
     next.tone === "error" ? "error" : "warning";
+  const key = `${tone}:${next.message}`;
+  const now = Date.now();
+  if (key === lastNoticeKey && now - lastNoticeAt < NOTICE_DEDUPE_WINDOW_MS) return;
+  lastNoticeKey = key;
+  lastNoticeAt = now;
   pushInterruptOrDefer({
     content: { title: next.message, detail: "", tone, target: "task" },
     duration: 2200,
@@ -867,6 +893,7 @@ function handleIslandExpand() {
       :has-update="Boolean(updatesEnabled && updateInfo)"
       :update-version="updateInfo?.latest || ''"
       :checking="updateChecking"
+      :profile-id="currentProfileId"
       @close="settingsMenuOpen = false"
       @open-ai-settings="openAiSettingsFromMenu"
       @open-browser-accounts="openBrowserAccountsFromMenu"

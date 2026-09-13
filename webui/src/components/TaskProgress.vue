@@ -47,6 +47,8 @@ const props = defineProps<{
   snapshot: TaskSnapshot | null;
   kind?: "scrape" | "screen" | "";
   taskId?: string;
+  /** 本轮是用户主动「结束并保存」收尾的：不把 interrupted 当异常展示。 */
+  userFinished?: boolean;
 }>();
 
 const COMPLETED_STATUSES = new Set(["done", "completed", "completed_with_pending", "partial"]);
@@ -86,7 +88,22 @@ function isTerminalStatus(status?: string) {
   return Boolean(status && TERMINAL_STATUSES.has(status));
 }
 
-const integrity = computed(() => props.snapshot?.integrity ?? null);
+const integrity = computed<IntegritySnapshot | null>(() => {
+  const raw = props.snapshot?.integrity ?? null;
+  // 用户主动「结束并保存」的轮次：白箱如实记 interrupted（任务确实被停止），
+  // 但那是用户自己的收尾动作，展示口径按轮次走（部分完成 / 已结束保存），
+  // 不再出现"任务因取消或停止而中断"。
+  if (raw && props.userFinished && raw.conclusion === "interrupted") {
+    return {
+      ...raw,
+      conclusion: "partial",
+      label: "部分完成",
+      primary_code: "user_finished",
+      primary_reason: "已结束保存部分结果",
+    };
+  }
+  return raw;
+});
 const integrityConclusion = computed(() => integrity.value?.conclusion || "");
 const integrityStatus = computed(() => {
   switch (integrityConclusion.value) {

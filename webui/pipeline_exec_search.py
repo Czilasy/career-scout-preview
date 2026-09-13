@@ -42,6 +42,9 @@ _logger = get_logger(__name__)
 # 平台明确报告空后，等待该秒数再做一次独立复核确认。
 _EMPTY_CONFIRM_DELAY_SECONDS = 3.0
 
+# 组合间防限流冷却的分段步长：分段等待让暂停在冷却期间也能及时生效。
+_INTER_COMBO_WAIT_STEP_SECONDS = 0.5
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -211,7 +214,7 @@ def run_search(params: dict, source, *, pages: int = 3,
     emit(stage="ensure_chrome", message="检查并启动调试浏览器…")
     cdp_port = getattr(source, "cdp_port", None)
     chrome_ok, chrome_err = _facade.ensure_chrome_ready(
-        cdp_port, minimize_after_launch=True,
+        cdp_port, minimize_after_launch=True, stop_event=stop_event,
     )
     if not chrome_ok:
         source_code, source_reason = _record_source_hard_stop_evidence(
@@ -730,7 +733,21 @@ def run_search(params: dict, source, *, pages: int = 3,
                  wait_seconds=int(delay),
                  message=f"防限流等待 {delay:.0f}s 后搜索下一个组合…")
             _t0_wait = time.time()
-            sleeper(delay)
+            if sleeper is not time.sleep:
+                # 注入的 sleeper（测试/替身）保持单次调用语义，不改变既有计数断言。
+                sleeper(delay)
+            else:
+                # 生产默认走分段等待：冷却期间点暂停不用等整段睡完，
+                # 下一段开始前检查停止信号，命中即提前退出。
+                _remaining_wait = float(delay)
+                while _remaining_wait > 0:
+                    if stop_mode_for_event(stop_event) is not None:
+                        break
+                    _wait_step = min(_INTER_COMBO_WAIT_STEP_SECONDS, _remaining_wait)
+                    sleeper(_wait_step)
+                    _remaining_wait -= _wait_step
+            if stop_mode_for_event(stop_event) is not None:
+                break
             # T018: 记录 wait 事件（防限流冷却时间计入总耗时）
             if measurement_callback is not None:
                 try:

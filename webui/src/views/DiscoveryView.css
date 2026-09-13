@@ -1,0 +1,43 @@
+.adv-mode-summary {
+  margin: 0 0 14px;
+  padding: 9px 11px;
+  border: 1px solid var(--hair-2);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.mode-warning-inline {
+  color: #b45309;
+  font-weight: 700;
+}
+
+.history-round-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text-soft);
+  font-size: 0.86rem;
+}
+
+.latest-empty {
+  margin: 0 0 16px;
+  padding: 18px;
+  border: 1px dashed var(--hair-2);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text-soft);
+  text-align: center;
+}
+
+/* 搜索页有 fixed 地点浮层：只淡入不位移，避免 transform 成为 fixed 定位容器 */
+.workflow-stack.search-layout {
+  animation: stage-fade .22s ease both;
+}

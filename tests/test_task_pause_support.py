@@ -23,6 +23,7 @@ from webui.task_pause_support import (
     ScrapeCheckpointWriteError,
     mark_scrape_paused,
     request_stop,
+    scrape_completion_evidence,
     stop_mode_for_event,
 )
 
@@ -502,6 +503,157 @@ class ScrapeFailureLifecycleTests(unittest.TestCase):
                 store, ctx.tasks, ctx.lock, lambda _run: "a", mock.Mock(),
             )
             self.assertFalse(support[1]())
+
+
+class ScrapeFinalizeWindowTests(unittest.TestCase):
+    """收尾族：事实优先 + 收尾区立牌 + 完成证据核实。"""
+
+    def _context_for_run(self, store, run_id):
+        task = {
+            "kind": "scrape", "status": "queued", "progress": {},
+            "logs": [], "result": None, "error": "",
+            "started_at": 1, "finished_at": None,
+            "stop_event": threading.Event(),
+        }
+        return SimpleNamespace(
+            store=store,
+            operational_errors=_OPERATIONAL_ERRORS,
+            lock=threading.RLock(),
+            tasks={run_id: task},
+            app=SimpleNamespace(config={"RESULT_DIR": tempfile.gettempdir()}),
+            is_user_finished=lambda _run_id: False,
+            activate_task_browser=mock.Mock(),
+            release_worker_resume_claims=mock.Mock(),
+            schedule_pipeline_task_cleanup=mock.Mock(),
+            clear_auto_screen=mock.Mock(),
+            write_run=lambda current_id, **kwargs: store.update_screening_run(
+                current_id, **kwargs),
+            record_pause_failure=mock.Mock(),
+        )
+
+    def test_finished_scrape_fact_wins_over_pause_flag(self):
+        """收尾窗口里点暂停：抓取事实已完成 → 终态仍按 succeeded 定稿。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "finalize-fact-first"
+            store.create_screening_run(
+                run_id, source_count=1,
+                execution_params={"platform": "boss"},
+            )
+            ctx = self._context_for_run(store, run_id)
+            ctx.make_cdp_source = mock.Mock(return_value=object())
+            result = {
+                "ok": True, "jobs": [{"job_id": "j1"}], "total_scraped": 1,
+                "total_matched": 1, "combinations": 1,
+                "completed_combos": ["kw|city"],
+                "integrity": {"conclusion": "succeeded", "evidence_complete": True},
+                "error": "",
+            }
+            # 用户在收尾窗口点了暂停：旗子已置位，worker 即将写终态。
+            request_stop(
+                ctx.tasks[run_id], ctx.tasks[run_id]["stop_event"], STOP_MODE_PAUSE,
+            )
+            with mock.patch("webui.pipeline_exec.run_search", return_value=result):
+                run_pipeline_task(
+                    ctx, run_id,
+                    {"keyword": "kw", "city": ["city"], "pages": 1},
+                )
+
+            run = store.get_screening_run(run_id)
+            self.assertEqual(run["status"], "succeeded")
+            self.assertNotEqual(run["error_code"], "user_paused")
+            self.assertEqual(ctx.tasks[run_id]["status"], "done")
+            self.assertNotIn("finalizing", ctx.tasks[run_id])
+
+    def test_finalizing_flag_set_on_finalize_progress_and_cleared_after(self):
+        """收尾进度信号立牌、终态写好后清牌（命令口据此只回执不执行）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "finalize-flag"
+            store.create_screening_run(
+                run_id, source_count=1,
+                execution_params={"platform": "boss"},
+            )
+            ctx = self._context_for_run(store, run_id)
+            ctx.make_cdp_source = mock.Mock(return_value=object())
+            seen = {}
+
+            def fake_run_search(params, source, **kwargs):
+                progress = kwargs.get("progress")
+                progress({"stage": "closing_chrome", "message": "正在关闭调试浏览器…"})
+                seen["finalizing_during"] = bool(
+                    ctx.tasks[run_id].get("finalizing"))
+                return {
+                    "ok": True, "jobs": [{"job_id": "j1"}], "total_scraped": 1,
+                    "total_matched": 1, "combinations": 1,
+                    "completed_combos": ["kw|city"],
+                    "integrity": {"conclusion": "succeeded", "evidence_complete": True},
+                    "error": "",
+                }
+
+            with mock.patch(
+                    "webui.pipeline_exec.run_search", side_effect=fake_run_search):
+                run_pipeline_task(
+                    ctx, run_id,
+                    {"keyword": "kw", "city": ["city"], "pages": 1},
+                )
+
+            self.assertTrue(seen["finalizing_during"])
+            self.assertNotIn("finalizing", ctx.tasks[run_id])
+
+    def test_scrape_completion_evidence_requires_checkpoint_jobs_and_whitebox(self):
+        """完成证据核实：断点满 + 有岗位 + 白箱完整结论，三者缺一不可。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "evidence-run"
+            store.create_screening_run(run_id, source_count=2)
+            store.update_screening_run(run_id, status="running")
+            ctx = SimpleNamespace(
+                store=store, operational_errors=_OPERATIONAL_ERRORS,
+            )
+
+            store.save_checkpoint(run_id, "scrape", ["kw|city"])
+            self.assertFalse(scrape_completion_evidence(ctx, run_id))
+
+            store.save_checkpoint(run_id, "scrape", ["kw|city", "kw2|city"])
+            self.assertFalse(scrape_completion_evidence(ctx, run_id))
+
+            # 断点会随组合结果同事务覆盖，这里保持两项已完成组合。
+            store.save_scrape_combo_result(
+                run_id, "kw|city", [{"job_id": "j1"}], ["kw|city", "kw2|city"])
+            from webui.whitebox import WhiteboxService
+            with mock.patch.object(
+                WhiteboxService, "report",
+                return_value={"integrity": {
+                    "conclusion": "succeeded", "evidence_complete": True}},
+            ):
+                self.assertTrue(scrape_completion_evidence(ctx, run_id))
+            with mock.patch.object(
+                WhiteboxService, "report",
+                return_value={"integrity": {
+                    "conclusion": "succeeded", "evidence_complete": False}},
+            ):
+                self.assertFalse(scrape_completion_evidence(ctx, run_id))
+
+    def test_settle_paused_run_as_completed_only_from_paused(self):
+        """受控纠正只走 paused → succeeded；已终态不再改写，并清暂停残留文案。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "settle-paused"
+            store.create_screening_run(run_id, source_count=2)
+            store.update_screening_run(run_id, status="running")
+            store.update_screening_run(
+                run_id, status="paused", error_code="source_cdp_unavailable",
+                error_reason="调试浏览器未就绪", current_stage="scrape",
+            )
+
+            self.assertTrue(store.settle_paused_run_as_completed(
+                run_id, processed_count=2, source_count=2))
+            run = store.get_screening_run(run_id)
+            self.assertEqual(run["status"], "succeeded")
+            self.assertIsNone(run["error_code"])
+            self.assertIsNone(run["error_reason"])
+            self.assertFalse(store.settle_paused_run_as_completed(run_id))
 
     def test_checkpoint_failure_does_not_leave_recoverable_pause_in_memory(self):
         """断点持久化失败后，内存状态必须与 durable failed 状态一致。"""

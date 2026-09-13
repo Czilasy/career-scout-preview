@@ -3,8 +3,10 @@
 // - 已结束事实（resultsPageSeen/finishedPartial）→ 直接开始新一轮（01 页）。
 // - 未结束（本地未完成快照 / 有活动任务 / 历史轮未完成）→ 不触发、恢复现场。
 import { computed, ref } from "vue";
+import { flushPromises } from "@vue/test-utils";
 import { apiRequest } from "../../api";
 import { useDiscoveryTasks } from "../useDiscoveryTasks";
+import { useDiscoverySceneState } from "../useDiscoverySceneState";
 import { useDiscoverySearch } from "../useDiscoverySearch";
 import { useDiscoveryState } from "../useDiscoveryState";
 import { taskProgressFromSnapshot } from "../useDiscoveryState";
@@ -29,6 +31,7 @@ const roundFlowFake: RoundFlowLike = {
   clearRoundContext: vi.fn(),
   restoreRoundContext: vi.fn(() => false),
   registerRoundContext: vi.fn(),
+  openScreenFinishChoice: vi.fn(() => false),
 };
 
 // 031 B8 补遗：state fake = 真实状态工厂 + overrides（字段永齐全、类型真实，
@@ -60,32 +63,178 @@ function makeDeps(overrides: Partial<TasksNeeds> = {}): TasksNeeds {
   }, overrides);
 }
 
+describe("useDiscoveryTasks 开新一轮现场归档（Spec041 返工）", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset();
+    apiRequestMock.mockResolvedValue({ has_task: false });
+    sessionStorage.clear();
+  });
+
+  it("任务状态查询一律带当前画像（后端口径：跨画像按不存在处理）", async () => {
+    const state = makeState();
+    const deps = makeDeps();
+    const tasks = useDiscoveryTasks(state, deps);
+
+    apiRequestMock.mockResolvedValue({ status: "completed", progress: {}, logs: [] });
+    await tasks.pollTask("run-1", "screen");
+    expect(apiRequestMock).toHaveBeenCalledWith("/api/task-state/run-1?profile_id=test");
+
+    apiRequestMock.mockClear();
+    await tasks.enrichPausedSnapshot(
+      "run-2",
+      { status: "paused", progress: {}, logs: [] },
+      "screen",
+    );
+    expect(apiRequestMock.mock.calls.some(
+      ([url]) => String(url) === "/api/task-state/run-2?profile_id=test",
+    )).toBe(true);
+  });
+
+  it("旧轮现场归档为该轮历史现场，轮次身份换新、新轮回默认", async () => {
+    const state = makeState();
+    const deps = makeDeps();
+    const tasks = useDiscoveryTasks(state, deps);
+    const scene = useDiscoverySceneState();
+
+    const epoch = scene.ensureRoundEpoch("test");
+    const identity = { profileId: "test", runEpoch: epoch, platform: "boss" as const };
+    scene.saveCurrent(identity, { selectedJobKey: "boss:job-9", listScrollTop: 120 });
+    state.pipelineResultRunId.value = "run-final";
+    state.platformState.setResultPlatform("boss");
+
+    await tasks.resetWorkflow();
+
+    // 旧轮现场落到结果 run id 下：历史轮浏览按 run id 取，能接回最后看到的现场。
+    expect(scene.getHistory("run-final", identity)).toMatchObject({
+      selectedJobKey: "boss:job-9",
+      listScrollTop: 120,
+    });
+    // 新轮换了身份，且是干净默认现场。
+    expect(scene.roundEpoch.value).not.toBe(epoch);
+    expect(scene.getCurrent({ ...identity, runEpoch: scene.roundEpoch.value })).toMatchObject({
+      selectedJobKey: null,
+      listScrollTop: 0,
+    });
+    expect(state.pipelineResultRunId.value).toBe("");
+  });
+});
+
+describe("抓取暂停占用与轮询保护", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset();
+  });
+
+  it("暂停受理后任务仍在运行：保持“正在暂停”显示，按钮占用不释放", async () => {
+    const state = makeState();
+    const deps = makeDeps();
+    const tasks = useDiscoveryTasks(state, deps);
+    state.scrapeActionBusy.value = "pause-scrape";
+    state.scrapeSnapshot.value = {
+      status: "running", progress: { message: "抓取中" }, logs: [],
+    };
+
+    apiRequestMock.mockResolvedValue({
+      status: "running", progress: { message: "抓取中" }, logs: [],
+    });
+    await tasks.pollTask("scrape-1", "scrape");
+
+    expect(state.scrapeSnapshot.value?.status).toBe("pausing");
+    expect(state.scrapeActionBusy.value).toBe("pause-scrape");
+    if (state.pollTimer.value) {
+      window.clearTimeout(state.pollTimer.value);
+      state.pollTimer.value = undefined;
+    }
+  });
+
+  it("任务真正暂停后释放暂停占用并落 paused 快照", async () => {
+    const state = makeState();
+    const deps = makeDeps();
+    const tasks = useDiscoveryTasks(state, deps);
+    state.scrapeActionBusy.value = "pause-scrape";
+    state.scrapeSnapshot.value = { status: "pausing", progress: {}, logs: [] };
+
+    apiRequestMock.mockResolvedValue({
+      status: "paused", progress: {}, logs: [], error: "",
+    });
+    await tasks.pollTask("scrape-1", "scrape");
+
+    expect(state.scrapeActionBusy.value).toBe("");
+    expect(state.scrapeSnapshot.value?.status).toBe("paused");
+  });
+});
+
 describe("useDiscoveryTasks.maybeAutoStartNewRound（026 B078）", () => {
   beforeEach(() => {
     apiRequestMock.mockReset();
     apiRequestMock.mockResolvedValue({ has_task: false });
   });
 
-  it("T004a: 已进 04 页（已结束）→ 直接开始新一轮（resetWorkflow），不查历史轮", async () => {
+  it("Spec041 返工: 已进 04 页且结果在现场 → 原地接回结果页，不清空、不开新一轮", async () => {
+    const state = makeState({ resultsPageSeen: ref(true) });
+    state.activeStep.value = "results";
+    state.resultLoaded.value = true;
+    state.pipelineResult.value = { ok: true, jobs: [], dropped: [] };
+    const deps = makeDeps();
+    const tasks = useDiscoveryTasks(state, deps);
+
+    await tasks.maybeAutoStartNewRound();
+
+    expect(deps.fetchMergedLatestResult).not.toHaveBeenCalled();
+    expect(deps.clearLatestResult).not.toHaveBeenCalled();
+    expect(state.activeStep.value).toBe("results");
+    expect(state.resultsPageSeen.value).toBe(true);
+  });
+
+  it("Spec041 返工: 已进 04 页但现场没有结果 → 先问后端；仍无结果才退回新一轮", async () => {
     const state = makeState({ resultsPageSeen: ref(true) });
     const deps = makeDeps();
     const tasks = useDiscoveryTasks(state, deps);
 
     await tasks.maybeAutoStartNewRound();
 
-    expect(deps.fetchMergedLatestResult).not.toHaveBeenCalled();
+    expect(deps.fetchMergedLatestResult).toHaveBeenCalled();
+    expect(deps.clearLatestResult).toHaveBeenCalled();
     expect(state.activeStep.value).toBe("upload");
-    expect(state.resultsPageSeen.value).toBe(false); // resetWorkflow 清除已结束标记
+    expect(state.resultsPageSeen.value).toBe(false);
   });
 
-  it("T004b: 结束保存（finishedPartial=true）同样触发新一轮", async () => {
+  it("Spec041 返工: 完成事实在、后端有最新结果 → 从最新轮补齐并落在结果页", async () => {
+    const state = makeState({
+      resultsPageSeen: ref(true),
+      resultsBootstrapPending: ref(true),
+    });
+    const deps = makeDeps({
+      fetchMergedLatestResult: vi.fn(async () => ({
+        merged: { ok: true, jobs: [{ job_id: "j" }], dropped: [] },
+        newer: {
+          platform: "zhilian" as const,
+          data: { status: "succeeded", source_run_id: "z-run" },
+        },
+        platformStatuses: { zhilian: "succeeded" },
+      })),
+      loadLatestResult: vi.fn(async () => {
+        state.pipelineResult.value = { ok: true, jobs: [{ job_id: "j" }], dropped: [] };
+        state.resultLoaded.value = true;
+      }),
+    });
+    const tasks = useDiscoveryTasks(state, deps);
+
+    await tasks.maybeAutoStartNewRound();
+
+    expect(deps.loadLatestResult).toHaveBeenCalled();
+    expect(deps.clearLatestResult).not.toHaveBeenCalled();
+    expect(state.activeStep.value).toBe("results");
+    expect(state.resultsBootstrapPending.value).toBe(false);
+  });
+
+  it("T004b: 结束保存（finishedPartial=true）无结果可恢复时退回新一轮", async () => {
     const state = makeState({ finishedPartial: ref(true) });
     const deps = makeDeps();
     const tasks = useDiscoveryTasks(state, deps);
 
     await tasks.maybeAutoStartNewRound();
 
-    expect(deps.fetchMergedLatestResult).not.toHaveBeenCalled();
+    expect(deps.fetchMergedLatestResult).toHaveBeenCalled();
     expect(state.activeStep.value).toBe("upload");
   });
 
@@ -208,7 +357,7 @@ describe("useDiscoveryTasks.maybeAutoStartNewRound（035 未结束任务保护�
     let resolveTaskState!: (snapshot: unknown) => void;
     const taskState = new Promise((resolve) => { resolveTaskState = resolve; });
     apiRequestMock.mockImplementation(async (url: string) => {
-      if (url === "/api/task-state/old-screen") return taskState;
+      if (url.includes("/api/task-state/old-screen")) return taskState;
       return { ok: true, has_task: false };
     });
     const deps = makeDeps();
@@ -245,7 +394,7 @@ describe("useDiscoveryTasks.pollTask（035 后台跑完历史冒泡）", () => {
       if (url.startsWith("/api/task-state/")) {
         return { status: "completed", progress: {}, logs: [], result: null };
       }
-      if (url === "/api/result-history") return { ok: true, items: [] };
+      if (url.startsWith("/api/result-history")) return { ok: true, items: [] };
       return { ok: true };
     });
 
@@ -253,7 +402,7 @@ describe("useDiscoveryTasks.pollTask（035 后台跑完历史冒泡）", () => {
 
     expect(state.taskCompletedToast.value.visible).toBe(true);
     expect(state.activeStep.value).not.toBe("results");
-    expect(apiRequestMock).toHaveBeenCalledWith("/api/result-history");
+    expect(apiRequestMock).toHaveBeenCalledWith("/api/result-history?profile_id=test");
   });
 
   it("T014b: 非历史模式任务跑完 → 不冒泡、切到结果页", async () => {
@@ -410,7 +559,9 @@ describe("useDiscoveryTasks.abandonRound", () => {
     expect(state.activeStep.value).toBe("upload");
     expect(state.scrapeTaskId.value).toBe("");
     expect(state.scrapeSnapshot.value).toBeNull();
-    expect(state.selectedKeywords.value).toEqual([]);
+    // 用户拍板：第 2 页输入（关键词/城市/画像）随"放弃本轮/开新一轮"保留，
+    // 方便换个平台直接复用；只有用户手动改才变。
+    expect(state.selectedKeywords.value).toEqual(["Python"]);
     expect(state.cancelBusy.value).toBe(false);
     expect(deps.notify).toHaveBeenCalledWith("已放弃本轮，已回到第一步", "info");
   });
@@ -566,6 +717,7 @@ describe("useDiscoverySearch.analyzeResume（035 入口守卫落点）", () => {
       enterSearchStep: vi.fn(),
       notify: vi.fn(),
       openOneClickDialog: vi.fn(),
+      props: { profileId: "test" },
       restoreRunningTask: vi.fn(async () => {}),
       startScrape: vi.fn(async () => {}),
     };
@@ -614,9 +766,28 @@ describe("useDiscoverySearch.analyzeResume（035 入口守卫落点）", () => {
     apiRequestMock.mockResolvedValue({ ok: true, fields: {}, labels: {} });
 
     await search.analyzeResume();
+    await flushPromises();
 
     expect(deps.cancelActiveTasksForNewRound).toHaveBeenCalled();
     expect(apiRequestMock).toHaveBeenCalledWith("/api/analyze-resume", expect.anything());
+  });
+
+  it("分析完成时用户正在看历史：只更新当前分析，不打断历史画面", async () => {
+    const state = makeUploadReadyState({ activeStep: ref("results") });
+    const historyResult = { jobs: [{ job_id: "history-job", title: "历史岗位" }], dropped: [] };
+    state.historyRound.value = { runId: "history-run", platform: "boss", status: "done", jobCount: 1 };
+    state.pipelineResult.value = historyResult;
+    const deps = makeSearchDeps();
+    const search = useDiscoverySearch(state, deps);
+    apiRequestMock.mockResolvedValue({ ok: true, fields: {}, labels: {} });
+
+    await search.analyzeResume();
+    await flushPromises();
+
+    expect(state.historyRound.value?.runId).toBe("history-run");
+    expect(state.pipelineResult.value).toMatchObject({ jobs: [{ job_id: "history-job" }] });
+    expect(state.activeStep.value).toBe("results");
+    expect(deps.enterSearchStep).not.toHaveBeenCalled();
   });
 });
 

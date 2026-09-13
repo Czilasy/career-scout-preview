@@ -309,11 +309,12 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
     def _check_resume_block(
             run: dict, *, persist: bool = True, probe_only: bool = False,
     ) -> tuple[bool, str, str]:
-        """Verify a paused dependency without changing browser state.
+        """Verify a paused dependency; launch the bound browser when needed.
 
         Browser activation belongs to the caller's frozen-identity phase.  A
-        resume check may probe the already-bound source, but it must never
-        select or activate a profile implicitly.
+        resume check may probe the already-bound source and, when the debug
+        browser is not up, launch it once (same action as starting a task);
+        it still never selects or activates a profile implicitly.
         """
         checker = app.config.get('RESUME_BLOCK_CHECKER')
         if callable(checker):
@@ -347,6 +348,17 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
                     from webui.pipeline_exec import probe_chrome_ready, taxonomy_reason
                     from webui.pipeline_exec_status import user_visible_failure_reason
                     chrome_ok, chrome_err = probe_chrome_ready(_resume_params.get('cdp_port'))
+                    launched_browser = False
+                    if not chrome_ok and not probe_only:
+                        # 继续自愈：任务已经停止过一次，继续时就该动手恢复现场——
+                        # 先尝试把调试浏览器拉起来（与「开始抓取」同一个动作；拉起
+                        # 后仍会继续做登录/风控的真实原因探测）；拉不起来才判「连不上」。
+                        from webui.pipeline_exec import ensure_chrome_ready
+                        chrome_ok, chrome_err = ensure_chrome_ready(
+                            _resume_params.get('cdp_port'),
+                            minimize_after_launch=True,
+                        )
+                        launched_browser = bool(chrome_ok)
                     if not chrome_ok:
                         passed = False
                         code = 'source_cdp_unavailable'
@@ -360,6 +372,10 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
                         # been run in this mode.
                         pass
                     else:
+                        if launched_browser:
+                            # 浏览器是刚拉起来的：页面与登录态需要几秒稳定，立刻复核
+                            # 会得到「无法判定」并被误报为失败（真机实测：稍等即通过）。
+                            time.sleep(2.5)
                         source = _make_cdp_source(platform=_resume_platform, browser_account=_resume_params.get('browser_account'), cdp_port=_resume_params.get('cdp_port'), profile_key=_resume_params.get('profile_key'), run_id=str(run.get('id') or ''))
                         if source is None:
                             outcome = None

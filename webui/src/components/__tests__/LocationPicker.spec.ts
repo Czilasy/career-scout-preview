@@ -1,6 +1,6 @@
 import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import LocationPicker from "../LocationPicker.vue";
-import type { LocationCondition } from "../../types";
+import type { LocationCondition, SceneIdentity } from "../../types";
 
 // 批四 T078：统一用例收尾——此前本文件 0 次 unmount，组件的 resize 监听与
 // 测量状态会跨用例泄漏；窄屏用例改写过的 window.innerHeight 也在此复位。
@@ -160,6 +160,36 @@ describe("LocationPicker", () => {
     document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
     await flushPromises();
     expect(wrapper.find('[data-testid="location-panel"]').exists()).toBe(false);
+  });
+
+  it("ignores a catalog response that belongs to the previous scene", async () => {
+    let resolveShanghai!: (value: Response) => void;
+    let resolveBeijing!: (value: Response) => void;
+    const shanghai = new Promise<Response>((resolve) => { resolveShanghai = resolve; });
+    const beijing = new Promise<Response>((resolve) => { resolveBeijing = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/session")) return response({ token: "test" });
+      if (url.includes("city=%E4%B8%8A%E6%B5%B7")) return shanghai;
+      if (url.includes("city=%E5%8C%97%E4%BA%AC")) return beijing;
+      return response({});
+    }));
+    const first: SceneIdentity = { profileId: "profile-a", runEpoch: "draft", platform: "boss" };
+    const second: SceneIdentity = { profileId: "profile-b", runEpoch: "draft", platform: "zhilian" };
+    const wrapper = mount(LocationPicker, {
+      props: { city: "上海", platform: "boss", modelValue: [], sceneIdentity: first },
+    });
+    await wrapper.get('[data-testid="city-chip-toggle"]').trigger("click");
+    await wrapper.setProps({ city: "北京", platform: "zhilian", sceneIdentity: second });
+    await wrapper.get('[data-testid="city-chip-toggle"]').trigger("click");
+
+    resolveBeijing(response(ZHILIAN_CATALOG));
+    await flushPromises();
+    expect(wrapper.text()).toContain("朝阳区");
+    resolveShanghai(response(BOSS_CATALOG));
+    await flushPromises();
+    expect(wrapper.text()).toContain("朝阳区");
+    expect(wrapper.text()).not.toContain("浦东新区");
   });
 });
 

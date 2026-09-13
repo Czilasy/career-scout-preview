@@ -39,6 +39,7 @@ class ScrapeOnlyStoreMixin:
         platform: str = "",
         profile_summary: str = "",
         profile_facts: dict | None = None,
+        profile_id: str | None = None,
     ) -> str:
         """Persist an undecided scrape result as a ``scraped_only`` snapshot.
 
@@ -68,9 +69,9 @@ class ScrapeOnlyStoreMixin:
                 " pending_count, processed_count, created_at, updated_at, started_at, "
                 " finished_at, search_params_json, execution_params_json, "
                 " profile_summary, total_scraped, total_kept, total_dropped, record_kind, "
-                " profile_facts_json) "
+                " profile_id, profile_facts_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "'result_snapshot', ?)",
+                "'result_snapshot', ?, ?)",
                 (
                     run_id,
                     platform,
@@ -89,6 +90,7 @@ class ScrapeOnlyStoreMixin:
                     len(jobs),
                     0,
                     0,
+                    str(profile_id) if profile_id else None,
                     profile_facts_json,
                 ),
             )
@@ -125,6 +127,7 @@ class ScrapeOnlyStoreMixin:
         profile_summary: str = "",
         profile_facts: dict | None = None,
         scrape_task_id: str = "",
+        profile_id: str | None = None,
         finished_at=None,
     ) -> str:
         """Rewrite one scraped-only round with AI screening output.
@@ -201,7 +204,7 @@ class ScrapeOnlyStoreMixin:
                 " pending_count = ?, processed_count = ?, profile_summary = ?, "
                 " profile_facts_json = ?, total_scraped = ?, total_kept = ?, "
                 " total_dropped = ?, source_count = ?, finished_at = ?, updated_at = ?, "
-                " archived_at = NULL "
+                " profile_id = ?, archived_at = NULL "
                 "WHERE id = ? AND record_kind = 'result_snapshot'",
                 (
                     str(status),
@@ -225,6 +228,7 @@ class ScrapeOnlyStoreMixin:
                     result.get("total_scraped", len(jobs)),
                     _to_iso_timestamp(finished_at) or _now(),
                     _now(),
+                    str(profile_id) if profile_id else None,
                     str(run_id),
                 ),
             )

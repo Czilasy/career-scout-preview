@@ -28,7 +28,8 @@ class StorePipelineResultsMixin:
 
     def save_pipeline_result(self, result: dict, script_params: dict, *,
                              started_at=None, finished_at=None, execution_config=None,
-                             status: str = "done", execution_params: dict | None = None) -> str:
+                             status: str = "done", execution_params: dict | None = None,
+                             profile_id: str | None = None) -> str:
         """Persist a complete or partial pipeline run result to the database.
 
         Creates a screening_runs row and one screening_results row per job
@@ -75,9 +76,9 @@ class StorePipelineResultsMixin:
                 " pending_count, processed_count, created_at, updated_at, started_at, "
                 " finished_at, search_params_json, execution_params_json, "
                 " profile_summary, total_scraped, total_kept, total_dropped, record_kind, "
-                " profile_facts_json) "
+                " profile_id, profile_facts_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "'result_snapshot', ?)",
+                "'result_snapshot', ?, ?)",
                 (
                     run_id,
                     str(script_params.get("platform") or result.get("platform") or "boss"),
@@ -99,6 +100,7 @@ class StorePipelineResultsMixin:
                     result.get("total_scraped", 0),
                     result.get("total_kept", 0),
                     result.get("total_dropped", len(dropped)),
+                    str(profile_id) if profile_id else None,
                     profile_facts_json,
                 ),
             )
@@ -195,7 +197,9 @@ class StorePipelineResultsMixin:
                 )
         return run_id
 
-    def load_latest_pipeline_result(self, run_id: str | None = None) -> dict | None:
+    def load_latest_pipeline_result(
+        self, run_id: str | None = None, *, profile_id: str | None = None,
+    ) -> dict | None:
         """Load the most recent successful pipeline run from the database.
 
         Returns a payload matching the old JSON file format:
@@ -204,15 +208,25 @@ class StorePipelineResultsMixin:
         """
         with self._connection() as conn:
             if run_id:
-                run = conn.execute(
+                query = (
                     "SELECT * FROM screening_runs WHERE id = ? "
-                    "AND record_kind = 'result_snapshot' LIMIT 1",
-                    (str(run_id),),
-                ).fetchone()
+                    "AND record_kind = 'result_snapshot'"
+                )
+                params: tuple = (str(run_id),)
+                if profile_id:
+                    # Spec041 收尾：无归属老数据对所有画像可见（老数据要能看见）；
+                    # 有归属的轮次仍严格按画像过滤。
+                    query += " AND (profile_id = ? OR profile_id IS NULL OR profile_id = '')"
+                    params += (str(profile_id),)
+                run = conn.execute(query + " LIMIT 1", params).fetchone()
             else:
+                query = "SELECT * FROM screening_runs WHERE " + _LATEST_RESULT_FILTER
+                params = ()
+                if profile_id:
+                    query += " AND (profile_id = ? OR profile_id IS NULL OR profile_id = '')"
+                    params = (str(profile_id),)
                 run = conn.execute(
-                    "SELECT * FROM screening_runs WHERE " + _LATEST_RESULT_FILTER + " "
-                    "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    query + " ORDER BY created_at DESC, rowid DESC LIMIT 1", params,
                 ).fetchone()
             if run is None:
                 return None
@@ -319,17 +333,25 @@ class StorePipelineResultsMixin:
             "total_kept": kept, "total_dropped": dropped,
         }
 
-    def load_latest_pipeline_result_for_platform(self, platform: str) -> dict | None:
+    def load_latest_pipeline_result_for_platform(
+        self, platform: str, *, profile_id: str | None = None,
+    ) -> dict | None:
         """T409: 按平台加载最近一次成功结果。
 
         与 load_latest_pipeline_result 共用 _build_pipeline_result_rows，
-        保证 verdict/caveats/tags/extra 等字段一致（刷新后结果不落“待确认”）。
+        保证 verdict/caveats/tags/extra 等字段一致（刷新后结果不落"待确认"）。
         """
         with self._connection() as conn:
+            query = (
+                "SELECT * FROM screening_runs WHERE platform=? AND "
+                + _LATEST_RESULT_FILTER
+            )
+            params: tuple = (str(platform),)
+            if profile_id:
+                query += " AND (profile_id = ? OR profile_id IS NULL OR profile_id = '')"
+                params += (str(profile_id),)
             run = conn.execute(
-                "SELECT * FROM screening_runs WHERE platform=? AND " + _LATEST_RESULT_FILTER + " "
-                "ORDER BY created_at DESC LIMIT 1",
-                (str(platform),),
+                query + " ORDER BY created_at DESC, rowid DESC LIMIT 1", params,
             ).fetchone()
             if run is None:
                 return None

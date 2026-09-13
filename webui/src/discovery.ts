@@ -102,6 +102,16 @@ export function shouldConfirmNationalScope(
   return hasKeyword && !hasCity;
 }
 
+/** 「全国」不是城市：不选城市就是全国范围，它不该作为城市名留在草稿里。 */
+export function isNationwideCityName(name: string): boolean {
+  return name.trim() === "全国";
+}
+
+/** 过滤掉「全国」哨兵，只保留真实城市。 */
+export function stripNationwideCities(cities: string[]): string[] {
+  return cities.filter((city) => !isNationwideCityName(city));
+}
+
 export function partitionPipelineResult(result: PipelineResult): PipelineGroups {
   const groups: PipelineGroups = {
     matched: [],

@@ -156,6 +156,36 @@ class LogApiTests(unittest.TestCase):
         self.assertNotIn("profile_dir", "\n".join(data["lines"]))
         self.assertNotIn("Cookie", "\n".join(data["lines"]))
 
+    def test_since_at_end_returns_empty_increment_not_tail_again(self):
+        """游标已到末尾时轮询必须返回空增量：重发尾部会让前端反复追加同一批行。"""
+        _write_log(self.log_dir, [f"line{i}" for i in range(1, 11)])
+        first = self.client.get("/api/logs?tail=5").get_json()
+        self.assertEqual(first["end"], 10)
+        resp = self.client.get(f"/api/logs?since={first['end']}&identity={first['identity']}")
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["lines"], [])
+        self.assertEqual(data["end"], 10)
+        self.assertEqual(data["total"], 10)
+
+    def test_task_log_since_at_end_returns_empty_increment(self):
+        """运行日志同一游标连轮询三次不得重复返回（真实验收：24 条事件渲染 360 行）。"""
+        task_id = "history-task-repeat"
+        store = self.app.config["TASK_STORE"]
+        for index in range(3):
+            store.append_task_event(task_id, "stage_start", {"stage": f"s{index}"})
+
+        first = self.client.get(f"/api/logs?tail=50&task_id={task_id}").get_json()
+        self.assertEqual(len(first["lines"]), 3)
+        self.assertEqual(first["end"], 3)
+
+        for _ in range(3):
+            data = self.client.get(
+                f"/api/logs?since={first['end']}&identity={first['identity']}&task_id={task_id}"
+            ).get_json()
+            self.assertEqual(data["lines"], [])
+            self.assertEqual(data["end"], 3)
+
     def test_task_id_with_since_uses_filtered_set(self):
         _write_log(self.log_dir, [
             "line-a-task-9",

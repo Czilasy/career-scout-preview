@@ -89,3 +89,33 @@
 - [ ] 场景五全部通过（分析中不锁 + 不误报）。
 - [ ] 场景六全部通过（第七类出现 + 一致）。
 - [ ] 既有功能回归无破坏（035 任务恢复、036/037 灵动岛、028 第七类判定）。
+
+## 走查记录（2026-09-13，Spec041 收尾返工）
+
+**结论：界面走查未执行，七个勾选项全部保持未勾选（未验证）。**
+
+原因：执行返工的环境没有真实平台登录（BOSS / 智联）与真实任务数据，无法按「真实用户操作路径」走查；
+按规则不以此前任务文字、其他 AI 自述或自动测试结果勾选。
+
+逐项状态：
+
+| 勾选项 | 状态 | 说明 |
+|---|---|---|
+| 场景一 · 切页/翻历史/刷新现场保留 | 未验证 | 需真实画像与轮次数据；身份稳定化与归档逻辑有聚焦单测（非界面走查） |
+| 场景二 · 三主体变才清 | 未验证 | 需真实画像切换操作 |
+| 场景三 · 灵动岛各态落点 + 硬红线 | 未验证 | 落点/占位/不清页有聚焦单测覆盖派生与桥接；真实点击未走查 |
+| 场景四 · 补抓/重抓不切页 | 未验证 | 需真实结果与补抓任务 |
+| 场景五 · 分析中不锁 + 不误报 | 未验证 | 需真实 AI 配置与简历分析 |
+| 场景六 · 第七类出现 + 一致 | 未验证 | 需真实抓取轮与结果页 |
+| 既有功能回归无破坏 | 未验证 | 仅跑了与本次返工直接相关的聚焦用例（见下） |
+
+本次返工实际执行的聚焦测试（**不能替代界面走查**）：
+
+- 前端（改动模块最小集）：`useDiscoverySceneState`、`useDiscoverySceneIdentity`、`useProfileInputScene`、
+  `useDiscoveryIslandBridge`、`useDiscoveryTasks`、`useDiscoveryResults`、`useDiscoveryWorkflow`、
+  `CollapsibleCard`、`JobWorkspace`、`LocationPicker`、`LogViewerDialog`、`useScreenRoundFlow`、
+  `useIslandNavigation`、`useResumeAnalysisFlow`、`DynamicIsland`、`IslandNoticePanel`、`App`、
+  `src/views/__tests__` 全部视图用例——均通过。
+- 前端静态类型检查：`npx vue-tsc --noEmit`——通过（未执行 `npm run build`，不产出构建产物）。
+- 后端：`uv run python -m unittest tests.webui_app.test_profile_isolation_contracts`——11 项通过。
+- **未执行**：后端全量回归、前端全量回归、完整构建（按本次返工的任务边界）。

@@ -75,6 +75,36 @@ let loadSeq = 0;
  */
 let viewIntentSeq = 0;
 
+/**
+ * Spec041：历史列表/详情/删除/归档都必须限定在当前求职画像，
+ * 且切画像时作废在飞请求、清空列表与详情，旧画像响应不得写回。
+ */
+let currentProfileId = "";
+
+function profileQuery(): string {
+  return currentProfileId
+    ? `?profile_id=${encodeURIComponent(currentProfileId)}`
+    : "";
+}
+
+/**
+ * 绑定当前求职画像；画像变化时立即换槽（清列表/详情并作废在飞请求）。
+ * 只做同步清场，不发请求：下次打开抽屉（show → loadHistory）时按新画像加载。
+ */
+export function setHistoryProfile(nextProfileId: string): void {
+  const next = String(nextProfileId || "").trim();
+  if (next === currentProfileId) return;
+  currentProfileId = next;
+  loadSeq += 1;
+  viewIntentSeq += 1;
+  state.items = [];
+  state.detail = null;
+  state.error = "";
+  state.loading = false;
+  state.detailLoading = false;
+  state.deleteTarget = null;
+}
+
 export function currentHistoryIntent(): number {
   return viewIntentSeq;
 }
@@ -96,7 +126,9 @@ async function loadHistory(options: { silent?: boolean } = {}): Promise<void> {
     state.error = "";
   }
   try {
-    const data = await apiRequest<{ ok: boolean; items?: HistoryRoundItem[] }>("/api/result-history");
+    const data = await apiRequest<{ ok: boolean; items?: HistoryRoundItem[] }>(
+      `/api/result-history${profileQuery()}`,
+    );
     if (seq !== loadSeq) return;
     state.items = data.items || [];
     state.error = "";
@@ -127,7 +159,9 @@ async function openRound(runId: string): Promise<void> {
   // 不在这里清空 detail：切换轮次不是「回到最新」，清空会被当成回最新
   // 而触发另一条异步加载，两条加载赛跑，谁后到谁定画面。
   try {
-    const detail = await apiRequest<HistoryRoundDetail>(`/api/result-history/${encodeURIComponent(runId)}`);
+    const detail = await apiRequest<HistoryRoundDetail>(
+      `/api/result-history/${encodeURIComponent(runId)}${profileQuery()}`,
+    );
     if (intent !== viewIntentSeq) return;  // 期间又点了别的轮次：丢弃本次结果
     state.detail = detail;
     state.open = false;
@@ -158,9 +192,10 @@ async function deleteRound(item: HistoryRoundItem): Promise<void> {
   if (state.deleting) return;
   state.deleting = true;
   try {
-    await apiRequest<{ ok: boolean }>(`/api/result-history/${encodeURIComponent(item.run_id)}`, {
-      method: "DELETE",
-    });
+    await apiRequest<{ ok: boolean }>(
+      `/api/result-history/${encodeURIComponent(item.run_id)}${profileQuery()}`,
+      { method: "DELETE" },
+    );
     if (state.detail?.source_run_id === item.run_id) {
       backToLatest();
     }
@@ -174,11 +209,14 @@ async function deleteRound(item: HistoryRoundItem): Promise<void> {
   }
 }
 
-/** 归档所有当前结果（BOSS 与智联），保留为历史轮次。 */
+/** 归档当前画像的当前结果（BOSS 与智联），保留为历史轮次。 */
 async function archiveAllCurrentResults(): Promise<string[]> {
   const data = await apiRequest<{ ok: boolean; archived_run_ids?: string[] }>(
     "/api/result-history/archive-latest",
-    { method: "POST" },
+    {
+      method: "POST",
+      json: { profile_id: currentProfileId },
+    },
   );
   await loadHistory();
   return data.archived_run_ids || [];
@@ -196,5 +234,6 @@ export function useResultHistory() {
     cancelDelete,
     deleteRound,
     archiveAllCurrentResults,
+    setProfile: setHistoryProfile,
   };
 }

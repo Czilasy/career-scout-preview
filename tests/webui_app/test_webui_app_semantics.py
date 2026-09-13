@@ -49,7 +49,7 @@ class LatestPipelineResultQueryTests(unittest.TestCase):
             pass
 
     def _save_result_snapshot(self, run_id, platform="boss",
-                               status="done"):
+                               status="done", profile_id=None):
         """保存一个 result_snapshot 记录。"""
         with self.store._connection() as conn:
             conn.execute(
@@ -57,12 +57,12 @@ class LatestPipelineResultQueryTests(unittest.TestCase):
                 "(id, platform, status, record_kind, frozen_filters_json, "
                 "source_count, match_count, mismatch_count, "
                 "total_scraped, total_kept, total_dropped, "
-                "execution_params_json, profile_summary, "
+                "execution_params_json, profile_summary, profile_id, "
                 "created_at, updated_at, started_at, finished_at) "
                 "VALUES (?, ?, ?, 'result_snapshot', '{}', "
-                "0, 0, 0, 0, 0, 0, '{}', '', "
+                "0, 0, 0, 0, 0, 0, '{}', '', ?, "
                 "datetime('now'), datetime('now'), NULL, NULL)",
-                (str(run_id), str(platform), str(status)),
+                (str(run_id), str(platform), str(status), profile_id),
             )
 
     def test_global_latest_returns_most_recent(self):
@@ -90,6 +90,24 @@ class LatestPipelineResultQueryTests(unittest.TestCase):
         self.assertTrue(data["has_result"])
         self.assertEqual(data.get("source_run_id"), "run_001")
         self.assertEqual(data.get("platform"), "boss")
+
+    def test_query_by_profile_returns_only_that_profiles_latest_round(self):
+        """profile_id 不得只用于装饰岗位状态，还必须约束结果轮归属。"""
+        self._save_result_snapshot("run_profile_a", "boss", profile_id="profile-a")
+        self._save_result_snapshot("run_profile_b", "boss", profile_id="profile-b")
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE screening_runs SET created_at=? WHERE id=?",
+                ("2099-01-01T00:00:00+08:00", "run_profile_b"),
+            )
+
+        resp = self.client.get(
+            "/api/latest-pipeline-result?platform=boss&profile_id=profile-a")
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["has_result"])
+        self.assertEqual(data.get("source_run_id"), "run_profile_a")
 
     def test_query_by_run_id_returns_exact(self):
         """T409: run_id 查询返回精确结果。"""

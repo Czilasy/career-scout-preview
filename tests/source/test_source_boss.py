@@ -1317,7 +1317,8 @@ class BossCdpSourcePreflightTests(_LoginCacheIsolated):
                 mock.patch.object(boss, "check_login_state_tri", return_value="unknown") as m:
             outcome = source.preflight()
         self.assertFalse(outcome.ok)
-        self.assertEqual(outcome.failed_code, "source_cdp_unavailable")
+        # 「无法判定」如实报「暂时无法确认平台状态」，不冒充「连不上浏览器」。
+        self.assertEqual(outcome.failed_code, "source_status_unclear")
         self.assertEqual(m.call_count, 2)
         self.assertIn("probe_unknown", outcome.safe_log)
 
@@ -1328,7 +1329,8 @@ class BossCdpSourcePreflightTests(_LoginCacheIsolated):
                 boss, "check_login_state_tri", return_value="unknown") as m:
             outcome = source.recheck_login()
         self.assertFalse(outcome.ok)
-        self.assertEqual(outcome.failed_code, "source_cdp_unavailable")
+        # 同上：复核没结论是「状态无法确认」，不是「连不上浏览器」。
+        self.assertEqual(outcome.failed_code, "source_status_unclear")
         self.assertEqual(m.call_count, 2)
 
     def test_unknown_then_logged_in_succeeds(self):

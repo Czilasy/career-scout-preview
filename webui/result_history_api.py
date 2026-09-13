@@ -1,4 +1,8 @@
-"""HTTP routes for multi-round result history."""
+"""HTTP routes for multi-round result history.
+
+Spec041：历史列表/详情/删除/归档支持并校验 profile_id 归属；
+真实 UI 调用一律带画像，避免跨画像读取、删除或归档。
+"""
 
 from __future__ import annotations
 
@@ -17,13 +21,17 @@ def register_result_history_routes(app, store) -> None:
     """Register history routes on the Flask app."""
     service = ResultHistoryService(store)
 
+    def _profile_id_arg() -> str | None:
+        value = str(request.args.get("profile_id", "")).strip()
+        return value or None
+
     @app.route("/api/result-history", methods=["GET"])
     def result_history_list():
         platform = str(request.args.get("platform", "")).strip() or None
         if platform is not None and platform not in _PLATFORMS:
             return _error("invalid_platform", "平台必须是 boss 或 zhilian", 400)
         try:
-            items = service.list_history(platform)
+            items = service.list_history(platform, _profile_id_arg())
         except Exception:
             return _error("persistence_failed", "历史列表读取失败", 500)
         return jsonify({"ok": True, "items": items})
@@ -31,7 +39,7 @@ def register_result_history_routes(app, store) -> None:
     @app.route("/api/result-history/<run_id>", methods=["GET"])
     def result_history_detail(run_id: str):
         try:
-            payload = service.get_round(str(run_id))
+            payload = service.get_round(str(run_id), _profile_id_arg())
         except Exception:
             return _error("persistence_failed", "历史轮次读取失败", 500)
         if payload is None:
@@ -40,8 +48,12 @@ def register_result_history_routes(app, store) -> None:
 
     @app.route("/api/result-history/archive-latest", methods=["POST"])
     def result_history_archive_all_current():
+        body = request.get_json(silent=True)
+        profile_id = ""
+        if isinstance(body, dict):
+            profile_id = str(body.get("profile_id") or "").strip()
         try:
-            run_ids = service.archive_all_current_results()
+            run_ids = service.archive_all_current_results(profile_id or None)
         except Exception:
             return _error("persistence_failed", "归档失败", 500)
         return jsonify({"ok": True, "archived_run_ids": run_ids})
@@ -49,7 +61,7 @@ def register_result_history_routes(app, store) -> None:
     @app.route("/api/result-history/<run_id>", methods=["DELETE"])
     def result_history_delete(run_id: str):
         try:
-            deleted = service.delete_round(str(run_id))
+            deleted = service.delete_round(str(run_id), _profile_id_arg())
         except Exception:
             return _error("persistence_failed", "删除失败", 500)
         if not deleted:

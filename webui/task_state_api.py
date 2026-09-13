@@ -37,6 +37,29 @@ from webui.logging_setup import get_logger
 
 _logger = get_logger(__name__)
 
+_RESUME_ANALYSIS_KIND = "resume_analysis"
+
+
+def _resume_analysis_state_payload(run_id: str, task: dict) -> dict:
+    """简历分析任务的轻量状态：只报本任务事实，不套筛选白箱完整性逻辑。"""
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "kind": _RESUME_ANALYSIS_KIND,
+        "status": str(task.get("status") or "running"),
+        "stage": "",
+        "progress": dict(task.get("progress") or {}),
+        "logs": list((task.get("logs") or [])[-LOG_TAIL_LINES:]),
+        "error": str(task.get("error") or ""),
+        "result": task.get("result"),
+        "platform": task.get("platform"),
+        "profile_id": task.get("profile_id"),
+        "started_at": _iso_epoch_ms(task.get("started_at")),
+        "finished_at": _iso_epoch_ms(task.get("finished_at")),
+        "integrity": None,
+    }
+
+
 def register_task_state_routes(app, ctx):
     @app.route("/api/runs/<run_id>/diagnostics")
     def run_diagnostics(run_id: str):
@@ -83,8 +106,28 @@ def register_task_state_routes(app, ctx):
         )
         from webui.pipeline_exec_status import user_visible_failure_reason
 
+        # Spec041 返工：任务状态按画像归属校验——内存任务与 DB 记录（含结果快照轮）
+        # 都查。带画像时读不到别的画像的任务；无归属的老任务（画像功能之前的记录）
+        # 对所有画像可见，与历史结果"老数据保留"口径一致；不带画像的查询保留为
+        # 兼容口径（产品前端一律携带画像）。
+        profile_filter = str(request.args.get("profile_id") or "").strip()
+
+        def _profile_mismatch(owner: object) -> bool:
+            owner_id = str(owner or "").strip()
+            return bool(profile_filter) and bool(owner_id) and owner_id != profile_filter
+
+        def _not_found():
+            # 与"任务不存在"同响应：不泄漏另一画像是否存在该任务。
+            return jsonify({"ok": False, "error": "run_not_found"}), 404
+
         with ctx.lock:
             task = ctx.tasks.get(run_id)
+            if task is not None and _profile_mismatch(task.get("profile_id")):
+                return _not_found()
+            if task is not None and task.get("kind") == _RESUME_ANALYSIS_KIND:
+                # 简历分析不属于抓取/筛选 pipeline：直接返回自身状态与结果，
+                # 不去查白箱证据，也不会被筛选口径改写成待确认。
+                return jsonify(_resume_analysis_state_payload(run_id, task))
             if task is not None:
                 # T405: 内存 task 与 DB run 身份一致性校验
                 _, conflict = ctx.check_run_identity_conflict(run_id, task)
@@ -108,6 +151,8 @@ def register_task_state_routes(app, ctx):
             else:
                 live = None
         run = ctx.store.get_screening_run(run_id)
+        if run is not None and _profile_mismatch(run.get("profile_id")):
+            return _not_found()
         if run is None and live is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
         integrity = None

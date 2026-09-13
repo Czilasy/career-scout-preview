@@ -225,6 +225,17 @@ def register_ai_screen_routes(app, ctx):
             }), 503
         if prev is not None:
             resume_from_run_id = prev["id"]
+        # Spec041：AI 筛选任务继承画像身份（续跑取被续跑 run，新建取父抓取 run）。
+        task_profile_id = ""
+        if prev is not None:
+            task_profile_id = str(prev.get("profile_id") or "")
+        if not task_profile_id:
+            try:
+                _parent_run_row = ctx.store.get_screening_run(scrape_task_id)
+            except ctx.operational_errors:
+                _parent_run_row = None
+            task_profile_id = str((_parent_run_row or {}).get("profile_id") or "")
+        task_profile_id = task_profile_id or None
         candidate_base = dict(prev or {})
         candidate_base.update({
             "kind": "ai_screen",
@@ -307,6 +318,7 @@ def register_ai_screen_routes(app, ctx):
         if resume_from_run_id:
             claimed_task["resumed_from"] = resume_from_run_id
         claimed_task.update(parent_identity)
+        claimed_task["profile_id"] = task_profile_id
         # 030：新建路径把创建时全局当前账号随任务透传给 runner 落库为快照
         # （runner 的 INSERT OR REPLACE 会覆盖 API 预建行，快照必须随之写入）
         claimed_task["active_account_at_freeze"] = ctx.account_for_run()
@@ -340,6 +352,7 @@ def register_ai_screen_routes(app, ctx):
                     task_id,
                     frozen_filters=screening_fields,
                     source_count=0,
+                    profile_id=task_profile_id,
                     execution_params={
                         "platform": parent_platform,
                         "filter_schema_version": filter_schema_version,

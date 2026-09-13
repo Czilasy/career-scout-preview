@@ -25,7 +25,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
     async (platform) => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/latest-running-task") {
+      if (url.startsWith("/api/latest-running-task")) {
         return response({
           ok: true,
           has_task: true,
@@ -39,7 +39,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
           version_match: true,
         });
       }
-      if (url === "/api/task-state/recrawl-original") {
+      if (url.split("?")[0] === "/api/task-state/recrawl-original") {
         return response({
           status: "paused",
           stage: "recrawl_fetch_jd",
@@ -69,7 +69,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
           result: { jobs: [], total_scraped: 2, total_kept: 2, total_dropped: 0 },
         });
       }
-      if (url === "/api/task-state/recrawl-original") {
+      if (url.split("?")[0] === "/api/task-state/recrawl-original") {
         return response({ status: "paused", progress: {}, logs: [], error: "触发验证码" });
       }
       if (url.startsWith("/api/latest-pipeline-result")) {
@@ -133,7 +133,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
   it("starts bulk recrawl with the persisted source run id", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/latest-running-task") {
+      if (url.startsWith("/api/latest-running-task")) {
         return response({ ok: true, has_task: false });
       }
       if (url.startsWith("/api/latest-pipeline-result")) {
@@ -156,7 +156,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
       if (url === "/api/pipeline/recrawl") {
         return response({ ok: true, task_id: "recrawl-42" }, 202);
       }
-      if (url === "/api/task-state/recrawl-42") {
+      if (url.split("?")[0] === "/api/task-state/recrawl-42") {
         return response({ status: "paused", progress: {}, logs: [], error: "验证码" });
       }
       if (url === "/api/version") {
@@ -191,7 +191,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
   it("returns to results without dead recrawl controls when startup is rejected", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/latest-running-task") {
+      if (url.startsWith("/api/latest-running-task")) {
         return response({ ok: true, has_task: false });
       }
       if (url.startsWith("/api/latest-pipeline-result")) {
@@ -250,7 +250,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
   it("starts a single JD retry as a resumable task with source identity", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/latest-running-task") return response({ ok: true, has_task: false });
+      if (url.startsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
       if (url.startsWith("/api/latest-pipeline-result")) {
         return response({
           ok: true, has_result: true, source_run_id: "result-run-43",
@@ -263,7 +263,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
       if (url === "/api/pipeline/jobs/pending-1/jd") {
         return response({ ok: true, task_id: "single-retry-1", single_retry: true }, 202);
       }
-      if (url === "/api/task-state/single-retry-1") {
+      if (url.split("?")[0] === "/api/task-state/single-retry-1") {
         return response({ status: "paused", progress: {}, logs: [], error: "触发验证码" });
       }
       if (url === "/api/version") {
@@ -290,6 +290,10 @@ describe("DiscoveryView paused recrawl recovery", () => {
     expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({
       source_run_id: "result-run-43",
     });
+    expect(wrapper.get(".results-stage").isVisible()).toBe(true);
+    const screenStage = wrapper.findAll(".workflow-stack")
+      .find((section) => section.text().includes("确认筛选条件"));
+    expect(screenStage?.isVisible()).toBe(false);
     expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("触发验证码");
     expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/search-progress")))
       .toBe(false);

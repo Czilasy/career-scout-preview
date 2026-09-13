@@ -70,7 +70,7 @@ class StoreProfilesMixin:
             rows = conn.execute("SELECT * FROM candidate_profiles ORDER BY created_at ASC").fetchall()
         return [self._profile_row(row) for row in rows]
 
-    def update_profile(self, profile_id, name=None, confirmed_fields=None, ai_preference=None, resume_id=None):
+    def update_profile(self, profile_id, name=None, confirmed_fields=None, ai_preference=None, resume_id=None, page2_draft=None):
         current = self.get_profile(profile_id)
         ts = _now()
         new_name = name.strip() if name else current["name"]
@@ -79,10 +79,12 @@ class StoreProfilesMixin:
         fields = confirmed_fields if confirmed_fields is not None else current["confirmed_fields"]
         pref = ai_preference if ai_preference is not None else current["ai_preference"]
         rid = resume_id if resume_id is not None else current["resume_id"]
+        # 第 2 页输入（关键词/城市/画像文本）：随画像一起存，供"回到第 2 页、切平台复用"。
+        draft = page2_draft if page2_draft is not None else current.get("page2_draft") or {}
         with self._connection() as conn:
             conn.execute(
-                "UPDATE candidate_profiles SET name = ?, confirmed_fields_json = ?, ai_preference_json = ?, resume_id = ?, updated_at = ? WHERE id = ?",
-                (new_name, json.dumps(fields, ensure_ascii=False), json.dumps(pref, ensure_ascii=False), rid, ts, str(profile_id)),
+                "UPDATE candidate_profiles SET name = ?, confirmed_fields_json = ?, ai_preference_json = ?, resume_id = ?, page2_draft_json = ?, updated_at = ? WHERE id = ?",
+                (new_name, json.dumps(fields, ensure_ascii=False), json.dumps(pref, ensure_ascii=False), rid, json.dumps(draft, ensure_ascii=False), ts, str(profile_id)),
             )
         return self.get_profile(profile_id)
 
@@ -120,12 +122,18 @@ class StoreProfilesMixin:
         return {"deleted": True, "resume_ids": resume_ids}
 
     def _profile_row(self, row) -> dict:
+        keys = set(row.keys())
         return {
             "id": row["id"],
             "name": row["name"],
             "confirmed_fields": json.loads(row["confirmed_fields_json"] or "{}"),
             "ai_preference": json.loads(row["ai_preference_json"] or "{}"),
             "resume_id": row["resume_id"],
+            # 第 2 页输入（迁移 034 之前的老库没有这一列，按空对象容错）。
+            "page2_draft": (
+                json.loads(row["page2_draft_json"] or "{}")
+                if "page2_draft_json" in keys else {}
+            ),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

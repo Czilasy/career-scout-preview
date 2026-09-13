@@ -117,6 +117,45 @@ components (JobWorkspace/LocationPicker/DynamicIsland/CollapsibleCard) → compo
 
 **Follow-up（不在本 Spec 内执行，登记为方向）**：`DiscoveryView.vue` 与 `useDiscoveryState.ts` 拆分应单独立项 Spec（符合宪法原则 IV「拆分必须单独建立 Spec」）；本 Spec 落地时顺手做零引用盘点确认无孤儿，并在收尾更新模块地图。
 
+## 返工修订（2026-09-13）
+
+> 触发：静态审查发现实现与 Spec 不一致（现场身份不稳定、运行日志跨画像取任务、task-state 无画像校验、
+> 画像框高度空壳字段、文件规模违约、验收记录矛盾）。本次返工改实现与工件，不改冻结需求。
+
+### 现场身份（FR-004/FR-005 的实现修订）
+
+- 原实现用 `pipelineResultRunId || screenTaskId || scrapeTaskId || "draft"` 充当 `runEpoch`：同一轮会随
+  阶段推进换键（draft → 抓取任务号 → 筛选任务号 → 结果 run id），组件把「任务推进」当成「换了新现场」，
+  于是恢复成默认空现场——即使已用 `v-show`，卡片展开、滚动、城市面板、选中与详情的现场仍会丢。
+- 现实现：轮次身份由 `useDiscoverySceneState` 生成一次并写入会话存档
+  （`career-scout-round-epoch:<profileId>`），跨刷新稳定；只有切画像、开新一轮（`rotateRoundEpoch`）、
+  切平台才换身份；开新一轮先 `archiveCurrentForNewRound(旧身份, 结果 run id)` 归档再换发新身份。
+- 新增 `useDiscoverySceneIdentity.ts`（身份派生 + 结果 run id 登记）、`useProfileInputScene.ts`
+  （画像框高度现场，字段真正接通）、`useDiscoveryIslandBridge.ts`（灵动岛落点桥接，自
+  `useDiscoveryState.ts` 外迁）、`useDiscoveryLogViewer.ts`（历史轮日志对话框现场）。
+
+### 画像隔离（FR-006/FR-007 的补口）
+
+- `LogViewerDialog` 增 `profileId`；运行日志查询改为 `/api/latest-running-task?profile_id=`；
+  `App.vue → AppSettingsMenu → LogViewerDialog` 全链传当前画像；切画像关窗并清任务号/日志/轮询。
+- `/api/task-state/<run_id>` 支持 `profile_id` 校验（内存任务 + DB 结果轮）；跨画像按「不存在」处理
+  （404 `run_not_found`，不泄漏存在性）；无归属老任务对所有画像可见（与历史结果同一兼容口径）；
+  不带画像的查询保留为兼容口径，产品前端调用一律携带画像。
+
+### 行数门禁实测（诚实记录，未达标）
+
+| 文件 | plan 基线 | 返工前 | 返工后 | 结论 |
+|---|---|---|---|---|
+| `webui/src/views/DiscoveryView.vue` | 1215（超红线） | 1200 | 1200 | 回到红线内（=1200，未突破） |
+| `webui/src/composables/useDiscoveryState.ts` | 1328（超红线） | 1467 | 1418 | **仍超线且未净减**（比基线多 90 行） |
+
+- 返工把 Spec041 新增的灵动岛导航桥接整体外迁，`useDiscoveryState.ts` 比返工前减 49 行；但相对 plan
+  基线仍是净增，「现场 ref 外置后净减」**未达成**。该文件拆分需单独立项 Spec（宪法原则 IV），
+  本 Spec 记为未完成项，不宣称目标达成、不在本文件内继续追加逻辑。
+- 新增/外迁模块行数：`useDiscoverySceneState.ts` 428（含轮次身份，超出原估 ~280）、
+  `useDiscoveryIslandBridge.ts` 81、`useDiscoverySceneIdentity.ts` 50、`useProfileInputScene.ts` 40、
+  `useDiscoveryLogViewer.ts` 35。
+
 ## Verification Gate
 
 *GATE: Must be completed before `/speckit-tasks`.*

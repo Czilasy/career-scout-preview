@@ -8,6 +8,8 @@ const props = defineProps<{
   hasUpdate: boolean;
   updateVersion: string;
   checking?: boolean;
+  /** Spec041 返工：当前求职画像；设置菜单里的「运行日志」只查本画像任务。 */
+  profileId?: string;
 }>();
 
 const emit = defineEmits<{
@@ -126,7 +128,11 @@ onBeforeUnmount(() => {
       </button>
     </div>
   </Transition>
-  <LogViewerDialog :open="logsOpen" @close="logsOpen = false" />
+  <LogViewerDialog
+    :open="logsOpen"
+    :profile-id="props.profileId || ''"
+    @close="logsOpen = false"
+  />
 </template>
 
 <style scoped>

@@ -11,14 +11,19 @@
 ```typescript
 interface SceneIdentity {
   profileId: string;       // 求职画像 ID（切画像 → 清）
-  runEpoch: string;        // 轮次标识（开新轮 → 旧轮降级、新轮清）
+  runEpoch: string;        // 轮次标识（开新轮 → 换发；跨刷新从会话存档取回同一值）
   platform: Platform;      // 平台（切平台 → 隔离）
 }
 ```
 
 - 身份键序列化：`<profileId>::<runEpoch>::<platform>`。
-- 三主体变更场景（spec FR-005/FR-006/FR-007/FR-008）：切画像清旧画像一切、开新轮旧轮降级（其查看现场保留）新轮回默认、切平台草稿隔离。
-- 其他场景（切页/翻历史/刷新/后台跑完冒泡）身份不变 → 不清。
+- **轮次标识来源（返工修订）**：`runEpoch` 是业务轮次的稳定标识，由现场存档生成一次并持久化
+  （`career-scout-round-epoch:<profileId>`）；同一轮从上传、抓取、筛选到结果完成期间不变。
+  禁止用抓取/筛选/补抓任务号或结果 `source_run_id` 充当轮次身份——它们随阶段推进变化，
+  会把"任务推进"误判成"换了新现场"并恢复成默认空现场。
+- 三主体变更场景（spec FR-005/FR-006/FR-007/FR-008）：切画像清旧画像一切、开新轮旧轮降级
+  （其查看现场保留）新轮回默认、切平台草稿隔离。
+- 其他场景（切页/翻历史/刷新/后台跑完冒泡/灵动岛跳转/任务阶段推进）身份不变 → 不清。
 
 ### 2. 页面内现场（SceneSnapshot）
 
@@ -28,6 +33,8 @@ interface SceneIdentity {
 interface PageScene {
   // 页面二（search）
   profileInputHeight: number | null;        // 画像框已撑开高度
+  profileInputWidth: number | null;         // 算出该高度时的输入框宽度（宽度变即重算）
+  profileInputContent: string;              // 算出该高度时的文本内容（内容变即重算）
   cityPanels: Record<string, CityPanelScene>; // 按城市名的区县面板现场
   cardScrollTops: Record<string, number>;    // 折叠卡片滚动位置
 
@@ -54,19 +61,14 @@ interface SceneSnapshot {
 }
 ```
 
-### 3. 历史轮查看现场（HistoryViewScene）
+### 3. 历史轮查看现场
 
 历史轮次的轻量查看状态，只存实际翻过的轮次（spec FR-002/Assumptions 懒存）。
 
-```typescript
-interface HistoryViewScene {
-  runId: string;
-  scrollTops: Record<string, number>;        // 列表滚动
-  selectedJobKey: string | null;             // 选中
-  detailOpen: boolean;                       // 详情开合
-  // 无 listFilterDraft——历史轮无未确认草稿，只展示已定筛选状态（spec FR-002）
-}
-```
+- **复用 `PageScene` 结构**（返工修订：不再单独定义 `HistoryViewScene` 类型——原类型无任何调用方，
+  属零引用死代码）：历史轮现场同样落 `PageScene`，只是写入时把 `listFilterDraft` 归零——
+  历史轮无未确认草稿，只展示已定筛选状态（spec FR-002）。
+- 存档键：`history[结果 run id]`；开新轮归档与历史轮浏览共用同一键空间。
 
 ### 4. 灵动岛落点目标（IslandNavTarget）
 
@@ -116,7 +118,8 @@ interface ResumeAnalysisState {
 
 身份变（切画像/开新轮/切平台）
   → 切画像：清 current + 清 history + 清城市草稿（新画像干净态）
-  → 开新轮：current 降级为 history[旧runId]（保留查看现场），new current 回默认
+  → 开新轮：current 降级为 history[结果 run id]（保留查看现场），再换发新轮次身份，
+    new current 回默认
   → 切平台：按平台键隔离（不互串）
 ```
 
@@ -135,6 +138,8 @@ interface ResumeAnalysisState {
 ### sessionStorage（复用既有通道）
 
 - key：`career-scout-workflow:<profileId>`（既有，扩展纳入 PageScene）。
+- 现场载荷：`pageScene = { version: 2, current, history, runIds }`；`runIds` 是「轮次身份 → 该轮结果 run id」映射，供开新轮归档到历史轮键。
+- 轮次身份单独存档：`career-scout-round-epoch:<profileId>`（返工修订），保证刷新后接回同一轮次身份。
 - 版本号：`WORKFLOW_STATE_VERSION` 既有 =1，本 Spec 升至 =2（现场字段新增）。
 - 防完成态误恢复：沿用 `isCompletedWorkflowSnapshot`（useDiscoveryWorkflow L29-41）。
 - 只持久化「轮次级」现场（keywords/cityText/filterValues/profileSummary 既有 + PageScene 新增）；纯 DOM 滚动用内存态（刷新后从 sessionStorage 的 listScrollTop 恢复，精度可接受）。

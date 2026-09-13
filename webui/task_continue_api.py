@@ -36,12 +36,50 @@ from webui.task_pause_support import (
     continue_task_kind,
     normalize_recoverable_failed_run,
     scrape_checkpoint,
+    scrape_completion_evidence,
 )
 from webui.task_runners import _iso_epoch_ms
 from webui.logging_setup import get_logger
 from webui.task_event_audit import append_task_event_best_effort
 
 _logger = get_logger(__name__)
+
+#: 结束保存等待"当前 JD 批次"收尾的上限：单批 15~30 条 × 8~15 秒 + 余量。
+_FINISH_BATCH_WAIT_TIMEOUT_S = 15 * 60
+#: 批内信号清除发生在批次结果合并/断点落盘之前，清标记后再给一拍余量。
+_FINISH_BATCH_SETTLE_GRACE_S = 1.5
+#: 收尾区守卫：worker 正在写终态时的等待上限（收尾通常毫秒级，超时即回执）。
+_FINALIZE_WAIT_TIMEOUT_S = 5.0
+
+
+def _jd_batch_active(ctx, task_id: str) -> bool:
+    """该任务的实时进度是否正处于 JD 抓取批次内（批内信号由 runner 上报）。"""
+    with ctx.lock:
+        task = ctx.tasks.get(task_id)
+        progress = dict((task or {}).get("progress") or {})
+    if str(progress.get("stage") or "") not in ("fetch_jd", "jd_detail"):
+        return False
+    batch = progress.get("jd_batch")
+    return isinstance(batch, dict) and bool(batch)
+
+
+def _wait_for_jd_batch_settle(ctx, task_id: str) -> bool:
+    """结束保存前等当前 JD 批次返回并落盘；返回是否真的等待过。
+
+    批次结果在 ``fetch_job_details`` 返回后才写入 JD 断点，直接结束保存会把
+    这一整批已抓内容丢掉。停止信号已提前下达，批次返回后不再开新批，等待
+    是协作式的，不会无限拖住（有上限）。
+    """
+    if not _jd_batch_active(ctx, task_id):
+        return False
+    deadline = time.monotonic() + _FINISH_BATCH_WAIT_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if not _jd_batch_active(ctx, task_id):
+            break
+        time.sleep(0.5)
+    time.sleep(_FINISH_BATCH_SETTLE_GRACE_S)
+    return True
+
 
 def register_task_continue_routes(app, ctx):
     def _build_partial_pipeline_result(
@@ -171,6 +209,28 @@ def register_task_continue_routes(app, ctx):
         # continuation order is deliberately identity -> fresh CDP/login
         # check -> strict checkpoint read -> durable commit -> dispatch.
         continue_kind = continue_task_kind(ctx, run_id, run)
+        if continue_kind == "scrape" and scrape_completion_evidence(ctx, run_id):
+            # 收尾族：任务其实已完整完成（旧收尾竞态把它误写成 paused），
+            # 按事实定稿为完成并明确答复，不再去连已关闭的浏览器。
+            try:
+                ctx.store.settle_paused_run_as_completed(
+                    run_id,
+                    processed_count=int(run.get("processed_count") or 0),
+                    source_count=int(run.get("source_count") or 0),
+                    current_stage="scrape",
+                )
+            except ctx.operational_errors:
+                pass
+            with ctx.lock:
+                _settled_task = ctx.tasks.get(run_id)
+                if _settled_task is not None:
+                    _settled_task["status"] = "done"
+                    _settled_task["error"] = ""
+            return jsonify({
+                "ok": False, "error": "already_completed",
+                "status": "completed",
+                "message": "任务已完整完成，无需继续",
+            }), 409
         if run.get("status") == "failed":
             run = normalize_recoverable_failed_run(ctx, run)
         # Reject stale/repeated requests before binding or persisting a new
@@ -370,6 +430,8 @@ def register_task_continue_routes(app, ctx):
             }), 409
         claimed_task["source_task_id"] = scrape_task_id
         claimed_task["resumed_from"] = run_id
+        # Spec041：续跑任务继承被续跑 run 的画像身份。
+        claimed_task["profile_id"] = str(run.get("profile_id") or "") or None
         resume_params = dict(run.get("execution_params") or {})
         claimed_task["platform"] = identity["platform"]
         claimed_task["cdp_port"] = identity.get("cdp_port")
@@ -470,6 +532,20 @@ def register_task_continue_routes(app, ctx):
     @app.route("/api/task/cancel/<run_id>", methods=["POST"])
     def api_task_cancel(run_id: str):
         """FR-024：取消任务，保留已有结果，不自动恢复。"""
+        # 收尾族：worker 正在写终态时先等它定稿（通常毫秒级），再按真实状态
+        # 处理——已完成的任务不该被改写成「已取消」。
+        _finalize_deadline = time.monotonic() + _FINALIZE_WAIT_TIMEOUT_S
+        while True:
+            with ctx.lock:
+                _live_task = ctx.tasks.get(run_id)
+            if _live_task is None or not _live_task.get("finalizing"):
+                break
+            if time.monotonic() >= _finalize_deadline:
+                return jsonify({
+                    "ok": True, "run_id": run_id, "status": "finalizing",
+                    "message": "任务正在收尾，取消未执行",
+                }), 200
+            time.sleep(0.05)
         with ctx.lock:
             task = ctx.tasks.get(run_id)
             if task is not None and task.get("status") in {
@@ -585,6 +661,23 @@ def register_task_continue_routes(app, ctx):
         run = ctx.store.get_screening_run(run_id)
         if run is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
+        # 收尾族：worker 正在写终态时先等它定稿，再按真实状态判断——已完成的
+        # 任务不生成假的部分快照（旧行为会把成功轮结果顶成旧快照）。
+        _finalize_deadline = time.monotonic() + _FINALIZE_WAIT_TIMEOUT_S
+        while True:
+            with ctx.lock:
+                _live_task = ctx.tasks.get(run_id)
+            if _live_task is None or not _live_task.get("finalizing"):
+                break
+            if time.monotonic() >= _finalize_deadline:
+                return jsonify({
+                    "ok": False, "error": "finalizing",
+                    "message": "任务正在收尾，请稍候重试",
+                }), 409
+            time.sleep(0.05)
+        run = ctx.store.get_screening_run(run_id)
+        if run is None:
+            return jsonify({"ok": False, "error": "run_not_found"}), 404
         interruption_kind = run.get("interruption_kind") or ""
         if run["status"] == "interrupted" and run.get("error_code") == "user_finished":
             return jsonify({
@@ -659,6 +752,17 @@ def register_task_continue_routes(app, ctx):
                     time.sleep(0.05)
                 if flush_lock.acquire(timeout=3.0):
                     flush_lock.release()
+        # 结束保存：先把停止信号交给本任务，再按需等当前 JD 批次收尾——批次
+        # 结果会在返回后落进断点，等它落盘再取快照，数据更全（wait_for_batch）。
+        with ctx.lock:
+            own_task = ctx.tasks.get(run_id)
+            own_stop_event = own_task.get("stop_event") if own_task is not None else None
+        if own_stop_event is not None:
+            request_stop(own_task, own_stop_event, STOP_MODE_FINISH)
+        wait_for_batch = bool(
+            (request.get_json(silent=True) or {}).get("wait_for_batch")
+        )
+        waited_for_batch = _wait_for_jd_batch_settle(ctx, run_id) if wait_for_batch else False
         if scrape_task_id:
             try:
                 source_jobs = ctx.store.load_scrape_run_jobs(scrape_task_id)
@@ -810,6 +914,7 @@ def register_task_continue_routes(app, ctx):
             "status": "completed_with_pending", "result": result,
             "integrity": whitebox_integrity,
             "scrape_task_id": parent_scrape_task_id,
+            "waited_for_batch": waited_for_batch,
             "message": "任务已结束，已完成结果已保存",
             "cleanup": cleanup.as_dict(),
             **({"cleanup_error": "browser_cleanup_failed"}

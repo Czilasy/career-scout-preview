@@ -129,6 +129,8 @@ def save_finished_round(
         profile_facts = result.get("profile_facts")
     merged_script_params = _merge_parent_script_params(
         store, scrape_task_id, script_params)
+    parent_run = store.get_screening_run(scrape_task_id) if scrape_task_id else None
+    career_profile_id = str((parent_run or {}).get("profile_id") or "") or None
 
     def _write():
         existing = _existing_round_for_flow(store, scrape_task_id, platform)
@@ -143,6 +145,7 @@ def save_finished_round(
                 profile_summary=profile_summary,
                 profile_facts=profile_facts,
                 scrape_task_id=str(scrape_task_id),
+                profile_id=career_profile_id,
                 finished_at=finished_at,
             )
         return store.save_pipeline_result(
@@ -156,6 +159,7 @@ def save_finished_round(
                 "platform": platform,
                 "scrape_task_id": str(scrape_task_id),
             },
+            profile_id=career_profile_id,
         )
 
     # 020 US7：终态已落库后的写轮失败代价最大，先扛瞬时锁（短退避重试）。
@@ -208,6 +212,8 @@ def save_scraped_only_round(
         # 幂等命中：轮已存在，结果可用（saved=True，前端展示 result）
         result["source_run_id"] = str(existing["id"])
         return {"saved": True, "run_id": str(existing["id"]), "result": result}
+    parent_run = store.get_screening_run(scrape_task_id) if scrape_task_id else None
+    career_profile_id = str((parent_run or {}).get("profile_id") or "") or None
     run_id = store.save_scraped_only_snapshot(
         result,
         dict(script_params or {"platform": platform}),
@@ -218,6 +224,7 @@ def save_scraped_only_round(
         platform=platform,
         profile_summary=profile_summary,
         profile_facts=profile_facts,
+        profile_id=career_profile_id,
     )
     result["source_run_id"] = run_id
     return {"saved": True, "run_id": run_id, "result": result}

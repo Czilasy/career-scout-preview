@@ -10,8 +10,9 @@ import {
 import JobListToolbar from "./JobListToolbar.vue";
 import { countActiveFilters, emptyFilterState, filterJobs, sortJobs } from "../listFilter";
 import type { FilterState, SortKey } from "../listFilter";
-import type { JobItem } from "../types";
+import type { JobItem, PageScene, SceneIdentity } from "../types";
 import { cleanJobLocation } from "../location";
+import { useDiscoverySceneState } from "../composables/useDiscoverySceneState";
 
 const props = withDefaults(defineProps<{
   jobs: JobItem[];
@@ -26,15 +27,23 @@ const props = withDefaults(defineProps<{
    * 禁止用 props.jobs 内容变化判断重置——切分类/切平台同样改变 jobs（D3）。
    */
   resultEpoch?: number;
+  /** Spec041：当前轮现场身份；未传时保持旧的纯组件行为。 */
+  sceneIdentity?: SceneIdentity;
+  /** 历史轮只恢复浏览现场，不保存列表草稿。 */
+  sceneMode?: "current" | "history";
+  historyRunId?: string;
 }>(), {
   batchSize: 30,
   deferMobileDetail: false,
   platformFilter: "",
   resultEpoch: 0,
+  sceneMode: "current",
+  historyRunId: "",
 });
 
 const emit = defineEmits<{
   (e: "update:platformFilter", value: "all" | "boss" | "zhilian"): void;
+  (e: "selection-fallback"): void;
 }>();
 
 const PLATFORM_FILTER_OPTIONS = [
@@ -71,32 +80,136 @@ const userSelectedDetail = ref(false);
 // 状态生命周期（D3）：切分类/切平台保留；仅 resultEpoch 变化时重置。
 // ---------------------------------------------------------------------------
 const filterState = ref<FilterState>(emptyFilterState());
+const listFilterDraft = ref<FilterState>(emptyFilterState());
 const sortKey = ref<SortKey>("default");
 const filterCount = computed(() => countActiveFilters(filterState.value));
+const sceneStore = useDiscoverySceneState();
+let sceneReady = false;
+let restoredSceneKey = "";
+let restoringScene = false;
+let lastJobsSceneKey = "";
+let skipJobsSceneKey: string | null = null;
+/** 恢复现场时列表尚无数据、等待岗位到位后再认领的选中键。 */
+let pendingRestoredSelection = "";
+
+function sceneKey(): string {
+  const identity = props.sceneIdentity;
+  return identity
+    ? `${identity.profileId}::${identity.runEpoch}::${identity.platform}::${props.sceneMode}::${props.historyRunId}`
+    : "";
+}
+
+function currentScene(): PageScene {
+  const identity = props.sceneIdentity;
+  if (!identity) return sceneStore.getCurrent({ profileId: "", runEpoch: "", platform: "boss" });
+  if (props.sceneMode === "history" && props.historyRunId) {
+    return sceneStore.getHistory(props.historyRunId, identity);
+  }
+  return sceneStore.getCurrent(identity);
+}
+
+function saveScene(patch: Partial<PageScene> = {}): void {
+  const identity = props.sceneIdentity;
+  // 身份刚切换但恢复监听还没跑完时，岗位数据监听可能先触发；
+  // 此刻不能把旧身份的现场写进新身份，等 restoreScene 完成再写。
+  if (restoringScene || !sceneReady || !identity || sceneKey() !== restoredSceneKey) return;
+  // Spec041 返工：结果数据比现场晚到时，岗位监听会先跑而滚动元素还没渲染。
+  // 此时不许用 0 覆盖存档里的阅读位置（否则刷新后的 JD/列表滚动被清掉）。
+  const stored = currentScene();
+  const next: Partial<PageScene> = {
+    sortKey: sortKey.value,
+    listFilterDraft: listFilterDraft.value,
+    visibleCount: visibleCount.value,
+    selectedJobKey: localSelectedId.value || null,
+    userSelectedDetail: userSelectedDetail.value,
+    detailOpen: detailOpen.value,
+    listScrollTop: listEl.value ? listEl.value.scrollTop : stored.listScrollTop,
+    jdScrollTop: jdScrollEl.value ? jdScrollEl.value.scrollTop : stored.jdScrollTop,
+    ...patch,
+  };
+  if (props.sceneMode === "history" && props.historyRunId) {
+    sceneStore.saveHistory(props.historyRunId, next, identity);
+  } else {
+    sceneStore.saveCurrent(identity, next);
+  }
+}
+
+function restoreScene(): void {
+  restoringScene = true;
+  sceneReady = false;
+  if (!props.sceneIdentity) {
+    restoredSceneKey = "";
+    sceneReady = true;
+    restoringScene = false;
+    return;
+  }
+  restoredSceneKey = sceneKey();
+  const saved = currentScene();
+  const savedFilter = { ...emptyFilterState(), ...(saved.listFilterDraft || {}) };
+  filterState.value = emptyFilterState();
+  listFilterDraft.value = savedFilter;
+  sortKey.value = saved.sortKey || "default";
+  visibleCount.value = saved.visibleCount > 0 ? saved.visibleCount : props.batchSize;
+  const savedSelected = saved.selectedJobKey || "";
+  if (props.jobs.some((job) => jobKey(job) === savedSelected)) {
+    localSelectedId.value = savedSelected;
+    pendingRestoredSelection = "";
+  } else {
+    // Spec041 返工：刷新恢复时结果数据还没到（岗位列表为空），此刻无法确认
+    // 选中项是否存在。先记下待认领的选中键，等岗位数据到位再恢复，而不是
+    // 直接退化成第一条（真实验收：刷新后选中的非首条岗位被丢掉）。
+    localSelectedId.value = props.jobs[0] ? jobKey(props.jobs[0]) : "";
+    pendingRestoredSelection = savedSelected;
+  }
+  userSelectedDetail.value = saved.userSelectedDetail;
+  detailOpen.value = saved.detailOpen;
+  sceneReady = true;
+  void nextTick(() => {
+    applySavedScroll();
+    if (skipJobsSceneKey === restoredSceneKey) skipJobsSceneKey = null;
+    restoringScene = false;
+  });
+}
+
+/** 岗位数据到位后认领待恢复的选中项；认领成功返回 true。 */
+function claimPendingSelection(jobs: JobItem[]): boolean {
+  if (!pendingRestoredSelection) return false;
+  if (!jobs.some((job) => jobKey(job) === pendingRestoredSelection)) return false;
+  localSelectedId.value = pendingRestoredSelection;
+  pendingRestoredSelection = "";
+  return true;
+}
 
 const workspaceJobs = computed(() => sortJobs(filterJobs(props.jobs, filterState.value), sortKey.value));
 
 // 新结果加载（resultEpoch 递增）：重置筛选/排序/分片/选中。
 // 禁止用 props.jobs 内容变化判断重置（切分类/切平台同样改变 jobs，违反 D3）。
 watch(() => props.resultEpoch, () => {
+  // 同一轮重抓只是原地补充内容，保留用户当前列表现场；轮次身份变化才
+  // 按既有 resultEpoch 语义重置排序、筛选和分片。
+  if (props.sceneIdentity && sceneKey() === restoredSceneKey) return;
   filterState.value = emptyFilterState();
+  listFilterDraft.value = emptyFilterState();
   sortKey.value = "default";
   visibleCount.value = props.batchSize;
   // 新结果上的选中是新开始：未手动选择标记归零，保证后续筛选/排序的选中跟随
   // 走「未手动选择 → 过滤排序后第一项」分支（contracts §6）。
   userSelectedDetail.value = false;
   localSelectedId.value = workspaceJobs.value[0] ? jobKey(workspaceJobs.value[0]) : "";
+  saveScene();
 });
 
 // 筛选/排序变化（含确定提交）：重置分片；选中跟随——
 // 未手动选择过岗位 → 更新为过滤排序后第一项（保证列表第一项与右侧详情一致）；
 // 已手动选择 → 保持原选中项，被过滤掉则回退到第一项。
 watch([filterState, sortKey], () => {
+  if (restoringScene) return;
   visibleCount.value = props.batchSize;
   const firstId = workspaceJobs.value[0] ? jobKey(workspaceJobs.value[0]) : "";
   if (!userSelectedDetail.value) {
     localSelectedId.value = firstId;
   } else if (!workspaceJobs.value.some((job) => jobKey(job) === localSelectedId.value)) {
+    localSelectedId.value = firstId;
   }
 }, { deep: true });
 
@@ -117,6 +230,19 @@ let observer: IntersectionObserver | undefined;
 
 // JD 内层滚动容器：详情头部、事实和操作区固定，切换岗位时只重置 JD 滚动位置。
 const jdScrollEl = ref<HTMLElement | null>(null);
+
+// Spec041 验收补丁：恢复现场时列表可能还没渲染（切画像/切轮次后 jobs 重载），
+// restoreScene 的 nextTick 拿不到元素就会丢掉滚动位置。这里在恢复那一拍与
+// 列表元素出现时各补一次：只在"当前没有滚动、而存档里有滚动位置"时写入，
+// 不覆盖用户自己滚到的真实位置（那时滚动事件已把存档更新为当前位置）。
+function applySavedScroll(): void {
+  const el = listEl.value;
+  if (!el) return;
+  const scene = currentScene();
+  if (scene.listScrollTop > 0 && el.scrollTop === 0) el.scrollTop = scene.listScrollTop;
+  const jd = jdScrollEl.value;
+  if (jd && scene.jdScrollTop > 0 && jd.scrollTop === 0) jd.scrollTop = scene.jdScrollTop;
+}
 
 function onScroll() {
   const y = window.scrollY || document.documentElement.scrollTop || 0;
@@ -177,20 +303,76 @@ watch(sentinel, (el) => {
 // 记录上一次岗位集合签名：只有集合真正变化（新结果加载 / 有岗位离开本 tab）
 // 才重置滚动与选中；原地内容更新（如重抓只补了 JD、判定未变）保留滚动位置。
 let prevJobKeySignature = "";
+watch(
+  () => sceneKey(),
+  (key, previous) => {
+    if (key !== previous) skipJobsSceneKey = key;
+  },
+  { immediate: true, flush: "sync" },
+);
 watch(() => props.jobs, (jobs) => {
+  const currentKey = sceneKey();
   const signature = JSON.stringify(jobs.map(jobKey).sort());
+  // Spec041 返工：刷新恢复时结果数据比现场晚到；数据一到就先认领存档里的
+  // 选中项（用户手动选过的那条），不按"列表第一条"草率落位。
+  if (claimPendingSelection(jobs)) {
+    lastJobsSceneKey = currentKey;
+    prevJobKeySignature = signature;
+    saveScene();
+    return;
+  }
+  if (skipJobsSceneKey === currentKey) {
+    skipJobsSceneKey = null;
+    lastJobsSceneKey = currentKey;
+    prevJobKeySignature = signature;
+    return;
+  }
+  if (currentKey !== lastJobsSceneKey) {
+    // 身份切换时由 restoreScene 决定批次、选中和详情现场；不要让这次
+    // 同步到达的岗位列表先按默认值重置刚恢复的现场。
+    lastJobsSceneKey = currentKey;
+    prevJobKeySignature = signature;
+    return;
+  }
   if (signature !== prevJobKeySignature) {
     visibleCount.value = props.batchSize;
     if (!jobs.some((job) => jobKey(job) === localSelectedId.value)) {
+      if (userSelectedDetail.value && localSelectedId.value) emit("selection-fallback");
       localSelectedId.value = jobs[0] ? jobKey(jobs[0]) : "";
     }
-    detailOpen.value = Boolean(jobs.length);
     prevJobKeySignature = signature;
   } else if (!jobs.some((job) => jobKey(job) === localSelectedId.value)) {
     // 集合未变但选中项已不在（理论边界）：回退到第一条
     localSelectedId.value = jobs[0] ? jobKey(jobs[0]) : "";
   }
+  saveScene();
 }, { deep: false, immediate: true });
+
+watch(
+  () => [sceneKey(), props.sceneIdentity?.runEpoch, props.sceneIdentity?.platform, props.sceneMode, props.historyRunId],
+  restoreScene,
+  { immediate: true },
+);
+
+watch(
+  [filterState, sortKey, localSelectedId, detailOpen, userSelectedDetail, visibleCount],
+  () => saveScene(),
+  { deep: true },
+);
+
+// 列表元素出现时补一次滚动现场：恢复时机早于渲染（jobs 尚空/正在重载）时，
+// restoreScene 的 nextTick 无法应用；等 .job-list 渲染出来再补。
+watch(listEl, (el) => {
+  if (!el || !sceneReady) return;
+  applySavedScroll();
+});
+
+// JD 详情元素出现时同样补一次滚动现场：详情面板可能与列表先后挂载
+//（刷新恢复时 job-detail 在选中项确认后才渲染）。
+watch(jdScrollEl, (el) => {
+  if (!el || !sceneReady) return;
+  applySavedScroll();
+});
 
 function jobKey(job: JobItem): string {
   // T511：双 ID 优先 — (platform, platform_job_id) 是岗位稳定键。
@@ -203,6 +385,8 @@ function jobKey(job: JobItem): string {
 }
 
 function selectJob(job: JobItem) {
+  // 用户手动点选优先：待恢复的存档选中项作废，不抢用户操作。
+  pendingRestoredSelection = "";
   localSelectedId.value = jobKey(job);
   detailOpen.value = true;
   userSelectedDetail.value = true;
@@ -213,6 +397,16 @@ function selectJob(job: JobItem) {
     }
   });
 }
+
+function persistListScroll(event: Event): void {
+  saveScene({ listScrollTop: (event.currentTarget as HTMLElement).scrollTop });
+}
+
+function persistJdScroll(event: Event): void {
+  saveScene({ jdScrollTop: (event.currentTarget as HTMLElement).scrollTop });
+}
+
+onBeforeUnmount(() => saveScene());
 
 function company(job: JobItem): string {
   return String(job.company || job.boss_name || "公司待确认");
@@ -340,7 +534,19 @@ const emptyHint = computed(() => {
 const showClearFilter = computed(() => filterCount.value > 0 && props.jobs.length > 0);
 
 function clearFilters() {
-  filterState.value = emptyFilterState();
+  const empty = emptyFilterState();
+  listFilterDraft.value = empty;
+  filterState.value = empty;
+}
+
+function applyFilter(state: FilterState): void {
+  listFilterDraft.value = state;
+  filterState.value = state;
+}
+
+function saveFilterDraft(state: FilterState): void {
+  listFilterDraft.value = state;
+  saveScene({ listFilterDraft: state });
 }
 </script>
 
@@ -379,15 +585,18 @@ function clearFilters() {
           <slot name="heading-actions" />
           <JobListToolbar
             v-if="jobs.length"
+            :key="`${sceneKey()}::${props.resultEpoch}`"
             :filter-state="filterState"
+            :draft-filter-state="listFilterDraft"
             :sort-key="sortKey"
-            @apply-filter="(state) => { filterState = state; }"
+            @apply-filter="applyFilter"
+            @draft-filter-change="saveFilterDraft"
             @reset-filter="clearFilters"
             @select-sort="(key) => { sortKey = key; }"
           />
         </div>
       </div>
-      <div v-if="workspaceJobs.length" ref="listEl" class="job-list" role="list">
+      <div v-if="workspaceJobs.length" ref="listEl" class="job-list" role="list" @scroll="persistListScroll">
         <button
           v-for="job in visibleJobs"
           :key="jobKey(job)"
@@ -556,7 +765,7 @@ function clearFilters() {
 
       <section class="jd-content" :data-platform="selectedJob.platform || 'boss'">
         <h3><span class="sec-mk" aria-hidden="true"></span>职位描述</h3>
-        <div ref="jdScrollEl" class="jd-scroll" data-testid="job-detail-jd-scroll">
+        <div ref="jdScrollEl" class="jd-scroll" data-testid="job-detail-jd-scroll" @scroll="persistJdScroll">
           <p>{{ selectedJob.jd || selectedJob.jd_excerpt || "尚未获取职位描述。" }}</p>
         </div>
       </section>

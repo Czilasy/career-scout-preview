@@ -104,6 +104,13 @@ class StoreMigrationsV1Mixin:
                 latest = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
             if int(latest["v"] if latest is not None else 0) >= 32:
                 self._migration_033()
+        if current < 34:
+            # 同 033：冻结版测试库（按需 patch 掉若干迁移）不得被推着往前走，
+            # 只有库已实际到 33 才补第 2 页输入这一列。
+            with self._connection() as conn:
+                latest = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
+            if int(latest["v"] if latest is not None else 0) >= 33:
+                self._migration_034()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 

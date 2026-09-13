@@ -127,7 +127,10 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         def _probe():
             from webui.pipeline_exec import ensure_chrome_ready
             _port = getattr(src, "cdp_port", None)
-            _chrome_ok, _chrome_err = ensure_chrome_ready(_port)
+            # 任务已停止时环境探测不再拉起浏览器（收尾族：停了就不该再启动）。
+            _chrome_ok, _chrome_err = ensure_chrome_ready(
+                _port, stop_event=stop_event,
+            )
             if not _chrome_ok:
                 return False, "source_cdp_unavailable", f"调试浏览器未就绪：{_chrome_err}"
             try:

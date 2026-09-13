@@ -13,6 +13,7 @@ import threading
 import time
 
 from webui.diagnostics import record_failure
+from webui.task_runner_support import _carry_batch_signal
 from webui.workbench import normalize_job_link_for_platform
 
 # 明确判定：只有这三类才是"有结论"，uncertain 仍属待确认。
@@ -138,10 +139,16 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
             t = ctx.tasks.get(task_id)
             if t is None:
                 return
-            t["progress"] = kw
+            t["progress"] = _carry_batch_signal(t.get("progress"), kw, stage)
 
     def _stop_requested():
         return stop_event is not None and stop_event.is_set()
+
+    def _raw_stop_mode():
+        """停在任务上的原始停止原因（pause/cancel/finish/terminate/空）。"""
+        with ctx.lock:
+            t = ctx.tasks.get(task_id)
+        return str((t or {}).get("stop_mode") or "")
 
     def _pause_recrawl_source_unavailable(reason):
         """Persist a CDP-wide recrawl hard stop before exposing paused state."""
@@ -315,6 +322,7 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
         if no_jd:
             chrome_ok, chrome_err = ensure_chrome_ready(
                 frozen_cdp_port, minimize_after_launch=True,
+                stop_event=stop_event,
             )
             if chrome_ok:
                 source = ctx.make_cdp_source(
@@ -325,9 +333,27 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                     run_id=task_id,
                 )
                 if source is not None:
+                    _jd_seen = {"done": 0}
+
                     def _jd_progress(done, tot):
+                        _jd_seen["done"] = min(int(done or 0), total)
                         emit(stage="fetch_jd", current=min(done, total), total=total,
                              message=f"抓取 JD {min(done, total)}/{total}")
+
+                    def _jd_batch_progress(cur_batch, total_batches):
+                        """025：批内信号——前端据此弹「立即停止 / 等这批抓完」。
+
+                        批开始带数字、批结束显式清空（None），与 AI 筛选段同语义。
+                        """
+                        _cur = min(int(_jd_seen["done"] or 0), total)
+                        if cur_batch is None:
+                            emit(stage="fetch_jd", current=_cur, total=total,
+                                 message=f"抓取 JD {_cur}/{total}", jd_batch=None)
+                        else:
+                            emit(stage="fetch_jd", current=_cur, total=total,
+                                 message=f"抓取 JD {_cur}/{total}",
+                                 jd_batch={"current": max(1, int(cur_batch)),
+                                           "total": max(1, int(total_batches))})
                     # 024：详情人形模拟随当前档位下发（custom/取不到时零仿真）
                     _simulation_mode = None
                     try:
@@ -338,6 +364,8 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                             _simulation_mode = _sel
                     except Exception:
                         _simulation_mode = None
+                    # 022/025：与 AI 筛选段同一套批次登记——「立即停止」据此
+                    # 杀掉正在跑的抓取子进程，批内信号据此驱动暂停二选一。
                     detail = fetch_job_details(
                         no_jd, source, artifact_dir=ctx.app.config["RESULT_DIR"],
                         stop_event=stop_event, progress=_jd_progress,
@@ -345,6 +373,10 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                         execution_config=execution_config,
                         simulation_mode=_simulation_mode,
                         store=ctx.store,
+                        guard=getattr(ctx, "pipeline_guard", None),
+                        batch_key_prefix=f"recrawl-jd-{task_id}",
+                        task_id=task_id,
+                        batch_progress=_jd_batch_progress,
                     )
                     detail_jobs = detail.get("jobs", [])
                     for j in detail_jobs:
@@ -408,7 +440,11 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                         return
                     if detail.get("stopped"):
                         close_debug_chrome(frozen_cdp_port)
-                        if _stop_mode() == "pause":
+                        if _raw_stop_mode() in ("finish", "terminate"):
+                            # 结束保存/终止由对应接口负责定稿（接口自己写终态与
+                            # 部分快照）。worker 只释放续跑占位，不写终态。
+                            ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
+                        elif _stop_mode() == "pause":
                             _mark_recrawl_paused(
                                 processed=len(completed_jd_ids),
                                 stage="recrawl_fetch_jd")
@@ -721,9 +757,13 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
             )
             for job_id, update in updates.items()
         ])
+        # 结束保存/终止由对应接口定稿：worker 不把这种停止写成"已取消"，
+        # 否则接口等批次期间会被 worker 抢先记成取消。
+        _owner_finalizing = _raw_stop_mode() in ("finish", "terminate")
+        _cancelled_by_user = _stop_requested() and not _owner_finalizing
         ctx.write_run(
             task_id,
-            status="cancelled" if _stop_requested() else recrawl_status,
+            status="cancelled" if _cancelled_by_user else recrawl_status,
             current_stage="done",
         )
         with ctx.lock:
@@ -731,7 +771,7 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
             if t is not None:
                 # Keep the in-memory task status aligned with the DB status.
                 # The polling API prefers this live task over the DB row.
-                t["status"] = "cancelled" if _stop_requested() else recrawl_status
+                t["status"] = "cancelled" if _cancelled_by_user else recrawl_status
                 t["result"] = {"updates": updates}
         ctx.schedule_pipeline_task_cleanup(task_id)
         ctx.release_worker_resume_claims(ctx.tasks.get(task_id))

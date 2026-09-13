@@ -1,11 +1,23 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { apiRequest, fetchLogs } from "../api";
+import { apiRequest, fetchLogs, type LogsResponse } from "../api";
 
-const props = defineProps<{ open: boolean; initialTaskId?: string }>();
+const props = defineProps<{
+  open: boolean;
+  initialTaskId?: string;
+  /** Spec041 返工：当前求职画像；运行日志只查本画像的任务，缺省时不查。 */
+  profileId?: string;
+}>();
 const emit = defineEmits<{ close: [] }>();
 
-const lines = ref<string[]>([]);
+/** 一行日志 = 稳定行号 + 文本。行号来自后端游标（文件行位置 / task_logs.seq），
+ *  用于增量合并与渲染 key——相同文案的不同日志行各自独立，不做文案去重。 */
+interface LogLine {
+  no: number;
+  text: string;
+}
+
+const lines = ref<LogLine[]>([]);
 const startLine = ref(0);
 const endLine = ref(0);
 const identity = ref("");
@@ -19,7 +31,12 @@ const runTaskId = ref("");
 
 const scrollEl = ref<HTMLElement | null>(null);
 let pollTimer: number | null = null;
-let disposed = false;
+let disposed = true;
+// 视图代次：切模式 / 切任务 / 切画像 / 重开窗口都会 +1；旧请求响应按代次丢弃，
+// 不把上一份日志、旧游标写回新视图。
+let viewSeq = 0;
+// 轮询在飞标记：请求慢于轮询间隔时不并发，避免同一区间被取两次。
+let polling = false;
 
 function scrollToBottom() {
   nextTick(() => {
@@ -29,9 +46,48 @@ function scrollToBottom() {
   });
 }
 
+/** 后端返回的行 + start/end 游标 → 带稳定行号的展示行。 */
+function numberedLines(data: LogsResponse): LogLine[] {
+  const list = Array.isArray(data.lines) ? data.lines : [];
+  const start = Number(data.start || 0);
+  return list.map((text, index) => ({ no: start + index, text }));
+}
+
+/** 清空日志内容与游标，并作废在飞请求（切模式 / 切任务 / 重开窗口共用）。 */
+function resetLogView(): void {
+  viewSeq += 1;
+  lines.value = [];
+  startLine.value = 0;
+  endLine.value = 0;
+  identity.value = "";
+  empty.value = false;
+  loadingError.value = "";
+  loadingOlder.value = false;
+  following.value = true;
+}
+
+function stopPoll(): void {
+  if (pollTimer !== null) {
+    window.clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+/** 启动唯一轮询器：先停旧的再起新的，多次调用不会叠加定时器。 */
+function startPoll(): void {
+  stopPoll();
+  pollTimer = window.setInterval(() => { void poll(); }, 2000);
+}
+
 async function resolveRunTask(): Promise<boolean> {
+  // Spec041 返工：查询必须限定当前画像。缺画像时不查——宁可显示空态，
+  // 也不静默回退到别的画像的最新任务。
+  const profile = String(props.profileId || "").trim();
+  if (!profile) return false;
   try {
-    const data = await apiRequest<{ has_task?: boolean; task_id?: string }>("/api/latest-running-task");
+    const data = await apiRequest<{ has_task?: boolean; task_id?: string }>(
+      `/api/latest-running-task?profile_id=${encodeURIComponent(profile)}`,
+    );
     if (data.has_task && data.task_id) {
       runTaskId.value = data.task_id;
       return true;
@@ -40,17 +96,26 @@ async function resolveRunTask(): Promise<boolean> {
   return false;
 }
 
+/** 清掉运行日志的任务号、内容与轮询现场（切画像 / 关窗复用）。 */
+function resetRunView(): void {
+  runTaskId.value = "";
+  resetLogView();
+}
+
+function resetForProfileChange(): void {
+  resetRunView();
+  if (props.open) emit("close");
+}
+
 async function switchMode(next: "global" | "run"): Promise<void> {
   if (mode.value === next) return;
   mode.value = next;
-  lines.value = [];
-  startLine.value = 0;
-  endLine.value = 0;
-  identity.value = "";
-  empty.value = false;
-  loadingError.value = "";
+  // 两种日志各有自己的任务与游标，切换时彻底清掉，绝不复用对方区间。
+  resetRunView();
   if (next === "run") {
+    const seq = viewSeq;
     const ok = await resolveRunTask();
+    if (seq !== viewSeq || !props.open) return;
     if (!ok) {
       empty.value = true;
       loadingError.value = "没有可查看的运行日志（暂无可关联的任务）";
@@ -60,53 +125,64 @@ async function switchMode(next: "global" | "run"): Promise<void> {
   await loadTail();
 }
 
-async function loadTail() {
+/** 首屏 / 轮转重载：整段替换（不是追加），游标与行号一并重置。 */
+async function loadTail(): Promise<void> {
+  const seq = viewSeq;
   try {
     const data = await fetchLogs({
       tail: 500,
       task_id: mode.value === "run" ? runTaskId.value : undefined,
     });
-    lines.value = data.lines;
-    startLine.value = data.start;
-    endLine.value = data.end;
+    if (seq !== viewSeq) return;
+    lines.value = numberedLines(data);
+    startLine.value = Number(data.start || 0);
+    endLine.value = Number(data.end || 0);
     identity.value = data.identity;
     empty.value = Boolean(data.empty);
     loadingError.value = "";
     following.value = true;
     scrollToBottom();
   } catch (error) {
+    if (seq !== viewSeq) return;
     loadingError.value = error instanceof Error ? error.message : "日志加载失败";
   }
 }
 
-async function poll() {
-  if (disposed || !props.open) return;
+async function poll(): Promise<void> {
+  if (disposed || !props.open || polling) return;
   if (mode.value === "run" && !runTaskId.value) return;
+  polling = true;
+  const seq = viewSeq;
   try {
     const data = await fetchLogs({
       since: endLine.value,
       identity: identity.value,
       task_id: mode.value === "run" ? runTaskId.value : undefined,
     });
+    if (seq !== viewSeq || disposed) return;
     if (data.rotated) {
       // 日志轮转：整体重载尾部，保证实时更新不失效
       await loadTail();
       return;
     }
-    if (data.lines.length) {
-      lines.value = [...lines.value, ...data.lines];
-      endLine.value = data.end;
-      identity.value = data.identity;
-      if (following.value) scrollToBottom();
-    }
+    // 只接受行号大于当前游标的新增行：后端同区间重发、乱序响应都不会重复渲染。
+    const fresh = numberedLines(data).filter((item) => item.no > endLine.value);
+    if (!fresh.length) return;
+    lines.value = [...lines.value, ...fresh];
+    endLine.value = Math.max(endLine.value, fresh[fresh.length - 1].no);
+    if (data.identity) identity.value = data.identity;
+    if (following.value) scrollToBottom();
   } catch {
     // 轮询失败静默，下轮自动重试
+  } finally {
+    polling = false;
   }
 }
 
-async function loadOlder() {
+async function loadOlder(): Promise<void> {
   if (loadingOlder.value || startLine.value <= 1) return;
   loadingOlder.value = true;
+  const seq = viewSeq;
   const before = scrollEl.value?.scrollHeight ?? 0;
   try {
     const data = await fetchLogs({
@@ -114,9 +190,12 @@ async function loadOlder() {
       tail: 500,
       task_id: mode.value === "run" ? runTaskId.value : undefined,
     });
-    if (data.lines.length) {
-      lines.value = [...data.lines, ...lines.value];
-      startLine.value = data.start;
+    if (seq !== viewSeq) return;
+    // 与已有区间重叠的部分（行号 >= 当前起点）丢弃，加载更早只补旧行。
+    const older = numberedLines(data).filter((item) => item.no < startLine.value);
+    if (older.length) {
+      lines.value = [...older, ...lines.value];
+      startLine.value = older[0].no;
       await nextTick();
       // 保持视口位置：顶部插入内容后滚动增量补偿
       if (scrollEl.value) {
@@ -124,7 +203,7 @@ async function loadOlder() {
       }
     }
   } catch {
-    loadingError.value = "加载更早日志失败";
+    if (seq === viewSeq) loadingError.value = "加载更早日志失败";
   } finally {
     loadingOlder.value = false;
   }
@@ -135,7 +214,7 @@ function onScroll() {
   if (!el) return;
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   following.value = atBottom;
-  if (el.scrollTop <= 10) loadOlder();
+  if (el.scrollTop <= 10) void loadOlder();
 }
 
 function goBottom() {
@@ -143,23 +222,42 @@ function goBottom() {
   scrollToBottom();
 }
 
+// Spec041 返工：切画像即清旧画像的运行日志现场（任务号/内容/轮询）并关窗，
+// 不让旧画像的日志继续显示；历史轮按 initialTaskId 打开的功能不受影响。
+watch(() => props.profileId, (profileId, previous) => {
+  if (String(profileId || "") === String(previous || "")) return;
+  resetForProfileChange();
+});
+
+// 指定任务变化（例如换了历史轮）：旧任务内容、游标、轮询彻底清掉再按新任务加载。
+watch(() => props.initialTaskId, (taskId) => {
+  const next = String(taskId || "").trim();
+  if (!next) {
+    if (!props.open) resetRunView();
+    return;
+  }
+  resetLogView();
+  runTaskId.value = next;
+  mode.value = "run";
+  if (props.open) void loadTail();
+}, { immediate: true });
+
 watch(
   () => props.open,
   (open) => {
     if (open) {
       disposed = false;
-      lines.value = [];
-      startLine.value = 0;
-      endLine.value = 0;
-      identity.value = "";
-      loadingError.value = "";
+      resetLogView();
       // 035：外部指定任务（如历史轮的「查看运行日志」）→ 直接按该任务过滤运行日志。
-      if (props.initialTaskId) {
-        runTaskId.value = props.initialTaskId;
+      const initial = String(props.initialTaskId || "").trim();
+      if (initial) {
+        runTaskId.value = initial;
         mode.value = "run";
-        loadTail();
+        void loadTail();
       } else if (mode.value === "run") {
+        const seq = viewSeq;
         void resolveRunTask().then((ok) => {
+          if (seq !== viewSeq) return;
           if (!ok) {
             empty.value = true;
             loadingError.value = "没有可查看的运行日志（暂无可关联的任务）";
@@ -168,15 +266,13 @@ watch(
           }
         });
       } else {
-        loadTail();
+        void loadTail();
       }
-      pollTimer = window.setInterval(poll, 2000);
+      startPoll();
     } else {
       disposed = true;
-      if (pollTimer !== null) {
-        window.clearInterval(pollTimer);
-        pollTimer = null;
-      }
+      polling = false;
+      stopPoll();
     }
   },
   { immediate: true },
@@ -184,7 +280,7 @@ watch(
 
 onBeforeUnmount(() => {
   disposed = true;
-  if (pollTimer !== null) window.clearInterval(pollTimer);
+  stopPoll();
 });
 </script>
 
@@ -242,10 +338,10 @@ onBeforeUnmount(() => {
             暂无日志（career-scout.log）
           </div>
           <pre v-else class="log-pre"><code
-            v-for="(line, index) in lines"
-            :key="index"
+            v-for="line in lines"
+            :key="line.no"
             class="log-line"
-          >{{ line }}</code></pre>
+          >{{ line.text }}</code></pre>
         </div>
         <div class="log-footer">
           <button

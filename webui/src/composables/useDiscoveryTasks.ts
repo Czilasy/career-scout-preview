@@ -43,6 +43,8 @@ import {
 import { hasLiveTaskState, MODE_DEFAULT_PAGES } from "./useDiscoveryState";
 import type { MergedLatestResult, TaskSnapshot } from "./useDiscoveryState";
 import { setThemePlatform } from "./useTheme";
+import { useDiscoverySceneState } from "./useDiscoverySceneState";
+import type { SceneIdentity } from "../types";
 
 type CleanupActionResponse = {
   error?: string;
@@ -61,8 +63,9 @@ function hasCleanupFailure(data: CleanupActionResponse): boolean {
 const FULLY_COMPLETED_TASK_STATUSES = new Set(["done", "completed", "succeeded"]);
 
 export function useDiscoveryTasks(state: DiscoveryState, deps: TasksNeeds) {
-  const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, activeTaskRestored, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, executionSelection, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, historyStore, interruptedRunId, isScrapedOnly, taskCompletedToast, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resumeAnalysis, schemaLoader, scopePreview, scopePreviewBusy, scrapeActionBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform, unfinishedWorkflowRestored, workflowEpoch } = state;
+  const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, activeTaskRestored, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, executionSelection, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, historyStore, interruptedRunId, isScrapedOnly, taskCompletedToast, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileId, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsBootstrapPending, resultsPageSeen, resumeAnalysis, resumeAnalysisLandOnReturn, resumeAnalysisPhase, resumeAnalysisReset, schemaLoader, scopePreview, scopePreviewBusy, scrapeActionBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform, unfinishedWorkflowRestored, workflowEpoch } = state;
   const { platformState } = state;
+  const sceneStore = useDiscoverySceneState();
   const { cancelScrape, clearLatestResult, clearWorkflowState, continueAiScreen, enterScreenStep, fetchMergedLatestResult, finishPausedTask, isLoginErrorCode, jobId, loadLatestResult, notify, restoreRunningTask, setPipelineResult, showLoginGuide, startAiScreen } = deps;
   let lastCancellationCleanupFailed = false;
 
@@ -71,11 +74,20 @@ export function useDiscoveryTasks(state: DiscoveryState, deps: TasksNeeds) {
     interruptedRunId.value = "";
   }
 
+  /**
+   * Spec041 返工：任务状态查询一律带当前画像，后端据此校验任务归属；
+   * 缺画像时只做旧口径兼容（产品前端不会走到这条）。
+   */
+  function taskStateUrl(runId: string): string {
+    const profile = profileId.value ? `?profile_id=${encodeURIComponent(profileId.value)}` : "";
+    return `/api/task-state/${encodeURIComponent(runId)}${profile}`;
+  }
+
 
 async function pollTask(taskId: string, kind: "scrape" | "screen") {
   const roundEpoch = workflowEpoch.value;
   try {
-    const data = await apiRequest<TaskSnapshot>(`/api/task-state/${encodeURIComponent(taskId)}`);
+    const data = await apiRequest<TaskSnapshot>(taskStateUrl(taskId));
     if (roundEpoch !== workflowEpoch.value) return;
     // 暂停请求已发出但后端仍在等当前批次结束：保持“正在暂停”，
     // 不被旧的运行态轮询覆盖，也不提前进入完成态。
@@ -89,6 +101,23 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       };
       pollTimer.value = window.setTimeout(() => void pollTask(taskId, kind), 1800);
       return;
+    }
+    // 抓取暂停同型保护：暂停请求已受理、后端仍在等当前组合结束时，保持
+    // “正在暂停”显示（按钮持续变灰）；任务到达终态时才释放按钮占用。
+    if (kind === "scrape" && scrapeActionBusy.value === "pause-scrape") {
+      const pauseSettled = data.status === "paused" || data.status === "failed"
+        || data.status === "cancelled" || data.status === "interrupted"
+        || isCompletedTaskStatus(data.status);
+      if (!pauseSettled) {
+        scrapeSnapshot.value = {
+          ...data,
+          status: "pausing",
+          progress: { ...(data.progress || {}), message: "正在暂停…" },
+        };
+        pollTimer.value = window.setTimeout(() => void pollTask(taskId, kind), 1800);
+        return;
+      }
+      scrapeActionBusy.value = "";
     }
     // 016：恢复首拍防御——轮询响应未带整体进度/计数时沿用上一拍断点值，
     // 避免续跑/刷新后进度条"归零再跳变"；新任务起步快照本身无进度，不受影响。
@@ -170,19 +199,33 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       } else {
         screenBusy.value = false;
         pausingScreen.value = false;
-        // 实时路径与刷新路径统一：任务完成后拉双平台合并结果（R2），
-        // 避免只 set 单平台结果导致结果页切平台显示 0。
+        // 实时路径与刷新路径统一：任务完成后拉当前画像的全局最新轮。
         const fetched = await deps.fetchMergedLatestResult();
         if (roundEpoch !== workflowEpoch.value) return;
         if (fetched) {
           deps.setPipelineResult(fetched.merged);
           currentRoundStatus.value = fetched.newer.data.status === "scraped_only" ? "scraped_only" : "screened";
-          if (isScrapedOnly.value) activeCategory.value = "matched";
+          if (isScrapedOnly.value) {
+            activeCategory.value = "matched";
+            // 任务接口可能返回的是上一份筛选快照；结果接口确认本轮
+            // 其实只是抓取完成时，03 页必须显示“未开始 N”，不能沿用旧的 2 / 2。
+            const total = Number(fetched.merged.total_scraped || fetched.merged.jobs?.length || 0);
+            screenSnapshot.value = {
+              ...(screenSnapshot.value || {}),
+              status: "completed",
+              stage: "scrape",
+              total,
+              source_total: total,
+              success_count: 0,
+              fail_count: 0,
+              unstarted_count: total,
+              pending_count: 0,
+            };
+          }
         } else {
-          // B044：合并拉取失败不得让 04 空白——完成响应自带的内存结果
+          // B044：最新轮拉取失败不得让 04 空白——完成响应自带的内存结果
           //（后端与 status=done 同锁写入，完成瞬间必然携带）立即兜底，
-          // 保证流程完成后 04 页必然有岗位展示；随后后台有界补拉合并
-          // 视图（R2 语义），成功再升级为双平台展示。
+          // 保证流程完成后 04 页必然有岗位展示；随后后台有界补拉持久化结果。
           const inline = data.result;
           if (inline && Array.isArray(inline.jobs)) {
             deps.setPipelineResult({
@@ -324,9 +367,8 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
   }
 }
 
-// B044：AI 筛选完成瞬间合并拉取失败的补拉升级。任务已完成（04 已用
-// 内嵌内存结果展示），后台再按指数退避补拉双平台合并视图；成功即应用
-// 升级为 R2 双平台展示；期间开始新任务（task id 变化 / 任意 pipeline
+// B044：AI 筛选完成瞬间最新轮拉取失败的补拉。任务已完成（04 已用
+// 内嵌内存结果展示），后台再按指数退避补拉持久化结果；期间开始新任务（task id 变化 / 任意 pipeline
 // 占用）立即放弃，绝不串轮。复用 pollTimer 让既有清理路径（resetWorkflow
 // / unmount / cancel / finish）统一收口。
 function retryMergeUpgrade(taskId: string, attempt: number, roundEpoch = workflowEpoch.value) {
@@ -455,8 +497,19 @@ async function cancelActiveTasksForNewRound(silent = false): Promise<boolean> {
   }
   if (!ids.size) {
     try {
-      const latest = await apiRequest<{ has_task?: boolean; task_id?: string }>("/api/latest-running-task");
-      if (latest.has_task && latest.task_id) ids.add(latest.task_id);
+      // Spec041：兜底也只取消当前画像的任务；服务端按画像过滤，
+      // 返回体再核对一次身份，任何情况下都不跨画像取消。
+      const latest = await apiRequest<{
+        has_task?: boolean; task_id?: string; profile_id?: string | null;
+      }>(
+        profileId.value
+          ? `/api/latest-running-task?profile_id=${encodeURIComponent(profileId.value)}`
+          : "/api/latest-running-task",
+      );
+      const returnedProfile = String(latest.profile_id || "");
+      const sameProfile = !returnedProfile
+        || returnedProfile === String(profileId.value || "");
+      if (latest.has_task && latest.task_id && sameProfile) ids.add(latest.task_id);
     } catch { /* 接回失败不阻断归档 */ }
   }
   let cancelled = false;
@@ -530,6 +583,8 @@ async function finishScreenSave() {
   if (deps.roundFlow.busyAction) return;
   const runId = screenTaskId.value || pausedRunId.value;
   if (!runId) return;
+  // 025 B076：正处抓 JD 批次中 → 弹「等这批抓完再保存 / 立即保存」二选一。
+  if (deps.roundFlow.openScreenFinishChoice()) return;
   deps.roundFlow.busyAction = "finish";
   try {
     await deps.finishPausedTask(runId);
@@ -571,7 +626,7 @@ async function enrichPausedSnapshot(
       execution_config?: Record<string, unknown> | null;
       integrity?: IntegritySnapshot | null;
       result?: { updates?: Record<string, unknown> } | null;
-    }>(`/api/task-state/${encodeURIComponent(runId)}`);
+    }>(taskStateUrl(runId));
     snapshot.success_count = data.success_count;
     snapshot.fail_count = data.fail_count;
     snapshot.unstarted_count = data.unstarted_count;
@@ -652,9 +707,7 @@ async function recrawlUncertain(platformOverride?: "boss" | "zhilian") {
     return;
   }
   if (recrawlBusy.value) return;
-  // 单平台直接重抓：进度回 03 页展示（“全部”视图单平台场景由 startRecrawl
-  // 以 undefined 调用，这里补切；单平台视图已在 startRecrawl 显式切过）。
-  activeStep.value = "screen";
+  // 单平台重抓也留在结果页，后台状态由进度卡和灵动岛展示。
   recrawlBusy.value = true;
   recrawlPlatformGuide.value = null;
   recrawlSnapshot.value = {
@@ -686,10 +739,9 @@ async function recrawlUncertain(platformOverride?: "boss" | "zhilian") {
     const message = errorMessage(error, "重抓启动失败");
     recrawlBusy.value = false;
     // 启动请求未返回 task_id，后端不会有可继续/停止的任务。清掉临时
-    // 03 页状态并回到结果页，避免渲染出点击后无动作的恢复按钮。
+    // 重抓状态，但不擅自改变用户当前所在页面。
     recrawlTaskId.value = "";
     recrawlSnapshot.value = null;
-    activeStep.value = "results";
     deps.notify(message, "error");
   }
 }
@@ -730,9 +782,7 @@ async function continueRecrawl() {
     if (roundEpoch !== workflowEpoch.value) return;
     recrawlBusy.value = false;
     // 继续重抓失败：回到报错暂停时的样子（与 deps.continueAiScreen 同一恢复路径）。
-    const restored = await apiRequest<TaskSnapshot>(
-      `/api/task-state/${encodeURIComponent(taskId)}`,
-    ).catch(() => null);
+    const restored = await apiRequest<TaskSnapshot>(taskStateUrl(taskId)).catch(() => null);
     if (roundEpoch !== workflowEpoch.value) return;
     recrawlSnapshot.value = restored
       ? { ...restored, status: "paused" }
@@ -744,7 +794,7 @@ async function continueRecrawl() {
 async function pollRecrawl(taskId: string, roundEpoch = workflowEpoch.value) {
   if (roundEpoch !== workflowEpoch.value) return;
   try {
-    const data = await apiRequest<TaskSnapshot>(`/api/task-state/${encodeURIComponent(taskId)}`);
+    const data = await apiRequest<TaskSnapshot>(taskStateUrl(taskId));
     if (roundEpoch !== workflowEpoch.value) return;
     recrawlSnapshot.value = data;
     const liveUpdates = (data.result as unknown as { updates?: Record<string, unknown> } | undefined)?.updates;
@@ -772,6 +822,14 @@ async function pollRecrawl(taskId: string, roundEpoch = workflowEpoch.value) {
       recrawlBusy.value = false;
       const updates = (data.result as unknown as { updates?: Record<string, unknown> } | undefined)?.updates;
       if (updates) mergeRecrawlUpdates(updates as Record<string, unknown>);
+      const fetched = await deps.fetchMergedLatestResult();
+      if (roundEpoch !== workflowEpoch.value) return;
+      if (fetched) {
+        // 最新结果请求可能先于重抓写回完成，不能让旧快照把本次已确认的
+        // 判定和风险标记盖掉；把本次任务返回的更新再合到新快照上。
+        if (updates) applyRecrawlUpdates(fetched.merged, updates as Record<string, unknown>);
+        deps.setPipelineResult(fetched.merged);
+      }
       deps.notify(
         data.status === "completed_with_pending" || data.status === "partial"
           ? String(data.progress?.message || "重抓完成，但仍有岗位待确认")
@@ -780,7 +838,6 @@ async function pollRecrawl(taskId: string, roundEpoch = workflowEpoch.value) {
           ? "warning"
           : "success",
       );
-      activeStep.value = "results";
       window.setTimeout(() => {
         if (roundEpoch === workflowEpoch.value) recrawlSnapshot.value = null;
       }, 3000);
@@ -851,11 +908,7 @@ async function pollRecrawl(taskId: string, roundEpoch = workflowEpoch.value) {
 
 // 把后端回写的 {jd/verdict/verdict_reason/caveats} 原地合并到当前结果，
 // 已解决的项会随 groups 重算自动离开待确认 tab，未解决项原地保留。
-
-// 把后端回写的 {jd/verdict/verdict_reason/caveats} 原地合并到当前结果，
-// 已解决的项会随 groups 重算自动离开待确认 tab，未解决项原地保留。
-function mergeRecrawlUpdates(updates: Record<string, unknown>) {
-  const result = pipelineResult.value as (PipelineResult & { jobs?: JobItem[] }) | null;
+function applyRecrawlUpdates(result: (PipelineResult & { jobs?: JobItem[] }) | null, updates: Record<string, unknown>) {
   if (!result || !Array.isArray(result.jobs)) return;
   for (const job of result.jobs) {
     const id = deps.jobId(job);
@@ -868,6 +921,10 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
     if (Array.isArray(map.caveats)) job.caveats = map.caveats as string[];
     if (Array.isArray(map.flags)) job.flags = map.flags as JobItem["flags"];
   }
+}
+
+function mergeRecrawlUpdates(updates: Record<string, unknown>) {
+  applyRecrawlUpdates(pipelineResult.value as (PipelineResult & { jobs?: JobItem[] }) | null, updates);
 }
 
 // ---------------------------------------------------------------------------
@@ -896,9 +953,25 @@ async function maybeAutoStartNewRound(): Promise<void> {
   if (unfinishedWorkflowRestored.value) return;
   // 035：未结束任务真实存在时，刷新/启动优先恢复现场，不自动开始新一轮、不取消任务。
   if (hasLiveTaskState(state)) return;
-  // 026 B078：已进 04 页（或结束保存）＝上次流程已结束 → 直接开始新一轮，
-  // 不再依赖后端历史轮状态/时间戳推断（spec FR-001/FR-005）。
+  // Spec041 返工（真实验收失败项一）：已完成（已进 04 页 / 结束保存）不再
+  // "刷新即自动开新一轮"——那会把刚恢复的当前轮结果与现场清成 01 空上传页。
+  // 完成态优先原地接回；会话存档缺失时从后端最新轮补齐；确实取不到结果
+  // 才退回 026 的开新一轮，避免用户停在空结果页。
   if (resultsPageSeen.value || finishedPartial.value) {
+    if (activeStep.value === "results" && resultLoaded.value && pipelineResult.value) {
+      resultsBootstrapPending.value = false;
+      return;
+    }
+    const fetched = await deps.fetchMergedLatestResult();
+    if (fetched) {
+      await deps.loadLatestResult();
+      if (resultLoaded.value && pipelineResult.value) {
+        resultsBootstrapPending.value = false;
+        activeStep.value = "results";
+        return;
+      }
+    }
+    resultsBootstrapPending.value = false;
     await resetWorkflow();
     return;
   }
@@ -937,6 +1010,20 @@ async function maybeAutoStartNewRound(): Promise<void> {
 
 
 async function resetWorkflowInternal(silent = false): Promise<boolean> {
+  // Spec041：轮次身份由现场存档生成并持有（同一轮跨抓取/筛选/结果稳定）；
+  // 这里只做两件事——把旧轮现场归档成该轮历史查看现场，然后把身份换成新轮。
+  const oldRunEpoch = sceneStore.roundEpoch.value || sceneStore.ensureRoundEpoch(profileId.value);
+  // 历史模式下 pipelineResultRunId 是历史轮的 run id，不能拿它给当前轮归档。
+  const oldHistoryRunId = (historyMode.value ? "" : pipelineResultRunId.value)
+    || sceneStore.resolveRoundRunId(profileId.value, oldRunEpoch);
+  const oldSceneIdentity: SceneIdentity = {
+    profileId: profileId.value,
+    runEpoch: oldRunEpoch,
+    platform: platformState.result
+      || screenSnapshot.value?.platform
+      || scrapeSnapshot.value?.platform
+      || draftPlatform.value,
+  };
   // 先使旧轮所有尚未返回的请求失效，再等待取消/归档；否则旧轮响应可能
   // 在清空现场后重新写回结果页。
   workflowEpoch.value += 1;
@@ -947,6 +1034,9 @@ async function resetWorkflowInternal(silent = false): Promise<boolean> {
   }
   if (!(await cancelActiveTasksForNewRound(silent))) return false;
   if (!(await deps.clearLatestResult())) return false;
+  sceneStore.getCurrent(oldSceneIdentity);
+  sceneStore.archiveCurrentForNewRound(oldRunEpoch, oldHistoryRunId, oldSceneIdentity.platform);
+  sceneStore.rotateRoundEpoch(profileId.value);
   deps.clearWorkflowState();
   // 026 B078：开始新一轮即清除持久化的已结束事实。
   deps.clearFinishedState?.();
@@ -980,21 +1070,17 @@ async function resetWorkflowInternal(silent = false): Promise<boolean> {
   currentRoundStatus.value = "";
   scopePreview.value = null;
   scopePreviewBusy.value = false;
-  keywords.value = [];
   autoScreenArmed.value = false;
   oneClickOpen.value = false;
   profileError.value = "";
-  selectedKeywords.value = [];
-  customKeyword.value = "";
-  cityText.value = "";
-  customCity.value = "";
-  locationDraft.reset();
-  // T506：重置两个平台的筛选草稿
+  // 第 2 页输入（关键词/城市/画像/区县）开新一轮不清：用户拍板"回到第 2 页、切平台
+  // 再点执行就是复用这些内容"，只有用户手动改才变。
+  // T506：第 3 页筛选草稿仍按平台、随新一轮重置。
   filterValues.value = { boss: {}, zhilian: {} };
   resumeAnalysis.value = null;
+  resumeAnalysisReset.value?.();
+  resumeAnalysisPhase.value = "idle";
   appliedResumePlatforms.value = new Set();
-  profileSummary.value = "";
-  profileFacts.value = {};
   historyRound.value = null;
   historyBackToLatest();
   scrapeBusy.value = false;

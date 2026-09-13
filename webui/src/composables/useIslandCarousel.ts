@@ -20,10 +20,11 @@
 // ---------------------------------------------------------------------------
 import { computed, ref, type ComputedRef, type Ref } from "vue";
 import type { CapsuleStatusPayload, DynamicIslandState } from "./useDiscoveryState";
-import type { Platform } from "../types";
+import type { IslandPhase, Platform } from "../types";
+
+export type { IslandPhase } from "../types";
 
 /** 037 复审：新增 "jd"（JD 详情抓取阶段），与 scraping/screening 并列。 */
-export type IslandPhase = "scraping" | "jd" | "screening" | "completed" | "idle" | "attention";
 
 /** pill lane 0（主流程）内容，派生自 roundStatus.capsule。 */
 export interface IslandLiveState {
@@ -82,6 +83,13 @@ function deriveLiveState(capsule: DynamicIslandState | null | undefined): Island
         phase: capsule.progress.phase,
         done: capsule.progress.done,
         total: capsule.progress.total,
+        platform: capsule.platform,
+      };
+    case "analyzing":
+      return {
+        phase: "analyzing",
+        done: capsule.progress?.done,
+        total: capsule.progress?.total,
         platform: capsule.platform,
       };
     case "completed":

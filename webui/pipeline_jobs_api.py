@@ -370,6 +370,8 @@ def register_pipeline_jobs_routes(app, ctx):
             parent_browser_account = str(parent_params.get('browser_account') or '') or None
             parent_cdp_port = parent_params.get('cdp_port')
             parent_profile_key = parent_params.get('profile_key')
+            # Spec041：补抓任务继承父结果轮的画像身份。
+            parent_profile_id = str((parent_run or {}).get('profile_id') or '') or None
             gp_task_id = str(parent_params.get('scrape_task_id') or '')
             if (not parent_cdp_port or not parent_profile_key) and gp_task_id:
                 try:
@@ -383,6 +385,7 @@ def register_pipeline_jobs_routes(app, ctx):
             with ctx.lock:
                 ctx.tasks[task_id]['source_run_id'] = source_run_id
                 ctx.tasks[task_id]['platform'] = parent_platform
+                ctx.tasks[task_id]['profile_id'] = parent_profile_id
                 ctx.tasks[task_id]['cdp_port'] = parent_cdp_port
                 ctx.tasks[task_id]['profile_key'] = parent_profile_key
                 if parent_browser_account:
@@ -395,7 +398,7 @@ def register_pipeline_jobs_routes(app, ctx):
                 ctx.tasks[task_id]['task_input_digest'] = parent_task_input_digest
             profile_summary = str(raw.get('profile_summary') or '')
             profile_facts = raw.get('profile_facts') or None
-            ctx.store.create_screening_run(task_id, source_count=1, execution_params={'source_run_id': source_run_id, 'job_ids': [str(job_id)], 'profile_summary': profile_summary, 'profile_facts': profile_facts, 'single_retry': True, 'browser_account': ctx.tasks[task_id]['browser_account'], 'active_account_at_freeze': ctx.account_for_run(), 'platform': parent_platform, 'cdp_port': parent_cdp_port, 'profile_key': parent_profile_key, 'task_input_digest': parent_task_input_digest}, backend_version=ctx.backend_version)
+            ctx.store.create_screening_run(task_id, source_count=1, profile_id=parent_profile_id, execution_params={'source_run_id': source_run_id, 'job_ids': [str(job_id)], 'profile_summary': profile_summary, 'profile_facts': profile_facts, 'single_retry': True, 'browser_account': ctx.tasks[task_id]['browser_account'], 'active_account_at_freeze': ctx.account_for_run(), 'platform': parent_platform, 'cdp_port': parent_cdp_port, 'profile_key': parent_profile_key, 'task_input_digest': parent_task_input_digest}, backend_version=ctx.backend_version)
             ctx.store.save_filter_snapshot(task_id, platform=parent_platform, task_input_digest=parent_task_input_digest)
             ctx.store.update_screening_run(task_id, status='running', current_stage='recrawl_fetch_jd')
             try:
@@ -508,6 +511,8 @@ def register_pipeline_jobs_routes(app, ctx):
         parent_platform = (parent_identity or {}).get('platform') or 'boss'
         parent_task_input_digest = (parent_identity or {}).get('task_input_digest')
         parent_params = (parent_run or {}).get('execution_params') or {}
+        # Spec041：批量重抓任务继承父结果轮的画像身份。
+        recrawl_profile_id = str((parent_run or {}).get('profile_id') or '') or None
         parent_browser_account = str(parent_params.get('browser_account') or '') or None
         parent_cdp_port = parent_params.get('cdp_port')
         parent_profile_key = parent_params.get('profile_key')
@@ -532,6 +537,7 @@ def register_pipeline_jobs_routes(app, ctx):
         else:
             claimed_task['browser_account'] = ctx.account_for_run()
         claimed_task['platform'] = parent_platform
+        claimed_task['profile_id'] = recrawl_profile_id
         claimed_task['cdp_port'] = parent_cdp_port
         claimed_task['profile_key'] = parent_profile_key
         claimed_task['task_input_digest'] = parent_task_input_digest
@@ -541,7 +547,7 @@ def register_pipeline_jobs_routes(app, ctx):
             ctx.release_pipeline_claim(task_id, claimed_task)
             return _recrawl_activation_error_response(exc, parent_platform)
         try:
-            ctx.store.create_screening_run(task_id, source_count=len(job_ids), execution_params={'source_run_id': source_run_id, 'job_ids': [str(x) for x in job_ids], 'profile_summary': profile_summary, 'profile_facts': profile_facts, 'browser_account': claimed_task['browser_account'], 'active_account_at_freeze': ctx.account_for_run(), 'platform': parent_platform, 'cdp_port': parent_cdp_port, 'profile_key': parent_profile_key, 'task_input_digest': parent_task_input_digest}, backend_version=ctx.backend_version)
+            ctx.store.create_screening_run(task_id, source_count=len(job_ids), profile_id=recrawl_profile_id, execution_params={'source_run_id': source_run_id, 'job_ids': [str(x) for x in job_ids], 'profile_summary': profile_summary, 'profile_facts': profile_facts, 'browser_account': claimed_task['browser_account'], 'active_account_at_freeze': ctx.account_for_run(), 'platform': parent_platform, 'cdp_port': parent_cdp_port, 'profile_key': parent_profile_key, 'task_input_digest': parent_task_input_digest}, backend_version=ctx.backend_version)
             ctx.store.save_filter_snapshot(task_id, platform=parent_platform, task_input_digest=parent_task_input_digest)
             ctx.store.update_screening_run(task_id, status='running', current_stage='recrawl_fetch_jd')
         except ctx.operational_errors as exc:
@@ -648,6 +654,7 @@ def register_pipeline_jobs_routes(app, ctx):
         claimed_task['source_run_id'] = source_run_id
         resume_params = dict(run.get('execution_params') or {})
         claimed_task['browser_account'] = ensure_frozen_browser_account(ctx.store, task_id, run, platform=str(resume_params.get('platform') or 'boss'), fallback_account=ctx.account_for_run(run), accounts_path=app.config['BROWSER_ACCOUNTS_PATH'], role='R2')
+        claimed_task['profile_id'] = str(run.get('profile_id') or '') or None
         claimed_task['platform'] = resume_params.get('platform') or 'boss'
         claimed_task['cdp_port'] = resume_params.get('cdp_port')
         claimed_task['profile_key'] = resume_params.get('profile_key')

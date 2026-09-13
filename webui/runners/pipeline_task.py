@@ -30,6 +30,12 @@ from webui.task_pause_support import (
     stop_mode_for_event,
 )
 
+# 收尾区信号（收尾族治愈）：抓取流程进入这些阶段时，单元已全部走完、只等
+# 关浏览器与写终态；期间来的暂停/取消/结束保存请求由收尾结论统一结算
+# （完成的事实优先），命令口只回执不执行，避免「已完成被写成已暂停」。
+_FINALIZING_STAGES = ("closing_chrome", "done")
+
+
 def run_pipeline_task(ctx,
     task_id, script_params, execution_config=None, frozen_scope=None,
 ):
@@ -66,6 +72,10 @@ def run_pipeline_task(ctx,
             if task is None:
                 return
             task["progress"] = snapshot
+            # 收尾区立牌：抓取已干完（正在关浏览器/收尾）后立牌，命令口据此
+            # 只回执不执行；牌在终态写好后清除，全程由同一把锁保护可见性。
+            if str(snapshot.get("stage") or "") in _FINALIZING_STAGES:
+                task["finalizing"] = True
             msg = snapshot.get("message")
             if msg:
                 task["logs"].append(msg)
@@ -91,6 +101,8 @@ def run_pipeline_task(ctx,
             ctx.store.create_screening_run(
                 task_id,
                 source_count=len(expand_combinations(script_params)),
+                # Spec041：兜底落库同样带任务画像身份，不落成无归属行。
+                profile_id=str(task_ref.get("profile_id") or "") or None,
                 execution_params={
                     "script_params": script_params,
                     "browser_account": ctx.account_for_run(),
@@ -292,7 +304,29 @@ def run_pipeline_task(ctx,
             has_integrity = isinstance(raw_integrity, dict)
             conclusion = str(integrity.get("conclusion") or "unverifiable")
             stop_mode = stop_mode_for_event(stop_event, task)
-            if stop_mode == STOP_MODE_PAUSE:
+            fact_complete = conclusion in {"succeeded", "empty"}
+            if stop_mode == STOP_MODE_FINISH:
+                # finish/terminate owns the durable transition and partial
+                # snapshot; the worker must not rewrite it as pause/cancel.
+                _terminal_status = "finished"
+            elif fact_complete:
+                # 事实优先（收尾族）：抓取单元已全部走完时，完成的事实压过停止
+                # 意图——期间的暂停/取消退化为标注，不再把「已完成」改写成
+                # 已暂停/已取消（否则「继续」会去连已关闭的浏览器报错）。
+                completed = list(result.get("completed_combos") or [])
+                ctx.write_run(
+                    task_id, status="succeeded", current_stage="scrape",
+                    processed_count=len(completed),
+                    source_count=int(result.get("combinations") or len(completed)),
+                    total_scraped=int(result.get("total_scraped") or 0),
+                )
+                ctx.store.append_task_event(task_id, "stage_complete", {
+                    "stage": "scrape",
+                    "combinations": int(result.get("combinations") or len(completed)),
+                    "total_scraped": int(result.get("total_scraped") or 0),
+                })
+                _terminal_status = "done"
+            elif stop_mode == STOP_MODE_PAUSE:
                 completed = mark_scrape_paused(
                     ctx, task_id,
                     completed_combos=result.get("completed_combos"),
@@ -309,24 +343,6 @@ def run_pipeline_task(ctx,
                     error_reason=ctx.msg_user_stopped_scrape,
                 )
                 _terminal_status = "cancelled"
-            elif stop_mode == STOP_MODE_FINISH:
-                # finish/terminate owns the durable transition and partial
-                # snapshot; the worker must not rewrite it as pause/cancel.
-                _terminal_status = "finished"
-            elif conclusion in {"succeeded", "empty"}:
-                completed = list(result.get("completed_combos") or [])
-                ctx.write_run(
-                    task_id, status="succeeded", current_stage="scrape",
-                    processed_count=len(completed),
-                    source_count=int(result.get("combinations") or len(completed)),
-                    total_scraped=int(result.get("total_scraped") or 0),
-                )
-                ctx.store.append_task_event(task_id, "stage_complete", {
-                    "stage": "scrape",
-                    "combinations": int(result.get("combinations") or len(completed)),
-                    "total_scraped": int(result.get("total_scraped") or 0),
-                })
-                _terminal_status = "done"
             elif conclusion == "partial":
                 completed = list(result.get("completed_combos") or [])
                 ctx.write_run(
@@ -453,17 +469,26 @@ def run_pipeline_task(ctx,
                     task["error"] = integrity.get("primary_reason") or result.get("error", "")
                 elif _terminal_status == "paused":
                     task["status"] = "paused"
-                    task["error"] = (
-                        f"列表抓取被阻断（{_pause_code}）："
-                        f"已完成 {len(completed)} 个组合，已保存断点。"
-                        "在自动化浏览器中处理后点「继续」"
-                    )
+                    if _pause_code == "user_paused":
+                        # 用户自己按的暂停：不带内部码、不提"去浏览器处理"，
+                        # 一句话说清抓了多少、断点存了、怎么接着跑。
+                        task["error"] = (
+                            f"已暂停：本轮已完成 {len(completed)} 个组合，"
+                            "断点已保存；点「继续」接着抓"
+                        )
+                    else:
+                        task["error"] = (
+                            f"列表抓取被阻断（{_pause_code}）："
+                            f"已完成 {len(completed)} 个组合，已保存断点。"
+                            "在自动化浏览器中处理后点「继续」"
+                        )
                 elif _terminal_status == "finished":
                     # The finish endpoint has already written the final
                     # interrupted/user_finished state and partial snapshot.
                     pass
                 else:
                     task["status"] = "failed"
+                task.pop("finalizing", None)
         if _terminal_status in ("cancelled", "failed", "partial"):
             ctx.clear_auto_screen(task_id)
         ctx.schedule_pipeline_task_cleanup(task_id)
@@ -620,6 +645,7 @@ def run_pipeline_task(ctx,
                         error_message if persistence_error is None
                         else f"{error_message}；状态保存失败：{persistence_error}"
                     )
+                task.pop("finalizing", None)
         if not paused and not finishing:
             ctx.clear_auto_screen(task_id)
         ctx.schedule_pipeline_task_cleanup(task_id)

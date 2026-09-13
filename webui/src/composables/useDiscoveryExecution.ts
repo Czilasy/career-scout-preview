@@ -82,8 +82,15 @@ async function saveCancelledScrapeResult(
 }
 
 export function useDiscoveryExecution(state: DiscoveryState, deps: ExecutionNeeds) {
-  const { activeCategory, activeStep, activeTaskRestored, advancedPanelsOpen, analysisReady, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityList, currentRoundStatus, draftPlatform, effectiveSearchCities, filterValues, finishSaveBusy, finishedPartial, historyDetail, historyMode, historyRound, historyScreenBusy, interruptedRunId, locationDraft, nationalScopeConfirm, oneClickOpen, pausedRunId, pipelineBusy, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, pollRetryCount, pollTimer, profileConfirmed, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, restoredTaskHint, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, schemaRef, scrapeActionBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords } = state;
+  const { activeCategory, activeStep, activeTaskRestored, advancedPanelsOpen, analysisReady, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityList, currentRoundStatus, draftPlatform, effectiveSearchCities, filterValues, finishSaveBusy, finishedPartial, historyDetail, historyMode, historyRound, historyScreenBusy, interruptedRunId, locationDraft, nationalScopeConfirm, oneClickOpen, pausedRunId, pipelineBusy, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, pollRetryCount, pollTimer, profileConfirmed, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, restoredTaskHint, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resumeAnalysisPhase, resumeAnalysisRestore, resumeError, schemaRef, scrapeActionBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, uploadBusy, workflowEpoch } = state;
   const { clearWorkflowState, enrichPausedSnapshot, enterScreenStep, enterSearchStep, isCompletedTaskStatus, isLoginErrorCode, loadCityCatalog, loadFilterLabels, loadLatestResult, notify, pollRecrawl, pollTask, refreshScopePreview, requireProfileConfirmed, restoreLocationsFromContext, returnToLatest, setDraftPlatform, setPipelineResult, showLoginGuide, validateProfileForScreen } = deps;
+
+  /** Spec041 返工：任务状态查询一律带当前画像（后端按归属校验，跨画像按不存在处理）。 */
+  function taskStateUrl(runId: string): string {
+    const profile = deps.props?.profileId;
+    const query = profile ? `?profile_id=${encodeURIComponent(profile)}` : "";
+    return `/api/task-state/${encodeURIComponent(runId)}${query}`;
+  }
 
   const scrapeAction = computed<ScrapePrimaryAction>(() => {
     const status = String(scrapeSnapshot.value?.status || "");
@@ -114,6 +121,8 @@ export function useDiscoveryExecution(state: DiscoveryState, deps: ExecutionNeed
   ));
 
 async function restoreRunningTask() {
+  const restoreEpoch = workflowEpoch.value;
+  const isCurrentRestore = () => restoreEpoch === workflowEpoch.value;
   try {
     const data = await apiRequest<{
       has_task?: boolean;
@@ -144,13 +153,55 @@ async function restoreRunningTask() {
       auto_screen?: boolean;
       auto_screen_fields?: Record<string, unknown>;
       round_context?: Partial<RoundContext> | null;
-    }>("/api/latest-running-task");
-    if (!data.has_task || !data.task_id) return;
-    // 026 B078：已进 04 页（或结束保存）＝上次流程已结束。后端残留的任何
-    // 任务（interrupted/paused/failed/completed scrape）都不得触发恢复或
-    // "服务重启被中断"提示，保持 01 页；统一由 maybeAutoStartNewRound 重置
-    //（spec FR-002/FR-003/FR-004；判据为持久化的已结束事实）。
-    if (resultsPageSeen.value || finishedPartial.value) return;
+    }>(
+      // Spec041：任务恢复必须限定在当前画像；没有画像参数会读回别人的任务。
+      deps.props?.profileId
+        ? `/api/latest-running-task?profile_id=${encodeURIComponent(deps.props.profileId)}`
+        : "/api/latest-running-task",
+    );
+    if (!isCurrentRestore()) return;
+    if (!data.has_task) return;
+    const analysisKind = ["resume_analysis", "analyze_resume", "resume"].includes(String(data.kind || "").toLowerCase());
+    if (!data.task_id && !analysisKind) return;
+    if (analysisKind) {
+      activeTaskRestored.value = true;
+      const status = String(data.status || "running").toLowerCase();
+      const taskId = String(data.task_id || "");
+      let phase: "analyzing" | "succeeded" | "failed" = "analyzing";
+      let failure = "";
+      if (["failed", "error", "cancelled", "interrupted"].includes(status)) {
+        phase = "failed";
+        failure = data.error || "简历分析失败";
+        activeStep.value = "upload";
+      } else if (["completed", "done", "succeeded", "success"].includes(status)) {
+        // 结果由 flow 从任务状态接回（与首次等待共用同一投影路径）。
+        phase = "succeeded";
+        activeStep.value = "search";
+      } else {
+        activeStep.value = "upload";
+      }
+      resumeAnalysisRestore.value?.(phase, failure, taskId);
+      resumeAnalysisPhase.value = phase;
+      if (!resumeAnalysisRestore.value) {
+        uploadBusy.value = phase === "analyzing";
+        resumeError.value = failure;
+      }
+      restoredTaskHint.value = phase === "analyzing"
+        ? "检测到简历仍在分析，已恢复分析中状态"
+        : "已恢复简历分析状态";
+      return;
+    }
+    if (!data.task_id) return;
+    // 026 B078：已进 04 页（或结束保存）＝上次流程已结束。后端残留的终态任务
+    //（interrupted/failed/completed scrape）不得触发恢复或"服务重启被中断"
+    // 提示，保持 01 页；统一由 maybeAutoStartNewRound 重置。
+    // Spec041 返工：真正在跑的任务（running/queued/pausing）是后台事实，不能被
+    // 已结束事实挡住——刷新后要接回它的真实进度（各管各的，互不打扰）。
+    // 暂停/失败/中断仍是"可结束的残留"：已结束流程不恢复它们，避免把用户
+    // 以为已经收口的旧任务又摆回页面。
+    const liveRestoredStatus = ["running", "queued", "pausing"]
+      .includes(String(data.status || ""));
+    if ((resultsPageSeen.value || finishedPartial.value) && !liveRestoredStatus) return;
     activeTaskRestored.value = true;
     // T509：先设置任务自身平台，再加载对应 schema/城市（platform-schema.md L157）。
     // 不改草稿平台（不变式 2：setTaskPlatform 不改 draft/result）。
@@ -168,6 +219,7 @@ async function restoreRunningTask() {
       // 重抓任务恢复：先加载结果供 04 查看，但跳过"上次已完成"快照
       //（03 页应显示重抓自身进度，不伪造完成态）。
       await deps.loadLatestResult({ skipTerminalSnapshot: true });
+      if (!isCurrentRestore()) return;
     }
     const snapshot: TaskSnapshot = {
       status: data.status || "running",
@@ -225,7 +277,9 @@ async function restoreRunningTask() {
       if (data.round_context) deps.restoreLocationsFromContext(data.round_context);
       restoredTaskHint.value = "检测到已完成的抓取任务，正在恢复结果";
       await deps.loadLatestResult();
+      if (!isCurrentRestore()) return;
       await deps.saveScrapedOnlySnapshot();
+      if (!isCurrentRestore()) return;
       return;
     }
     // 035（真机问题①，FR-010）：恢复到活的抓取任务（运行/排队/暂停/失败/中断）时，
@@ -255,6 +309,7 @@ async function restoreRunningTask() {
       // 039（用户拍板·单一来源）：终态错误快照同样按真实任务快照补齐计数，
       // 面板数字与实时口径一致（取不到时保持原快照，不阻塞恢复）。
       await deps.enrichPausedSnapshot(data.task_id, snapshot, "screen");
+      if (!isCurrentRestore()) return;
       screenSnapshot.value = snapshot;
       analysisReady.value = true;
       deps.enterSearchStep();
@@ -292,6 +347,7 @@ async function restoreRunningTask() {
         // 039（用户拍板·单一来源）：恢复出的面板与实时面板同一口径——完成/跳过/
         // 未开始/已抓从该任务真实快照补齐，不让计数行整行消失（与暂停恢复同一条路径）。
         await deps.enrichPausedSnapshot(data.task_id, snapshot, kind);
+        if (!isCurrentRestore()) return;
         scrapeSnapshot.value = {
           ...snapshot,
           scraped_count: data.scraped_count,
@@ -332,6 +388,7 @@ async function restoreRunningTask() {
       // 039（用户拍板·单一来源）：失败轮同样按真实任务快照补齐计数与失败留痕，
       // 不允许「已抓 N 个岗位」等数字随失败整行收起。
       await deps.enrichPausedSnapshot(data.task_id, snapshot, kind);
+      if (!isCurrentRestore()) return;
       scrapeSnapshot.value = {
         ...snapshot,
         scraped_count: data.scraped_count,
@@ -416,6 +473,7 @@ async function restoreRunningTask() {
       }
       // 拉 /api/task-state 拿完整计数画面（success/fail/unstarted/total）
       await deps.enrichPausedSnapshot(data.task_id, snapshot, kind);
+      if (!isCurrentRestore()) return;
       if (kind === "scrape") {
         scrapeSnapshot.value = {
           ...snapshot,
@@ -553,6 +611,7 @@ async function startScrape(options: OneClickLaunch = {}) {
       method: "POST",
       json: {
         platform: draftPlatform.value,
+        profile_id: state.profileId.value,
         script_params: scriptParams,
         scope_digest: preview.scope_digest,
         profile_summary: profileSummary.value,
@@ -642,8 +701,10 @@ async function pauseScrape() {
     progress: { ...((scrapeSnapshot.value || {}).progress || {}), message: "正在暂停…" },
     error: "",
   };
+  let requestAccepted = false;
   try {
     await apiRequest(`/api/task/pause/${encodeURIComponent(runId)}`, { method: "POST" });
+    requestAccepted = true;
     // 复用公共任务轮询/错误处理：paused 时由 pollTask 收口 busy、快照与提示。
     await deps.pollTask(runId, "scrape");
   } catch (error) {
@@ -666,7 +727,12 @@ async function pauseScrape() {
       deps.notify(errorMessage(error, "暂停失败，请重试"), "error");
     }
   } finally {
-    scrapeActionBusy.value = "";
+    // 暂停请求已被受理、任务仍在运行（等当前组合结束）时，保持按钮占用
+    // （变灰、显示「正在暂停」），由轮询在任务离开运行态后释放——避免用户
+    // 重复点击，也避免按钮提前复活造成「点了没反应」。请求失败时允许重试。
+    const status = String(scrapeSnapshot.value?.status || "");
+    const stillPending = status === "running" || status === "pausing" || status === "queued";
+    if (!requestAccepted || !stillPending) scrapeActionBusy.value = "";
   }
 }
 
@@ -730,9 +796,7 @@ async function continueScrape() {
 
     let refreshed: TaskSnapshot | null = null;
     try {
-      refreshed = await apiRequest<TaskSnapshot>(
-        `/api/task-state/${encodeURIComponent(runId)}`,
-      );
+      refreshed = await apiRequest<TaskSnapshot>(taskStateUrl(runId));
     } catch {
       // Unknown state must keep the paused protection below.
     }
@@ -952,29 +1016,58 @@ async function continueAiScreen(platform?: Platform) {
     // 继续失败（如 AI 限流未解除 → 409 block_not_resolved）：回到报错暂停时的样子。
     // 与刷新页面同一恢复路径：拉 task-state 全量暂停快照（进度/日志/pause_info/中文原因），
     // 不重建空快照，不直出英文错误码。
-    const restored = await apiRequest<TaskSnapshot>(
-      `/api/task-state/${encodeURIComponent(runId)}`,
-    ).catch(() => null);
+    const restored = await apiRequest<TaskSnapshot>(taskStateUrl(runId)).catch(() => null);
+    // 收尾族：任务其实已完整完成时（后端继续自检按完成定稿），尊重终态，
+    // 不把界面强行拉回「已暂停」的样子。
+    const restoredStatus = String(restored?.status || "");
+    const restoredCompleted = restoredStatus === "completed"
+      || restoredStatus === "completed_with_pending";
     screenSnapshot.value = restored
-      ? { ...restored, status: "paused" }
+      ? (restoredCompleted ? restored : { ...restored, status: "paused" })
       : { ...(screenSnapshot.value || {}), status: "paused", error: errorMessage(error, "AI 断点继续失败") };
   }
 }
 // 切片7：统一取消 paused 任务（FR-024）。
 
 
-async function finishPausedTask(runId: string) {
+async function finishPausedTask(runId: string, options?: { waitForBatch?: boolean }) {
   if (!runId || finishSaveBusy.value || cancelBusy.value || scrapeActionBusy.value) return;
-  // 先停轮询，避免旧状态在保存完成后覆盖新快照。
-  if (pollTimer.value) { window.clearTimeout(pollTimer.value); pollTimer.value = undefined; }
+  const waitForBatch = Boolean(options?.waitForBatch);
+  // 等批次收尾时保持轮询：用户能看到当前批还在跑，不是卡死；
+  // 立即保存则先停轮询，避免旧状态在保存完成后覆盖新快照。
+  if (!waitForBatch && pollTimer.value) {
+    window.clearTimeout(pollTimer.value);
+    pollTimer.value = undefined;
+  }
   finishSaveBusy.value = true;
   try {
+    if (waitForBatch) {
+      const waitingMessage = "结束保存：正在等当前批次收尾后保存…";
+      if (screenSnapshot.value) {
+        screenSnapshot.value = {
+          ...screenSnapshot.value,
+          progress: { ...(screenSnapshot.value.progress || {}), message: waitingMessage },
+        };
+      }
+      if (recrawlSnapshot.value) {
+        recrawlSnapshot.value = {
+          ...recrawlSnapshot.value,
+          progress: { ...(recrawlSnapshot.value.progress || {}), message: waitingMessage },
+        };
+      }
+    }
     const data = await apiRequest<{
       result?: PipelineResult;
       snapshot_run_id?: string;
       scrape_task_id?: string;
       platform?: Platform;
-    } & CleanupActionResponse>(`/api/task/finish/${encodeURIComponent(runId)}`, { method: "POST" });
+      waited_for_batch?: boolean;
+    } & CleanupActionResponse>(
+      `/api/task/finish/${encodeURIComponent(runId)}`,
+      waitForBatch
+        ? { method: "POST", json: { wait_for_batch: true } }
+        : { method: "POST" },
+    );
     const cleanupError = cleanupFailureMessage(data, "finish");
     scrapeBusy.value = false;
     screenBusy.value = false;

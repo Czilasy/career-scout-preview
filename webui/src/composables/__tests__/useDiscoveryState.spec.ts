@@ -1,7 +1,7 @@
 // 035 T002：liveTaskStep 只读派生——未结束任务的「真实进度页」统一判定面。
 // 抓取活 → "search"（02）；筛选/重抓活 → "screen"（03）；无活任务 → ""。
 // US2（入口守卫跳回落点）与 US3（回最新落点/按钮一致性）共用。
-import { ref } from "vue";
+import { reactive, ref } from "vue";
 import {
   deriveLiveTaskStep,
   hasLiveTaskState,
@@ -273,5 +273,119 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
     const payload = state.roundStatusPayload.value;
     expect(payload?.capsule.state).toBe("completed");
     expect(payload?.integrity?.conclusion).toBe("partial");
+  });
+
+  it("Spec041 后续：用户主动结束保存的轮次不按「中断」展示（灵动岛落回结果页）", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.resultLoaded.value = true;
+    state.finishedPartial.value = true;
+    state.pipelineResult.value = {
+      ok: true,
+      jobs: [{ verdict: "match" }],
+      integrity: {
+        conclusion: "interrupted", label: "已中断", degraded: false,
+        evidence_complete: false, primary_code: "interrupted",
+        primary_reason: "任务因取消或停止而中断", recommendation: "", revision: 4,
+      },
+    } as never;
+
+    const payload = state.roundStatusPayload.value;
+
+    expect(payload?.capsule.state).toBe("completed");
+    expect(payload?.integrity?.conclusion).toBe("partial");
+    expect(payload?.integrity?.primary_reason).toBe("已结束保存部分结果");
+  });
+
+  it("Spec041 后续：不是用户收尾的中断仍按异常展示", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.resultLoaded.value = true;
+    state.finishedPartial.value = false;
+    state.pipelineResult.value = {
+      ok: true,
+      jobs: [{ verdict: "match" }],
+      integrity: {
+        conclusion: "interrupted", label: "已中断", degraded: false,
+        evidence_complete: false, primary_code: "interrupted",
+        primary_reason: "任务因取消或停止而中断", recommendation: "", revision: 4,
+      },
+    } as never;
+
+    const payload = state.roundStatusPayload.value;
+
+    expect(payload?.capsule.state).toBe("attention");
+    expect(payload?.integrity?.conclusion).toBe("interrupted");
+  });
+});
+
+describe("useDiscoveryState 画像切换清理", () => {
+  it("切换画像时回到干净第一步并清掉旧画像结果", () => {
+    const props = reactive({ profileId: "profile-old" });
+    const state = useDiscoveryState(props, () => {});
+    state.activeStep.value = "results";
+    state.analysisReady.value = true;
+    state.profileSummary.value = "旧画像";
+    state.profileFacts.value = { experience: "5年" };
+    state.selectedKeywords.value = ["旧关键词"];
+    state.cityText.value = "旧城市";
+    state.locationDraft.setLocations("boss", "旧城市", [{
+      platform: "boss",
+      city_name: "旧城市",
+      city_code: "old-city",
+      district_name: "旧区",
+      district_code: "old-district",
+    }]);
+    state.resultLoaded.value = true;
+    state.pipelineResult.value = { ok: true, jobs: [{ job_id: "old-job" }] } as never;
+    state.filterValues.value = { boss: { salary: ["old"] }, zhilian: {} };
+    state.workflowStateRestored.value = true;
+
+    props.profileId = "profile-new";
+    state.resetForProfileSwitch();
+
+    expect(state.activeStep.value).toBe("upload");
+    expect(state.analysisReady.value).toBe(false);
+    expect(state.profileSummary.value).toBe("");
+    expect(state.profileFacts.value).toEqual({});
+    expect(state.selectedKeywords.value).toEqual([]);
+    expect(state.cityText.value).toBe("");
+    expect(state.locationDraft.getLocations("boss", "旧城市")).toEqual([]);
+    props.profileId = "profile-old";
+    expect(state.locationDraft.getLocations("boss", "旧城市")).toHaveLength(1);
+    expect(state.resultLoaded.value).toBe(false);
+    expect(state.pipelineResult.value).toBeNull();
+    expect(state.filterValues.value).toEqual({ boss: {}, zhilian: {} });
+    expect(state.workflowStateRestored.value).toBe(false);
+  });
+});
+
+describe("useDiscoveryState.enabledSteps 步骤可达（Spec041 返工补丁）", () => {
+  it("切平台后本轮抓取身份已清、结果仍在展示 → 第 3 步不再锁死", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.analysisReady.value = true;
+    // 切平台后的真实现场：本轮抓取标记被清掉，但上一轮结果继续展示。
+    state.scrapeCompleted.value = false;
+    state.resultLoaded.value = true;
+    expect(state.enabledSteps.value).toEqual(["upload", "search", "screen", "results"]);
+  });
+
+  it("既没有抓取完成也没有结果时，第 3 步仍不可进", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.analysisReady.value = true;
+    expect(state.enabledSteps.value).toEqual(["upload", "search"]);
+  });
+});
+
+describe("useDiscoveryState 城市草稿（「全国」不是城市）", () => {
+  it("草稿残留「全国」→ 城市列表为空、执行口径仍是全国范围", () => {
+    const state = makeState();
+    state.cityText.value = "全国";
+    expect(state.cityList.value).toEqual([]);
+    expect(state.effectiveSearchCities.value).toEqual(["全国"]);
+  });
+
+  it("真实城市与「全国」混写 → 只保留真实城市", () => {
+    const state = makeState();
+    state.cityText.value = "上海，全国";
+    expect(state.cityList.value).toEqual(["上海"]);
   });
 });

@@ -54,10 +54,28 @@ import {
 } from "../discovery";
 import { setThemePlatform } from "../composables/useTheme";
 import type { MergedLatestResult } from "./useDiscoveryState";
-import { liveTaskStep } from "./useDiscoveryState";
+import { liveTaskStep, type StepId } from "./useDiscoveryState";
+import { useDiscoverySceneState } from "./useDiscoverySceneState";
+import type { SceneIdentity } from "../types";
 
 export function useDiscoveryResults(state: DiscoveryState, deps: ResultsNeeds) {
-  const { activeCategory, activeStep, analysisReady, archiveHistoryLatest, currentRoundStatus, draftPlatform, exportBusy, feedbackBusyIds, groups, hideHistory, historyBackToLatest, historyMode, historyOpen, historyRound, interruptedRunId, isScrapedOnly, jdBusyIds, lifecycleDialogJob, lifecycleDialogOpen, locationDraft, pausedRunId, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, rejectedIds, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, returningFromHistory, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, showHistory, unfinishedWorkflowRestored, workflowEpoch } = state;
+  const { activeCategory, activeStep, analysisReady, archiveHistoryLatest, currentRoundStatus, draftPlatform, exportBusy, feedbackBusyIds, groups, hideHistory, historyBackToLatest, historyMode, historyOpen, historyRound, interruptedRunId, isScrapedOnly, jdBusyIds, lifecycleDialogJob, lifecycleDialogOpen, locationDraft, pausedRunId, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, profileFacts, profileId, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, rejectedIds, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resultsBootstrapPending, returningFromHistory, resumeAnalysisLandOnReturn, resumeAnalysisPhase, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, screenTaskId, showHistory, unfinishedWorkflowRestored, workflowEpoch } = state;
+  const sceneStore = useDiscoverySceneState();
+
+  function currentSceneIdentity(): SceneIdentity {
+    return {
+      profileId: profileId.value,
+      // Spec041 返工：当前轮身份取现场存档的稳定轮次值，不随 task_id /
+      // 结果 run id 变化（否则翻一次历史就把当前轮现场换了键）。
+      runEpoch: sceneStore.roundEpoch.value
+        || sceneStore.ensureRoundEpoch(profileId.value)
+        || "draft",
+      platform: platformState.result
+        || screenSnapshot.value?.platform
+        || scrapeSnapshot.value?.platform
+        || platformState.draft,
+    };
+  }
   // 跨域依赖一律经 deps.X 调用时解析：本 composable 早于 wireDiscoveryDeps 构造，
   // 构造期解构会拿到 undefined（契约 discovery-deps.ts「只在调用时读取 deps 成员」）。
   // 首屏对齐：第一次拿到最近结果时，把新任务草稿平台（顶部滑块）带到结果
@@ -95,6 +113,10 @@ function setPipelineResult(result: PipelineResult) {
   analysisReady.value = true;
   scrapeCompleted.value = true;
   resultLoaded.value = true;
+  // Spec041 补丁：结果已由后端补齐，"正在恢复上次的结果…"骨架到此结束。
+  // 启动恢复流程被活任务拦下（busy 门 / maybeAutoStartNewRound 提前返回）时，
+  // 这个标记原本没有任何清除点，会一直挡住岗位列表（要刷新一次才恢复）。
+  resultsBootstrapPending.value = false;
   const groups = partitionPipelineResult(result);
   let nextCategory: "matched" | "uncertain" | "unmatched" | "dropped" = "dropped";
   if (groups.matched.length) nextCategory = "matched";
@@ -224,14 +246,20 @@ async function syncRestoredRoundCounts(scrapeRunId: string, screenRunId: string)
   const epoch = workflowEpoch.value;
   const targets: Array<[typeof scrapeSnapshot, string]> = [
     [scrapeSnapshot, scrapeRunId],
-    [screenSnapshot, screenRunId && screenRunId !== scrapeRunId ? screenRunId : ""],
   ];
+  // 纯抓取轮没有筛选任务。这里的第二个编号只是结果轮编号，不能拿它
+  // 去读取一份旧的筛选快照，否则会把“已完成 0 / N”覆盖成旧的 2 / 2。
+  if (currentRoundStatus.value !== "scraped_only") {
+    targets.push([screenSnapshot, screenRunId && screenRunId !== scrapeRunId ? screenRunId : ""]);
+  }
   for (const [target, runId] of targets) {
     if (!runId || !target.value) continue;
     let state: Partial<ApiTaskSnapshot>;
     try {
+      // Spec041 返工：任务状态查询带当前画像，后端按归属校验。
       state = await apiRequest<Partial<ApiTaskSnapshot>>(
-        `/api/task-state/${encodeURIComponent(runId)}`);
+        `/api/task-state/${encodeURIComponent(runId)}`
+        + (profileId.value ? `?profile_id=${encodeURIComponent(profileId.value)}` : ""));
     } catch {
       continue; // 取不到真实快照时保持合成值，不阻塞首屏
     }
@@ -250,18 +278,20 @@ async function syncRestoredRoundCounts(scrapeRunId: string, screenRunId: string)
   }
 }
 
-// 最新结果加载：分别读取两个平台的最新快照并保留现有合并展示；
-// 以时间更新的一轮作为结果身份，用于主题与状态投影。
+// 最新结果加载：读取当前画像全局最新的一轮。当前任务创建入口一次只运行
+// 一个平台，因此另一平台的“最近结果”属于旧轮，不能在这里聚合。
 
 
 async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
   try {
     const requestEpoch = workflowEpoch.value;
-    // 分别拉两个平台各自的最近结果并合并展示；较新轮次决定结果身份。
-    const base = deps.props.profileId ? `&profile_id=${encodeURIComponent(deps.props.profileId)}` : "";
-    const fetchOne = (platform: "boss" | "zhilian") => apiRequest<{
+    const query = deps.props.profileId
+      ? `?profile_id=${encodeURIComponent(deps.props.profileId)}`
+      : "";
+    const data = await apiRequest<{
       has_result?: boolean;
       source_run_id?: string;
+      platform?: "boss" | "zhilian";
       result?: PipelineResult;
       status?: string;
       started_at?: number;
@@ -270,27 +300,19 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
       scrape_task_id?: string;
       round_context?: Partial<RoundContext> | null;
       integrity?: PipelineResult["integrity"];
-    }>(`/api/latest-pipeline-result?platform=${platform}${base}`).catch(() => null);
-    const [bossData, zhilianData] = await Promise.all([fetchOne("boss"), fetchOne("zhilian")]);
+    }>(`/api/latest-pipeline-result${query}`);
     if (requestEpoch !== workflowEpoch.value) return null;
     if (interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return null;
-
-    const parts = [
-      bossData?.has_result && bossData.result ? { platform: "boss" as const, data: bossData } : null,
-      zhilianData?.has_result && zhilianData.result ? { platform: "zhilian" as const, data: zhilianData } : null,
-    ].filter((part): part is { platform: "boss" | "zhilian"; data: NonNullable<typeof bossData> } => Boolean(part))
-      .filter((part) => {
-        if (!hasLiveTaskState()) return true;
-        const activeScrapeTaskId = scrapeTaskId.value;
-        return !activeScrapeTaskId || !part.data.scrape_task_id || part.data.scrape_task_id === activeScrapeTaskId;
-      });
-    if (!parts.length) return null;
-
-    // 以更新时间较新的一份为主干（profile_summary / 状态投影 / 默认 run）。
-    let newer = parts[0];
-    if (parts.length > 1 && Number(parts[1].data.started_at || 0) > Number(parts[0].data.started_at || 0)) {
-      newer = parts[1];
-    }
+    if (!data?.has_result || !data.result) return null;
+    if (hasLiveTaskState() && scrapeTaskId.value && data.scrape_task_id
+      && data.scrape_task_id !== scrapeTaskId.value) return null;
+    const platform = data.platform
+      || data.round_context?.platform
+      || data.result.jobs?.find((job) => job.platform)?.platform
+      || draftPlatform.value;
+    if (platform !== "boss" && platform !== "zhilian") return null;
+    const newer = { platform, data };
+    const parts = [newer];
 
     // 每个岗位标记来源 run（单岗位补抓/单 JD 动作需要定位来源）。
     for (const part of parts) {
@@ -387,9 +409,28 @@ function closeHistoryDrawer() {
 }
 
 
+/**
+ * Spec041 返工：当前轮的平台身份（与历史轮平台严格分开）。
+ * 结果平台优先（结果页展示的轮次身份），其次任务快照，最后才是草稿平台。
+ */
+function currentRoundPlatform(): Platform {
+  const resultPlatform = (pipelineResult.value as { platform?: string } | null)?.platform;
+  if (resultPlatform === "boss" || resultPlatform === "zhilian") return resultPlatform;
+  return screenSnapshot.value?.platform
+    || recrawlSnapshot.value?.platform
+    || scrapeSnapshot.value?.platform
+    || platformState.result
+    || platformState.draft;
+}
+
+
 function enterHistoryRound(detail: HistoryRoundDetail) {
-  // 首次进入历史时记住进入前的草稿平台，返回最新时还原。
-  if (!historyRound.value) platformBeforeHistory.value = platformState.draft;
+  // 当前轮现场先留在原身份键下，历史轮单独保存查看现场。
+  sceneStore.getCurrent(currentSceneIdentity());
+  // Spec041 返工（真实验收失败项二）：进入历史前记下"当前轮平台"，历史轮平台
+  // 只用于浏览展示，绝不改写当前轮的草稿平台与结果平台——否则退出历史后
+  // 当前轮会顶着一个错的平台（真实现场：智联历史 → 回到 BOSS 空结果页）。
+  if (!historyRound.value) platformBeforeHistory.value = currentRoundPlatform();
   // 035（真机问题③，FR-012）：历史浏览默认只读——先挂历史轮标记（同一时刻只有一个
   // 历史轮激活），展示数据直接装载，不经 setPipelineResult 的当前轮置位路径；
   // 待确认重抓是唯一复用原轮次 source_run_id 的写回入口。
@@ -414,9 +455,8 @@ function enterHistoryRound(detail: HistoryRoundDetail) {
   resultRunIds.value[detail.platform] = detail.source_run_id || "";
   resultPlatformFilter.value = detail.platform;
   // 历史轮次与顶部平台开关/品牌色绑定：BOSS 历史进 BOSS 模式，智联历史进智联模式。
+  // 只改"结果平台 + 品牌色"用于展示；草稿平台保持当前轮自己的值（不改写）。
   platformState.setResultPlatform(detail.platform);
-  platformState.setDraftPlatform(detail.platform);
-  draftPlatform.value = detail.platform;
   setThemePlatform(detail.platform);
   activeStep.value = "results";
   // B038：历史轮原始状态透传，scraped_only 轮进入"待筛选"展示模式。
@@ -425,9 +465,28 @@ function enterHistoryRound(detail: HistoryRoundDetail) {
 }
 
 
-async function returnToLatest() {
-  if (returningFromHistory.value) return;
-  const restorePlatform = platformBeforeHistory.value;
+/**
+ * 退出历史、回到当前轮现场，并返回"真实落点步骤"（供灵动岛导航使用）。
+ * 返回 null 表示本次没有完成退出（并发点击 / 用户又点了别的轮次）：调用方
+ * 不得据此再改步骤，避免制造空结果页。
+ */
+async function returnToLatest(): Promise<StepId | null> {
+  if (returningFromHistory.value) return null;
+  const resumePhase = resumeAnalysisPhase.value;
+  // Spec041 返工：当前轮平台取"进入历史前记下的当前轮平台"；
+  // 拿不到时按当前结果/任务/草稿的真实身份回退，绝不使用历史轮平台。
+  const restorePlatform = platformBeforeHistory.value || currentRoundPlatform();
+  if (historyRound.value?.runId) {
+    sceneStore.saveHistory(
+      historyRound.value.runId,
+      {},
+      {
+        profileId: profileId.value,
+        runEpoch: historyRound.value.runId,
+        platform: historyRound.value.platform,
+      },
+    );
+  }
   returningFromHistory.value = true;
   try {
     // 先拿到最新结果，再清理历史展示。请求期间继续保留历史轮次，避免
@@ -438,7 +497,7 @@ async function returnToLatest() {
     const fetched = liveStep ? null : await fetchMergedLatestResult();
     // 等结果期间用户又点了一轮历史（或又发起一次回最新）：放弃本次，
     // 迟到的「最新」不允许覆盖用户后来选中的轮次。
-    if (currentHistoryIntent() !== intent) return;
+    if (currentHistoryIntent() !== intent) return null;
 
     platformBeforeHistory.value = null;
     historyRound.value = null;
@@ -451,29 +510,37 @@ async function returnToLatest() {
     resultRunIds.value = { boss: "", zhilian: "" };
     resultEpoch.value += 1;
     currentRoundStatus.value = "";
-    if (restorePlatform) {
-      platformState.setDraftPlatform(restorePlatform);
-      draftPlatform.value = restorePlatform;
-    }
-    // 没有可恢复结果时也要回到当前草稿平台，不能把历史轮的品牌色留在新轮页面。
-    setThemePlatform(restorePlatform || draftPlatform.value);
+    // 没有可恢复结果时也要回到当前轮平台，不能把历史轮的品牌色留在新轮页面。
+    setThemePlatform(restorePlatform);
 
     if (liveStep) {
       scrapeCompleted.value = liveStep === "screen";
       activeStep.value = liveStep;
-      return;
+      return liveStep;
     }
-    if (fetched) {
+    // 分析中/失败时，拉到的可能还是旧轮结果；分析状态优先，不能误进第四页。
+    if (fetched && (resumePhase === "idle" || resumePhase === "succeeded")) {
       await applyFetchedLatestResult(fetched);
       activeStep.value = "results";
-      return;
+      return "results";
+    }
+
+    // 没有任务和最新结果时，才按简历分析自己的真实进度落点。
+    // 分析成功可能早已推进到后续完整流程，不能用旧的 succeeded 状态
+    // 把已经完成的最新结果页覆盖成第二页。
+    if (resumePhase !== "idle") {
+      resumeAnalysisLandOnReturn.value?.();
+      const step: StepId = resumePhase === "succeeded" ? "search" : "upload";
+      activeStep.value = step;
+      return step;
     }
 
     // 没有进行中的任务，也没有可恢复的最新结果：回到干净的 01，
-    // 不把一个空的 04 当成“最新结果”。
+    // 不把一个空的 04 当成“最新结果”（当前轮没有结果时落真实进度页）。
     analysisReady.value = false;
     scrapeCompleted.value = false;
     activeStep.value = "upload";
+    return "upload";
   } finally {
     returningFromHistory.value = false;
   }
@@ -686,8 +753,7 @@ async function retryJd(job: JobItem) {
     if (data.task_id) {
       recrawlBusy.value = true;
       recrawlTaskId.value = data.task_id;
-      // 单条补抓也是重抓任务：进度回 03 页展示。
-      activeStep.value = "screen";
+      // 单条补抓也是结果页上的后台任务，不能因为开始轮询就把用户带离当前现场。
       recrawlSnapshot.value = {
         status: "running",
         progress: { message: "正在补抓这条岗位…" },

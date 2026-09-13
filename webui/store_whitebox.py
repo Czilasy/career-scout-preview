@@ -147,6 +147,86 @@ class StoreWhiteboxMixin:
             row = conn.execute("SELECT * FROM whitebox_runs WHERE id=?", (run_id,)).fetchone()
             return dict(row)
 
+    def resume_whitebox_run(self, owner_kind: str, owner_id: str, plan: dict,
+                            parent_owner_id: str | None = None) -> dict[str, Any]:
+        """继续（resume）场景：同一 owner 再跑一轮时，复用并重置已有凭证。
+
+        收尾族：任务失败后用户点「继续」，同一 run_id 会重新收集证据——旧凭证
+        已是 terminal（失败定稿），若不复用就会因「终态不可改」拒收新证据，
+        凭证永远停在失败、后续 AI 子任务全部被扣上「来路不明」。
+        重置只影响结论快照与未完成单元的投影：已完成单元（succeeded/empty）
+        原样保留，继续时「跳过已完成组合」才算得清；旧事件全部保留在事件表中
+        （历史可审计）。
+        不存在时等同 create；plan 不一致时仍报冲突（防误配）。
+        """
+        owner_kind = str(owner_kind or "").strip()
+        owner_id = str(owner_id or "").strip()
+        if owner_kind not in _OWNER_KINDS or not owner_id:
+            raise ValueError("invalid whitebox owner")
+        if not isinstance(plan, dict) or not isinstance(plan.get("units"), list) or not plan.get("units"):
+            raise ValueError("whitebox plan must contain units")
+        plan_json = _canonical_plan(plan)
+        now = _now()
+        with self._connection() as conn:
+            if hasattr(self, "_assert_recovery_writes_allowed"):
+                self._assert_recovery_writes_allowed(conn)
+            existing = conn.execute(
+                "SELECT * FROM whitebox_runs WHERE owner_kind=? AND owner_id=?",
+                (owner_kind, owner_id),
+            ).fetchone()
+        # 不存在时在锁外走 create：同一写事务内嵌套第二条连接会撞 SQLite 锁。
+        if existing is None:
+            return self.create_whitebox_run(owner_kind, owner_id, plan,
+                                            parent_owner_id=parent_owner_id)
+        if str(existing["plan_json"]) != plan_json:
+            raise ValueError("whitebox plan conflict")
+        run_id = str(existing["id"])
+        with self._connection() as conn:
+            if hasattr(self, "_assert_recovery_writes_allowed"):
+                self._assert_recovery_writes_allowed(conn)
+            conn.execute(
+                "UPDATE whitebox_runs SET lifecycle_status='running', conclusion=NULL, "
+                "evidence_complete=0, degraded=0, failed_unit_count=0, completed_unit_count=0, "
+                "observed_unit_count=0, unit_output_sum=0, run_unique_count=0, "
+                "quality_counts_json='{}', primary_code=NULL, primary_reason=NULL, "
+                "finalized_at=NULL, updated_at=? WHERE id=?",
+                (now, run_id),
+            )
+            # 已完成单元的投影必须保留：继续后「跳过已完成组合」要靠这些行证明
+            # 该组合此前已经抓完。整表删除会把已完成的事实降级成「恢复时缺少完成
+            # 证据」，单元被记成跳过、结论误报为部分完成（2026-09-13 真机复现）。
+            conn.execute(
+                "DELETE FROM whitebox_units WHERE whitebox_run_id=? "
+                "AND LOWER(COALESCE(status, 'planned')) NOT IN ('succeeded', 'empty')",
+                (run_id,),
+            )
+            kept = {
+                str(row["unit_key"])
+                for row in conn.execute(
+                    "SELECT unit_key FROM whitebox_units WHERE whitebox_run_id=?", (run_id,)
+                )
+            }
+            units = []
+            for index, item in enumerate(plan["units"]):
+                item = dict(item) if isinstance(item, dict) else {"unit_key": str(item)}
+                key = str(item.get("unit_key") or item.get("key") or f"unit-{index + 1}")
+                if key in kept:
+                    continue
+                stage = str(item.get("stage") or (plan.get("stages") or ["task"])[0])
+                kind = str(item.get("unit_kind") or item.get("kind") or "unit")
+                units.append((
+                    _stable_id("wbu", run_id, stage, kind, key, 1), run_id, stage, kind, key, 1,
+                    item.get("planned_pages"), now,
+                ))
+            if units:
+                conn.executemany(
+                    "INSERT INTO whitebox_units (id, whitebox_run_id, stage, unit_kind, unit_key, "
+                    "attempt_no, planned_pages, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    units,
+                )
+            row = conn.execute("SELECT * FROM whitebox_runs WHERE id=?", (run_id,)).fetchone()
+            return dict(row)
+
     def get_whitebox_run(self, owner_kind: str, owner_id: str) -> dict[str, Any] | None:
         with self._connection() as conn:
             row = conn.execute(

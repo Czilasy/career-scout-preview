@@ -128,8 +128,13 @@ def register_profiles_routes(app, ctx):
         raw = request.get_json(silent=True) or {}
         name = raw.get("name")
         confirmed_fields = raw.get("confirmed_fields")
+        # 第 2 页输入（关键词/城市/画像文本）：随画像持久化，切平台复用、换会话不丢。
+        page2_draft = raw.get("page2_draft")
+        if page2_draft is not None and not isinstance(page2_draft, dict):
+            raise ValueError("page2_draft 必须是对象")
         return jsonify(ctx.store.update_profile(
             profile_id, name=name, confirmed_fields=confirmed_fields,
+            page2_draft=page2_draft,
         ))
 
     @app.route("/api/profiles/<profile_id>/resume", methods=["POST", "DELETE"])

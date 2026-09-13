@@ -8,8 +8,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from webui.logging_setup import get_logger
 from webui.whitebox import WhiteboxService, WhiteboxWriteError, _now
 from webui.whitebox_rules import reduce_conclusion
+
+_logger = get_logger(__name__)
 
 
 class ScrapeEvidence:
@@ -40,7 +43,9 @@ class ScrapeEvidence:
         self.startup_error = None
         if self.service is not None:
             try:
-                self.ref = self.service.begin("scrape", self.owner_id, self.plan)
+                # 收尾族：继续（resume）同一任务时，旧凭证已定稿失败——用 resume
+                # 重置凭证重新收集，成功后才能如实收口，不再残留「来路不明」。
+                self.ref = self.service.resume("scrape", self.owner_id, self.plan)
                 self.service.set_lifecycle(self.ref, "running")
                 self.attempts = {
                     str(unit.get("unit_key") or ""): int(unit.get("attempt_no") or 1)
@@ -146,33 +151,55 @@ class ScrapeEvidence:
             attempt=attempt,
         )
 
+    _CARRIED_UNIT_FIELDS = (
+        "status", "evidence_complete", "scope_complete", "source_exhausted",
+        "planned_pages", "completed_pages", "returned_total_count",
+        "unit_unique_count", "stop_reason", "quality_counts",
+    )
+
+    def _prior_completed_unit(self, key: str) -> dict[str, Any] | None:
+        """取该组合在库里已完成的投影（继续场景：暂停前就抓完了）。"""
+        if self.service is None or self.ref is None:
+            return None
+        completed = [
+            unit for unit in self.store.list_whitebox_units(self.ref.id)
+            if str(unit.get("unit_key") or "") == key
+            and str(unit.get("status") or "") in {"succeeded", "empty"}
+        ]
+        if not completed:
+            return None
+        return max(completed, key=lambda unit: int(unit.get("attempt_no") or 1))
+
     def skip(self, key: str, *, reason: str = "unknown") -> None:
         key = str(key)
-        completed = False
-        if self.service is not None and self.ref is not None:
-            completed = any(
-                unit.get("unit_key") == key and unit.get("status") in {"succeeded", "empty"}
-                for unit in self.store.list_whitebox_units(self.ref.id)
-            )
-        if not completed:
-            attempt = self.attempts.get(key, 1)
-            prior = (
-                [unit for unit in self.store.list_whitebox_units(self.ref.id) if str(unit.get("unit_key") or "") == key]
-                if self.service is not None and self.ref is not None
-                else []
-            )
-            if prior and any(str(unit.get("status") or "planned") != "planned" for unit in prior):
-                attempt = max(int(unit.get("attempt_no") or 1) for unit in prior) + 1
-            self.attempts[key] = attempt
-            self._record(
-                "unit_skipped",
-                "scrape_list",
-                {"stop_reason": reason, "reason": "恢复时缺少完成证据"},
-                key=key,
-                idem=f"skip:{key}:{attempt}",
-                attempt=attempt,
-            )
-            self.units[key].update(status="skipped", evidence_complete=False, error_code="resume_evidence_missing")
+        carried = self._prior_completed_unit(key)
+        if carried is not None:
+            # 继续场景：该组合在暂停前已经抓完。把库里已完成的投影并回本轮内存，
+            # 既不重记「跳过」，也不让内存视图比库里落后（暂停计数读的是内存）。
+            self.units[key].update({
+                name: carried[name]
+                for name in self._CARRIED_UNIT_FIELDS
+                if carried.get(name) is not None
+            })
+            return
+        attempt = self.attempts.get(key, 1)
+        prior = (
+            [unit for unit in self.store.list_whitebox_units(self.ref.id) if str(unit.get("unit_key") or "") == key]
+            if self.service is not None and self.ref is not None
+            else []
+        )
+        if prior and any(str(unit.get("status") or "planned") != "planned" for unit in prior):
+            attempt = max(int(unit.get("attempt_no") or 1) for unit in prior) + 1
+        self.attempts[key] = attempt
+        self._record(
+            "unit_skipped",
+            "scrape_list",
+            {"stop_reason": reason, "reason": "恢复时缺少完成证据"},
+            key=key,
+            idem=f"skip:{key}:{attempt}",
+            attempt=attempt,
+        )
+        self.units[key].update(status="skipped", evidence_complete=False, error_code="resume_evidence_missing")
 
     def failed(self, key: str, outcome: Any, *, skipped: bool = False, reason: str = "") -> None:
         key = str(key)
@@ -311,10 +338,24 @@ class ScrapeEvidence:
         payload["ok"] = False
         return payload
 
+    def _run_unique_count(self) -> int:
+        """本轮去重后岗位数：以已持久化抓取记录为准（继续前抓到的组合也算），
+        取不到再回退到本次进程内见过的岗位集合。"""
+        count = len(self.run_ids)
+        counter = getattr(self.store, "count_scrape_run_jobs", None)
+        if callable(counter):
+            try:
+                count = max(count, int(counter(self.owner_id) or 0))
+            except Exception as exc:
+                # 031 B4 / FR-012：取不到持久化计数就退回进程内计数，但必须留痕——
+                # pass-only 静默吞噬会被仓库卫生门禁拦下（本次提交前实测被拦）。
+                _logger.warning("读取持久化抓取计数失败，回退进程内计数：%s", exc)
+        return count
+
     def finish(self, payload: dict, *, lifecycle_end: str | None = None) -> dict:
         try:
             if self.service is not None:
-                self.service._run_unique_count = len(self.run_ids)
+                self.service._run_unique_count = self._run_unique_count()
             integrity = (
                 self.service.finalize(self.ref, lifecycle_end=lifecycle_end)
                 if self.service is not None and self.ref is not None

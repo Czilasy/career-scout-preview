@@ -4,7 +4,7 @@
 // - 关闭路径：点外部 / ESC / 点按钮 / 操作完成（排序点选、筛选确定/重置）。
 // - 筛选面板使用草稿（确定才提交）；排序点选即生效。
 // - 窄屏（≤390px）按钮退化为纯图标，徽标保留数字。
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ArrowDownUp, SlidersHorizontal } from "@lucide/vue";
 import JobFilterPanel from "./JobFilterPanel.vue";
 import JobSortMenu from "./JobSortMenu.vue";
@@ -13,11 +13,13 @@ import type { FilterState, SortKey } from "../listFilter";
 
 const props = defineProps<{
   filterState: FilterState;
+  draftFilterState?: FilterState;
   sortKey: SortKey;
 }>();
 
 const emit = defineEmits<{
   "apply-filter": [state: FilterState];
+  "draft-filter-change": [state: FilterState];
   "reset-filter": [];
   "select-sort": [key: SortKey];
 }>();
@@ -25,7 +27,10 @@ const emit = defineEmits<{
 const filterPanelOpen = ref(false);
 const sortMenuOpen = ref(false);
 /** 筛选草稿：打开面板时从已应用状态复制，确定/重置才提交。 */
-const filterDraft = ref<FilterState>(emptyFilterState());
+const filterDraft = ref<FilterState>(copyFilterState(props.draftFilterState || props.filterState));
+const hasPendingFilterDraft = ref(
+  JSON.stringify(props.draftFilterState || props.filterState) !== JSON.stringify(props.filterState),
+);
 const filterPanelEl = ref<HTMLElement | null>(null);
 const sortMenuEl = ref<HTMLElement | null>(null);
 const toolsEl = ref<HTMLElement | null>(null);
@@ -45,6 +50,19 @@ function closePopovers() {
     resizeCleanup();
     resizeCleanup = undefined;
   }
+}
+
+function copyFilterState(state: FilterState): FilterState {
+  return {
+    salary: [...state.salary],
+    experience: [...state.experience],
+    degree: [...state.degree],
+    welfare: [...state.welfare],
+  };
+}
+
+function syncFilterDraft() {
+  if (!hasPendingFilterDraft.value) filterDraft.value = copyFilterState(props.filterState);
 }
 
 let scrollCleanup: (() => void) | undefined;
@@ -106,13 +124,8 @@ function onFilterToggle(event: MouseEvent) {
     closePopovers();
     return;
   }
-  // 草稿始终从已应用状态派生（面板可反复开关，未点确定不丢失/不生效）
-  filterDraft.value = {
-    salary: [...props.filterState.salary],
-    experience: [...props.filterState.experience],
-    degree: [...props.filterState.degree],
-    welfare: [...props.filterState.welfare],
-  };
+  // 面板关闭不代表用户放弃草稿；下一次打开继续显示上次未确定的选择。
+  syncFilterDraft();
   openPopover("filter", anchor, () => filterPanelEl.value);
 }
 
@@ -126,16 +139,13 @@ function onSortToggle(event: MouseEvent) {
 }
 
 function applyFilters() {
-  emit("apply-filter", {
-    salary: [...filterDraft.value.salary],
-    experience: [...filterDraft.value.experience],
-    degree: [...filterDraft.value.degree],
-    welfare: [...filterDraft.value.welfare],
-  });
+  emit("apply-filter", copyFilterState(filterDraft.value));
+  hasPendingFilterDraft.value = false;
   closePopovers();
 }
 
 function resetFilters() {
+  hasPendingFilterDraft.value = false;
   emit("reset-filter");
   closePopovers();
 }
@@ -159,6 +169,19 @@ function onDocumentPointerDown(event: MouseEvent) {
 function onPopoverKeydown(event: KeyboardEvent) {
   if (event.key === "Escape") closePopovers();
 }
+
+function onDraftFilterChange(state: FilterState) {
+  filterDraft.value = copyFilterState(state);
+  hasPendingFilterDraft.value = true;
+  emit("draft-filter-change", copyFilterState(state));
+}
+
+watch(() => props.filterState, syncFilterDraft, { deep: true });
+watch(() => props.draftFilterState, (draft) => {
+  if (!draft) return;
+  filterDraft.value = copyFilterState(draft);
+  hasPendingFilterDraft.value = JSON.stringify(draft) !== JSON.stringify(props.filterState);
+}, { deep: true });
 
 onMounted(() => {
   document.addEventListener("pointerdown", onDocumentPointerDown);
@@ -221,7 +244,7 @@ onBeforeUnmount(() => {
     >
       <JobFilterPanel
         :model-value="filterDraft"
-        @update:model-value="(state) => { filterDraft = state; }"
+        @update:model-value="onDraftFilterChange"
         @apply="applyFilters"
         @reset="resetFilters"
       />

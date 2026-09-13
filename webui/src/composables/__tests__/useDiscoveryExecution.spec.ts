@@ -53,6 +53,7 @@ function makeDeps(overrides: Partial<ExecutionNeeds> = {}): ExecutionNeeds {
     persistFinishedState: vi.fn(),
     pollRecrawl: vi.fn(async () => {}),
     pollTask: vi.fn(async () => {}),
+    props: { profileId: "test" },
     refreshScopePreview: vi.fn(async () => null),
     requireProfileConfirmed: vi.fn(() => true),
     restoreLocationsFromContext: vi.fn(),
@@ -91,6 +92,66 @@ const interruptedScreenResponse = {
 describe("useDiscoveryExecution.restoreRunningTask（026 B078）", () => {
   beforeEach(() => {
     apiRequestMock.mockReset();
+  });
+
+  it("恢复任务时按当前画像查询，不读其它画像的任务", async () => {
+    apiRequestMock.mockResolvedValue({ has_task: false });
+    const state = makeState();
+    const deps = makeDeps();
+    const execution = useDiscoveryExecution(state, deps);
+
+    await execution.restoreRunningTask();
+
+    expect(apiRequestMock).toHaveBeenCalledWith("/api/latest-running-task?profile_id=test");
+  });
+
+  it("恢复简历分析任务时把 task_id 交给分析流程接回结果", async () => {
+    apiRequestMock.mockResolvedValue({
+      has_task: true,
+      task_id: "resume-analysis-1",
+      kind: "resume_analysis",
+      status: "running",
+      platform: "boss",
+    });
+    const state = makeState();
+    const restore = vi.fn();
+    state.resumeAnalysisRestore.value = restore;
+    const deps = makeDeps();
+    const execution = useDiscoveryExecution(state, deps);
+
+    await execution.restoreRunningTask();
+
+    expect(restore).toHaveBeenCalledWith("analyzing", "", "resume-analysis-1");
+    expect(state.activeStep.value).toBe("upload");
+    expect(state.activeTaskRestored.value).toBe(true);
+  });
+
+  it("切换画像后，旧画像晚到的恢复响应不能写回新画像", async () => {
+    let resolveResponse: (value: Record<string, unknown>) => void = () => {};
+    apiRequestMock.mockReturnValue(new Promise((resolve) => {
+      resolveResponse = resolve;
+    }));
+    const state = makeState();
+    state.activeStep.value = "search";
+    const deps = makeDeps();
+    const execution = useDiscoveryExecution(state, deps);
+
+    const restoring = execution.restoreRunningTask();
+    state.resetForProfileSwitch();
+    expect(state.workflowEpoch.value).toBe(1);
+    resolveResponse({
+      has_task: true,
+      task_id: "old-profile-task",
+      kind: "scrape",
+      status: "running",
+      platform: "boss",
+    });
+    await restoring;
+
+    expect(state.activeStep.value).toBe("upload");
+    expect(state.scrapeTaskId.value).toBe("");
+    expect(state.scrapeBusy.value).toBe(false);
+    expect(deps.pollTask).not.toHaveBeenCalled();
   });
 
   it("T001: 已进 04 页（已结束）+ 后端残留 interrupted → 不恢复、不弹提示", async () => {
@@ -447,6 +508,24 @@ describe("抓取任务恢复边界", () => {
     expect(state.scrapeSnapshot.value?.status).toBe("pausing");
     expect(state.pipelineBusy.value).toBe(true);
     expect(state.scrapeActionBusy.value).toBe("");
+  });
+
+  it("暂停请求受理后任务仍在运行保持暂停占用（按钮变灰，不可重复点）", async () => {
+    const state = makeState({
+      scrapeTaskId: ref("scrape-hold"),
+      scrapeSnapshot: ref({ status: "running", progress: {}, logs: [] }),
+    });
+    const deps = makeDeps({
+      // 任务仍在等当前组合结束：轮询不会把快照推进到 paused
+      pollTask: vi.fn(async () => {}),
+    });
+    apiRequestMock.mockResolvedValueOnce({ ok: true });
+    const execution = useDiscoveryExecution(state, deps);
+
+    await execution.pauseScrape();
+
+    expect(state.scrapeActionBusy.value).toBe("pause-scrape");
+    expect(state.scrapeSnapshot.value?.status).toBe("pausing");
   });
 
   it("续跑收到明确失败响应时清除本地恢复标记并解除新任务锁", async () => {

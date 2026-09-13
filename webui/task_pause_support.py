@@ -515,6 +515,13 @@ def pause_with_mode(ctx, run_id: str, mode: str):
                 "ok": False, "error": "not_pausable_task",
                 "message": "只有可暂停任务可以暂停",
             }), 409
+        if task.get("finalizing"):
+            # 收尾区（事实已定）：任务正在关浏览器/写终态，暂停请求只回执、
+            # 不执行——收尾结论统一结算（完成优先），随后任务即到终态。
+            return jsonify({
+                "ok": True, "run_id": run_id, "status": "finalizing",
+                "message": "任务正在收尾，暂停未执行",
+            }), 200
         if task["status"] not in ("queued", "running"):
             if mode == "immediate":
                 # 025：已暂停/已终态再点立即停止 → 幂等不报错
@@ -570,3 +577,39 @@ def cancel_task_cleanup(ctx, run_id: str) -> None:
             guard.immediate_stop_task(run_id)
         except Exception:
             _logger.exception("cancel_task_cleanup 异常（已忽略）")
+
+
+def scrape_completion_evidence(ctx, run_id: str) -> bool:
+    """是否为「事实已完成」的抓取 run（收尾族：纠正误写暂停的判定依据）。
+
+    与 /api/latest-running-task 的孤儿补写同口径：断点覆盖全部组合、已抓
+    岗位非空、白箱结论 succeeded/empty 且证据完整。任何读取异常一律返回
+    False——绝不拿不确定的证据把暂停任务改成完成。
+    """
+    try:
+        run = ctx.store.get_screening_run(run_id)
+    except ctx.operational_errors:
+        return False
+    if run is None:
+        return False
+    source_total = int(run.get("source_count") or 0)
+    if source_total <= 0:
+        return False
+    try:
+        checkpoint_done = len(ctx.store.load_checkpoint(run_id, "scrape"))
+        scraped_count = int(ctx.store.count_scrape_run_jobs(run_id))
+    except ctx.operational_errors:
+        return False
+    if checkpoint_done < source_total or scraped_count <= 0:
+        return False
+    try:
+        from webui.whitebox import WhiteboxService
+        integrity = WhiteboxService(ctx.store).report("scrape", run_id)["integrity"]
+    except Exception:
+        return False
+    if not isinstance(integrity, dict):
+        return False
+    return (
+        str(integrity.get("conclusion") or "") in {"succeeded", "empty"}
+        and bool(integrity.get("evidence_complete"))
+    )

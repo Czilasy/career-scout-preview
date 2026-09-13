@@ -114,8 +114,10 @@ class ResultHistoryService:
     def __init__(self, store):
         self.store = store
 
-    def list_history(self, platform: str | None = None) -> list[dict[str, Any]]:
-        rows = self.store.list_history_rounds(platform)
+    def list_history(
+        self, platform: str | None = None, profile_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = self.store.list_history_rounds(platform, profile_id=profile_id)
         latest_ids: dict[str, str] = {}
         for row in rows:
             platform_key = str(row.get("platform") or "")
@@ -150,9 +152,15 @@ class ResultHistoryService:
             })
         return items
 
-    def get_round(self, run_id: str) -> dict[str, Any] | None:
+    def get_round(self, run_id: str, profile_id: str | None = None) -> dict[str, Any] | None:
         run = self.store.get_screening_run(run_id)
         if run is None or run.get("record_kind") != "result_snapshot":
+            return None
+        owner = str(run.get("profile_id") or "")
+        if profile_id and owner and owner != str(profile_id):
+            # Spec041：不属于该画像的轮次按不存在处理，避免跨画像读详情；
+            # 无归属（NULL/空）的老数据对所有画像可见（Spec041 收尾用户拍板：
+            # 老数据要留在历史里能看见）。
             return None
         payload = self.store.load_latest_pipeline_result(run_id)
         if payload is None:
@@ -183,12 +191,13 @@ class ResultHistoryService:
             "result": result,
         }
 
-    def archive_all_current_results(self) -> list[str]:
-        """归档所有当前结果（BOSS 与智联），保留为历史轮次。"""
-        return self.store.archive_all_current_results()
+    def archive_all_current_results(self, profile_id: str | None = None) -> list[str]:
+        """归档当前画像的当前结果（BOSS 与智联），保留为历史轮次。"""
+        return self.store.archive_all_current_results(profile_id=profile_id)
 
-    def delete_round(self, run_id: str) -> bool:
-        return self.store.delete_history_result_preserving_logs(run_id)
+    def delete_round(self, run_id: str, profile_id: str | None = None) -> bool:
+        return self.store.delete_history_result_preserving_logs(
+            run_id, profile_id=profile_id)
 
     def prune_retention(self, limit: int = 30) -> list[str]:
         return self.store.prune_result_history(limit)

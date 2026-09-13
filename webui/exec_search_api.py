@@ -200,6 +200,7 @@ def register_exec_search_routes(app, ctx):
             else None
         )
         profile_summary = str(body.get("profile_summary") or "")
+        career_profile_id = str(body.get("profile_id") or "").strip() or None
         raw_profile_facts = body.get("profile_facts")
         profile_facts = (
             raw_profile_facts
@@ -398,10 +399,13 @@ def register_exec_search_routes(app, ctx):
             task["profile_key"] = login_space.profile_key
             task["task_input_digest"] = task_input_digest
             task["auto_screen"] = auto_screen
+            # Spec041：内存任务也携带画像身份，恢复/取消不得跨画像。
+            task["profile_id"] = career_profile_id
         ctx.store.create_screening_run(
             task_id,
             frozen_filters={},
             source_count=frozen_scope.combination_count,
+            profile_id=career_profile_id,
             execution_params={
                 "platform": platform_raw,
                 "filter_schema_version": None,

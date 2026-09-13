@@ -2397,7 +2397,23 @@ button:disabled {
   border-radius: var(--radius-lg);
   background: var(--panel);
   box-shadow: var(--shadow);
-}.dialog-lg { width: min(100%, 920px); max-width: 920px; max-height: min(860px, calc(100vh - 32px)); }.dialog-account { width: min(100%, 720px); max-width: 720px; max-height: min(860px, calc(100vh - 32px)); }.dialog-header {
+}.dialog-lg { width: min(100%, 920px); max-width: 920px; max-height: min(860px, calc(100vh - 32px)); }.dialog-account { width: min(100%, 720px); max-width: 720px; max-height: min(860px, calc(100vh - 32px)); }
+/* 迷你档（025 B076 批中二选一专用）：暂停是轻动作，一行标题 + 一行说明 + 两个小键，
+   不占满屏、不放大框。只有 size="xs" 的弹窗用这一档，其它弹窗不受影响。 */
+.dialog-xs { width: min(100%, 380px); max-width: 380px; border-radius: var(--radius-md); }
+.dialog-xs .dialog-header { gap: 10px; padding: 14px 14px 0; }
+.dialog-xs .dialog-header h2 { font-size: 15px; }
+.dialog-xs .dialog-header p { margin-top: 4px; font-size: 12px; line-height: 1.5; }
+.dialog-xs .dialog-header .icon-button { width: 28px; height: 28px; }
+.dialog-xs .dialog-body { padding: 12px 14px 14px; }
+/* 暗色+智联这一套令牌漏定义了危险色（会继承浅色主题的暗红），先在迷你档内兜住，
+   保证「立即停止」在这套主题下是暗色该有的亮红；全局补齐另说。 */
+:root[data-theme="dark"][data-platform="zhilian"] .dialog-xs {
+  --reject: #f08c8c;
+  --reject-deep: #f5abab;
+  --reject-wash: rgba(240, 140, 140, 0.12);
+  --reject-edge: rgba(240, 140, 140, 0.35);
+}.dialog-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;

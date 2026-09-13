@@ -149,6 +149,9 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/src/composables/useDiscoveryExecution.ts` — Discovery 抓取/AI 筛选执行动作（021 B8 T027）
 - `webui/src/composables/useDiscoveryTasks.ts` — Discovery 任务轮询/快照/重抓动作（021 B8 T027）
 - `webui/src/composables/useDiscoveryResults.ts` — Discovery 结果/历史/反馈/导出动作（021 B8 T027）
+- `webui/src/composables/useDiscoverySceneState.ts` — 步骤页、历史轮次和刷新之间的现场存档与身份隔离（Spec041）
+- `webui/src/composables/useIslandNavigation.ts` — 灵动岛按真实任务阶段计算落点并安全退出历史页（Spec041）
+- `webui/src/composables/useResumeAnalysisFlow.ts` — 简历分析的后台运行、真实失败和返回落点（Spec041）
 - `webui/pipeline_guard.py` — 流水线防护域：JD 抓取批次卡死判定（心跳/独立监控/失联清理）/重抓编排/环境分流/兜底暂停/事件日志（022）
 - `webui/log_api.py` — 日志读取路由域：GET /api/logs 读 career-scout.log 尾部/分页/轮询偏移与轮转切换（022）
 - `webui/mode_configs.py` — 档位配置数据域：三档×三规模冻结数值、任务规模阈值、get_mode_config（024）
@@ -197,6 +200,10 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/whitebox_evidence.py` — 033 V2 抓取分页事实适配器：把抓取循环事实投影到公共白箱服务
 - `webui/task_finish_whitebox.py` — 033 V2 手动结束与恢复提交失败的白箱收口辅助
 - `webui/exec_search_whitebox.py` — 033 V2 搜索执行入口的白箱计划与提交失败辅助
+- `webui/src/composables/useDiscoverySceneIdentity.ts` — 步骤页现场身份：稳定轮次身份（跨阶段/跨刷新不变）+ 结果 run id 登记（Spec041 返工）
+- `webui/src/composables/useProfileInputScene.ts` — 画像文字框高度现场：同轮同宽同内容接回、变化时重算回写（Spec041 返工）
+- `webui/src/composables/useDiscoveryIslandBridge.ts` — 灵动岛点击落点桥接：信号归一 → 落点执行（自 useDiscoveryState.ts 外迁，Spec041 返工）
+- `webui/src/composables/useDiscoveryLogViewer.ts` — 历史轮日志对话框现场：任务号开关 + 切画像清理（Spec041 返工）
 
 ## 文件布局约束
 

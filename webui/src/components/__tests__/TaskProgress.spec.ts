@@ -45,6 +45,30 @@ describe("TaskProgress accessibility announcement", () => {
   });
 });
 
+describe("TaskProgress 用户结束保存口径", () => {
+  it("用户主动结束保存的轮次不显示「任务因取消或停止而中断」", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "completed_with_pending",
+          integrity: {
+            conclusion: "interrupted",
+            label: "已中断",
+            primary_code: "interrupted",
+            primary_reason: "任务因取消或停止而中断",
+          },
+        }) as never,
+        kind: "screen",
+        userFinished: true,
+      },
+    });
+
+    expect(wrapper.text()).not.toContain("任务因取消或停止而中断");
+    expect(wrapper.text()).toContain("已结束保存部分结果");
+    wrapper.unmount();
+  });
+});
+
 describe("TaskProgress diagnostics", () => {
   it("shows inline Chinese reason plus red error field for failed state", () => {
     const wrapper = mount(TaskProgress, {

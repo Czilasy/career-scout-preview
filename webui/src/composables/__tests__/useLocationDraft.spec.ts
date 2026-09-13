@@ -1,3 +1,5 @@
+import { ref } from "vue";
+import { vi } from "vitest";
 import { useLocationDraft } from "../useLocationDraft";
 import type { LocationCondition } from "../../types";
 
@@ -71,5 +73,37 @@ describe("useLocationDraft", () => {
     draft.reset();
     expect(draft.allLocations("boss", ["上海"])).toEqual([]);
     expect(draft.allLocations("zhilian", ["北京"])).toEqual([]);
+  });
+
+  it("keeps each profile's drafts when switching away and back", () => {
+    const profileId = ref("profile-a");
+    const profiledDraft = useLocationDraft(profileId);
+    profiledDraft.reset();
+    profiledDraft.setLocations("boss", "上海", [bossLocation()]);
+
+    profileId.value = "profile-b";
+    expect(profiledDraft.getLocations("boss", "上海")).toEqual([]);
+    profiledDraft.setLocations("zhilian", "北京", [zhilianLocation()]);
+
+    profileId.value = "profile-a";
+    expect(profiledDraft.getLocations("boss", "上海")).toHaveLength(1);
+    expect(profiledDraft.getLocations("zhilian", "北京")).toEqual([]);
+    profiledDraft.reset();
+  });
+
+  it("restores the current profile location draft after a page reload", async () => {
+    sessionStorage.clear();
+    vi.resetModules();
+    const firstModule = await import("../useLocationDraft");
+    const first = firstModule.useLocationDraft("profile-reload");
+    first.reset();
+    first.setLocations("boss", "上海", [bossLocation()]);
+
+    vi.resetModules();
+    const secondModule = await import("../useLocationDraft");
+    const second = secondModule.useLocationDraft("profile-reload");
+
+    expect(second.getLocations("boss", "上海")).toHaveLength(1);
+    second.reset();
   });
 });

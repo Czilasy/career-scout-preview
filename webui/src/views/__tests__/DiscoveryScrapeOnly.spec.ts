@@ -43,6 +43,7 @@ interface FetchPlan {
   scrapeSave?: Record<string, unknown>;
   historyList?: Record<string, unknown>;
   historyDetail?: Record<string, unknown>;
+  filterSchema?: Record<string, unknown>;
 }
 
 function mountWithFetch(plan: FetchPlan) {
@@ -55,24 +56,21 @@ function mountWithFetch(plan: FetchPlan) {
       const taskId = url.split("/api/task-state/")[1].split("?")[0];
       return response(plan.taskStates?.[taskId] ?? { status: "running" });
     }
-    if (url.includes("/api/latest-pipeline-result") && url.includes("platform=boss")) {
-      return response(plan.latestBoss ?? { ok: true, has_result: false });
-    }
-    if (url.includes("/api/latest-pipeline-result") && url.includes("platform=zhilian")) {
-      return response(plan.latestZhilian ?? { ok: true, has_result: false });
+    if (url.includes("/api/latest-pipeline-result")) {
+      return response(plan.latestBoss ?? plan.latestZhilian ?? { ok: true, has_result: false });
     }
     if (url.includes("/api/scrape-result-save")) {
       return response(plan.scrapeSave ?? { ok: true, saved: false });
     }
-    if (url.includes("/api/result-history/") && !url.endsWith("/api/result-history")) {
+    if (url.includes("/api/result-history/") && !(url.includes("/api/result-history?") || url.endsWith("/api/result-history"))) {
       const runId = url.split("/api/result-history/")[1].split("?")[0];
       return response((plan.historyDetail as Record<string, { run_id: string }> | undefined)?.[runId]
         ?? { ok: false });
     }
-    if (url.endsWith("/api/result-history")) {
+    if ((url.includes("/api/result-history?") || url.endsWith("/api/result-history"))) {
       return response(plan.historyList ?? { ok: true, items: [] });
     }
-    if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+    if (url.includes("/api/filter-labels")) return response(plan.filterSchema ?? { labels: {} });
     if (url.endsWith("/api/options")) return response({ cities: [] });
     if (url.endsWith("/api/advanced-settings")) {
       return response({
@@ -148,10 +146,7 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
         });
       }
       if (url.includes("/api/latest-running-task")) return response({ ok: true, has_task: false });
-      if (url.includes("/api/latest-pipeline-result") && url.includes("platform=boss")) {
-        return response({ ok: true, has_result: false });
-      }
-      if (url.includes("/api/latest-pipeline-result") && url.includes("platform=zhilian")) {
+      if (url.includes("/api/latest-pipeline-result")) {
         return response({ ok: true, has_result: false });
       }
       if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
@@ -175,6 +170,36 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
     // 顶栏上抛 scraped 相位（已抓取数 = 238）
     const scraped = wrapper.emitted("round-status")?.findLast(([p]) => (p as { phase: string }).phase === "scraped");
     expect(scraped?.[0]).toMatchObject({ phase: "scraped", judged: 238 });
+  });
+
+  it("只抓取结果页进入确认条件时保留完整七类条件", async () => {
+    const filterSchema = {
+      ok: true, platform: "boss", schema_version: 1, enabled_for_new_tasks: true,
+      fields: ["salary", "experience", "degree", "industry", "scale", "stage", "recruiter_activity"]
+        .map((key) => ({
+          key,
+          label: key === "recruiter_activity" ? "招聘者上次活跃" : key,
+          multiple: key !== "recruiter_activity",
+          options: [{ value: `${key}-one`, label: `${key}选项` }],
+        })),
+    };
+    const { wrapper } = mountWithFetch({
+      filterSchema,
+      runningTask: { ok: true, has_task: true, kind: "scrape", task_id: "scrape-1", status: "running", platform: "boss" },
+      taskStates: { "scrape-1": { status: "done", scraped_count: 2, source_total: 2, platform: "boss" } },
+      scrapeSave: { ok: true, saved: true, run_id: "run-1", result: { ok: true, jobs: jobs(2), dropped: [] } },
+    });
+    await flushPromises();
+    await flushPromises();
+    await wrapper.get('[data-testid="view-scraped-only"]').trigger("click");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="scraped-only-confirm-filters"]').trigger("click");
+    await flushPromises();
+    const screen = wrapper.findAll(".workflow-stack")[1]!;
+    expect(screen.isVisible()).toBe(true);
+    expect(screen.findAll("fieldset")).toHaveLength(7);
+    expect(screen.text()).toContain("招聘者上次活跃");
   });
 
   it("04 scraped_only 轮保持只读浏览：待筛选模式且不出现重抓胶囊", async () => {
@@ -279,6 +304,6 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
     await wrapper.get('[data-testid="screen-from-history"]').trigger("click");
     await flushPromises();
     // 退出历史模式进入步骤 3（AI 筛选条件确认）
-    expect(wrapper.text()).toContain("确认 6 类筛选条件");
+    expect(wrapper.text()).toContain("确认七类筛选条件");
   });
 });

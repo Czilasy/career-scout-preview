@@ -4,7 +4,9 @@ import {
   createPlatformState,
   DEFAULT_PLATFORM,
   filterPipelineResultByPlatform,
+  isNationwideCityName,
   normalizeScopePreview,
+  stripNationwideCities,
   partitionPipelineResult,
   projectResumeSuggestionToSchema,
   historyStatusLabel,
@@ -451,5 +453,19 @@ describe("history status mapping", () => {
     expect(roundScopeLabel("history", "zhilian")).toBe("历史轮次");
     expect(roundScopeLabel("boss", "boss")).toBe("BOSS");
     expect(roundScopeLabel("zhilian", "zhilian")).toBe("智联");
+  });
+});
+
+describe("全国哨兵（「全国」不是城市）", () => {
+  it("isNationwideCityName 只认「全国」本身", () => {
+    expect(isNationwideCityName("全国")).toBe(true);
+    expect(isNationwideCityName(" 全国 ")).toBe(true);
+    expect(isNationwideCityName("全国大赛")).toBe(false);
+    expect(isNationwideCityName("上海")).toBe(false);
+  });
+
+  it("stripNationwideCities 去掉哨兵、保留真实城市", () => {
+    expect(stripNationwideCities(["全国"])).toEqual([]);
+    expect(stripNationwideCities(["全国", "上海"])).toEqual(["上海"]);
   });
 });

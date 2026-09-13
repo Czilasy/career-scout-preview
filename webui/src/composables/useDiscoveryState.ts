@@ -8,6 +8,7 @@ import {
   createSchemaLoader,
   DEFAULT_PLATFORM,
   filterPipelineResultByPlatform,
+  isNationwideCityName,
   normalizeScopePreview,
   partitionPipelineResult,
   projectResumeSuggestionToSchema,
@@ -28,6 +29,10 @@ import type {
   RoundContext,
   IntegritySnapshot,
   ComboIssue,
+  DynamicIslandState,
+  IslandNavTarget,
+  PageScene,
+  ResumeAnalysisPhase,
   TaskSnapshot as ApiTaskSnapshot,
 } from "../types";
 import JobWorkspace from "../components/JobWorkspace.vue";
@@ -63,7 +68,8 @@ import {
 } from "@lucide/vue";
 import { historyStatusLabel } from "../discovery";
 import { useLocationDraft } from "../composables/useLocationDraft";
-import { useResultHistory } from "../composables/resultHistory";
+import { useSearchDraftSlots } from "../composables/useSearchDraftSlots";
+import { setHistoryProfile, useResultHistory } from "../composables/resultHistory";
 
 // ---------------------------------------------------------------------------
 // 036 B088：胶囊点击导航信号（App.vue 经 DynamicIsland 派发，本域消费）。
@@ -71,8 +77,10 @@ import { useResultHistory } from "../composables/resultHistory";
 // DiscoveryView.vue 是超限红线文件禁止修改，胶囊点击需要从 App 侧驱动
 // Discovery 内部 activeStep，故经此模块级信号解耦（App 只发目标，本域响应）。
 // ---------------------------------------------------------------------------
-export type CapsuleNavigationTarget = "home" | "task" | "results" | "attention";
-const capsuleNavigationTarget = ref<CapsuleNavigationTarget | null>(null);
+export type CapsuleNavigationTarget = IslandNavTarget | "task" | "attention";
+/** 导航信号（Spec041）：消费方 useDiscoveryIslandBridge 由视图在 setup 里构造。 */
+export const capsuleNavigationTarget = ref<CapsuleNavigationTarget | null>(null);
+export type { DynamicIslandState } from "../types";
 
 /** 请求顶栏胶囊导航（App.vue 在 DynamicIsland 点击时调用）。 */
 export function requestCapsuleNavigation(target: CapsuleNavigationTarget): void {
@@ -82,10 +90,11 @@ export function requestCapsuleNavigation(target: CapsuleNavigationTarget): void 
 export function useDiscoveryState(props: DiscoveryProps, emit: DiscoveryEmit) {
 
 
-const WORKFLOW_STATE_VERSION = 1;
+const WORKFLOW_STATE_VERSION = 2;
 
 
 const workflowStateKey = computed(() => `career-scout-workflow:${props.profileId}`);
+const profileId = computed(() => props.profileId);
 
 
 const workflowStateRestored = ref(false);
@@ -101,6 +110,10 @@ const restoredWorkflowSnapshot = ref<Record<string, any> | null>(null);
 
 
 const activeTaskRestored = ref(false);
+
+// Spec041：步骤页内部现场由 useDiscoverySceneState 保存；这里保留轮次快照，
+// 让既有 workflow sessionStorage 通道在刷新时一并带上现场。
+const sceneSnapshot = ref<PageScene | null>(null);
 
 // D7：未登录类错误码（BOSS/智联 preflight 与任务暂停的稳定错误码）。
 const LOGIN_ERROR_CODES = new Set([
@@ -227,7 +240,7 @@ const customKeyword = ref("");
 const cityText = ref("");
 
 
-const locationDraft = useLocationDraft();
+const locationDraft = useLocationDraft(profileId);
 
 
 const customCity = ref("");
@@ -256,6 +269,20 @@ const profileFacts = ref<Record<string, unknown>>({});
 
 // B009：保存最近一次简历分析的中文语义，切平台时按新 schema 重投影。
 const resumeAnalysis = ref<AnalyzeResponse | null>(null);
+
+
+const resumeAnalysisPhase = ref<ResumeAnalysisPhase>("idle");
+
+
+const resumeAnalysisLandOnReturn = ref<(() => void) | null>(null);
+
+
+const resumeAnalysisReset = ref<(() => void) | null>(null);
+
+
+const resumeAnalysisRestore = ref<
+  ((phase: ResumeAnalysisPhase, error?: string, taskId?: string) => void) | null
+>(null);
 
 
 const appliedResumePlatforms = ref<Set<Platform>>(new Set());
@@ -374,14 +401,17 @@ function dismissRecrawlCapsule(): void {
 watch(resultEpoch, () => {
   recrawlCapsuleDismissed.value = false;
 });
-// 合并载入时每个平台各自的结果来源 run：单平台视图下“全部重抓”/导出用对应 run。
-
-// 合并载入时每个平台各自的结果来源 run：单平台视图下“全部重抓”/导出用对应 run。
+// 最新轮的结果来源 run；保留平台键以兼容岗位动作和导出调用方。
 const resultRunIds = ref<{ boss: string; zhilian: string }>({ boss: "", zhilian: "" });
 // 历史轮次：抽屉状态由独立 composable 持有，历史模式状态留在本视图。
 
 // 历史轮次：抽屉状态由独立 composable 持有，历史模式状态留在本视图。
 const historyStore = useResultHistory();
+
+// Spec041：历史列表/详情/删除/归档都限定当前求职画像；这里只做首次绑定，
+// 切画像由 DiscoveryView 的画像 watch 调 setProfile 换槽（避免无实例
+// 环境下创建不回收的 watcher）。
+setHistoryProfile(props.profileId);
 
 const {
   open: historyOpen,
@@ -413,6 +443,15 @@ const platformBeforeHistory = ref<Platform | null>(null);
 
 
 const historyMode = computed(() => Boolean(historyRound.value));
+// Spec041 返工：浏览历史轮时，顶部平台段展示"正在看的那一轮平台"，但当前轮的
+// 草稿平台 / 结果平台不被历史轮覆盖（历史轮平台只用于展示，退出即消失）。
+const viewPlatform = computed<Platform>(() => historyRound.value?.platform || draftPlatform.value);
+// 灵动岛从历史页跳回最新时，使用结果域的完整恢复流程；在结果域接线前
+// 保留旧的本地退回动作作为安全兜底。
+// Spec041 返工：返回值 = 当前轮真实落点步骤（退出没完成时为空，调用方不得改步骤）。
+const capsuleReturnToLatest = ref<
+  (() => StepId | null | void | Promise<StepId | null | void>) | null
+>(null);
 // B038：当前展示轮的次级状态。'' = 无轮 / 'scraped_only' = 已抓取未筛选 /
 // 其它 = AI 筛选轮。驱动 04 页"待筛选"单列表模式，岗位 verdict 本身保持无判定。
 
@@ -450,12 +489,129 @@ const advancedBusy = ref(false);
 const executionSelection = ref<ExecutionSelection>("custom");
 
 
-const scopePreview = ref<FrozenSearchScope | null>(null);
+// Spec041 返工：搜索范围预览按平台各存一份（真实验收失败项三）。
+// 切平台只读本平台的预览；旧平台的在飞请求由 scopePreviewReqId 与"请求平台
+// 复核"双重作废，绝不把旧平台响应写到新平台。
+const scopePreviewByPlatform = ref<Record<Platform, FrozenSearchScope | null>>({
+  boss: null,
+  zhilian: null,
+});
+
+const scopePreview = computed<FrozenSearchScope | null>({
+  get: () => scopePreviewByPlatform.value[draftPlatform.value] ?? null,
+  set: (value) => {
+    scopePreviewByPlatform.value[draftPlatform.value] = value ?? null;
+  },
+});
 
 
 const scopePreviewBusy = ref(false);
 
 const scopePreviewReqId = ref<0>(0);
+
+/** 供范围预览请求按"发起时的平台"落槽，避免旧平台响应写进新平台。 */
+function setScopePreviewFor(platform: Platform, value: FrozenSearchScope | null): void {
+  scopePreviewByPlatform.value[platform] = value ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Spec041 后续（用户拍板 2026-09-13）：第 2 页输入"一份、两平台共用、一直在"。
+//
+// 这 6 项（keywords / selectedKeywords / customKeyword / cityText / customCity /
+// profileSummary）是第 2 页的输入，也是一轮工作的"参数"：回到第 2 页、切平台再点执行
+// 就是复用它们。它们统一放在 useSearchDraftSlots（通用树干）：两个平台同一份，
+// 浏览器本地存一份 + 数据库按画像存一份（打开应用时 hydratePage2Draft 回填）。
+// 第 3 页筛选草稿（filterValues）与区县草稿（locationDraft）仍按平台各存各的——
+// 区县码各平台不同，不能通用。
+// ---------------------------------------------------------------------------
+const searchDraft = useSearchDraftSlots(profileId);
+const searchDraftPlatform = ref<Platform>(draftPlatform.value);
+const searchDraftLoaded = ref(false);
+
+function saveSearchDraftFor(platform: Platform): void {
+  searchDraft.set(platform, {
+    keywords: keywords.value.map((item) => ({ ...item })),
+    selectedKeywords: [...selectedKeywords.value],
+    customKeyword: customKeyword.value,
+    cityText: cityText.value,
+    customCity: customCity.value,
+    profileSummary: profileSummary.value,
+  });
+  searchDraftPlatform.value = platform;
+}
+
+/**
+ * 把这份共用输入装进工作副本。
+ *
+ * 画像文本只在工作副本为空时回填：它还会从轮次/任务快照恢复（那些来源更权威），
+ * 不能用空值把刚恢复出来的画像擦掉；其余字段逐字覆盖，用户清空也算数。
+ */
+function loadSearchDraftFor(platform: Platform): boolean {
+  const slot = searchDraft.slot(platform);
+  keywords.value = slot.keywords.map((item) => ({ ...item }));
+  selectedKeywords.value = [...slot.selectedKeywords];
+  customKeyword.value = slot.customKeyword;
+  cityText.value = slot.cityText;
+  customCity.value = slot.customCity;
+  if (!profileSummary.value.trim() && slot.profileSummary) {
+    profileSummary.value = slot.profileSummary;
+  }
+  searchDraftPlatform.value = platform;
+  searchDraftLoaded.value = true;
+  return searchDraft.hasStoredSlots();
+}
+
+/** 清工作副本但不回写（切画像用：新画像的输入不能被旧画像清掉）。 */
+function clearSearchDraftRefs(): void {
+  searchDraftLoaded.value = false;
+  keywords.value = [];
+  selectedKeywords.value = [];
+  customKeyword.value = "";
+  cityText.value = "";
+  customCity.value = "";
+}
+
+/** 确保工作副本已挂上这份共用输入（恢复流程收尾调用）。 */
+function ensureSearchDraftLoaded(): void {
+  if (searchDraftLoaded.value) return;
+  loadSearchDraftFor(draftPlatform.value);
+}
+
+/**
+ * Spec041 后续：简历分析给出的关键词建议与平台无关，直接写进这份共用输入，
+ * 切平台不用重新录一遍；城市仍由用户自己选（AI 不代填）。
+ */
+function mirrorSearchDraftKeywords(): void {
+  searchDraft.set(draftPlatform.value, {
+    keywords: keywords.value.map((item) => ({ ...item })),
+    selectedKeywords: [...selectedKeywords.value],
+  });
+}
+
+/**
+ * 切平台：第 2 页输入两个平台共用（同一份），所以这里不保存、不装载，
+ * 只作废旧平台在飞的范围预览，避免旧响应写进新平台。
+ */
+function switchSearchDraftPlatform(next: Platform): void {
+  searchDraftPlatform.value = next;
+  // 旧平台的范围预览请求即刻作废（新平台若无关键词不会发新请求，也必须失效）。
+  scopePreviewReqId.value += 1;
+  scopePreviewBusy.value = false;
+}
+
+watch(draftPlatform, (next) => {
+  switchSearchDraftPlatform(next);
+});
+
+// 工作副本一变就落到这份共用输入（本地立即写 + 数据库防抖写）。
+watch(
+  [keywords, selectedKeywords, customKeyword, cityText, customCity, profileSummary],
+  () => {
+    if (!searchDraftLoaded.value) return;
+    saveSearchDraftFor(searchDraftPlatform.value);
+  },
+  { deep: true },
+);
 
 
 const advancedSettings = ref<Record<string, number | string>>({
@@ -577,11 +733,23 @@ const enabledSteps = computed<StepId[]>(() => {
   if (historyMode.value) return ["results"];
   const enabled: StepId[] = ["upload"];
   if (analysisReady.value) enabled.push("search");
-  if (scrapeCompleted.value) enabled.push("screen");
+  // Spec041 返工补丁：第 3 步跟随"本轮有没有抓取/结果现场"。切平台会清掉本轮抓取身份、
+  // 但正在展示的结果仍在（真实现场：第 4 页还在），只认 scrapeCompleted 会把第 3 步
+  // 灰成"点了没反应"，出现"四页在、三页没了"的死角。
+  if (scrapeCompleted.value || resultLoaded.value) enabled.push("screen");
   // 结果页只在任务真正结束后开放；AI 筛选暂停中任务未结束，04 保持不可进。
   if (resultLoaded.value && screenSnapshot.value?.status !== "paused") enabled.push("results");
   return enabled;
 });
+
+function capsuleNavigationMeta(stuckAt: "scrape" | "screen" | "none" = "none") {
+  return {
+    enabledSteps: [...enabledSteps.value],
+    stuckAt,
+    historyMode: historyMode.value,
+    bootstrapping: !workflowStateRestored.value,
+  };
+}
 
 
 const completedSteps = computed<StepId[]>(() => {
@@ -600,7 +768,7 @@ const cityList = computed(() => cityText.value
   .replaceAll("，", ",")
   .split(",")
   .map((city) => city.trim())
-  .filter(Boolean));
+  .filter((city) => city.length > 0 && !isNationwideCityName(city)));
 
 
 const effectiveSearchCities = computed(() => cityList.value.length ? cityList.value : ["全国"]);
@@ -651,7 +819,9 @@ const searchSummary = computed(() => {
 
 const screenSummaryChips = computed(() => {
   const chips: { label: string; value: string }[] = [];
-  const drafts = filterValues.value[draftPlatform.value];
+  // v-show 下 03 页始终渲染，平台草稿与筛选草稿可能处在过渡态：
+  // 缺当前平台草稿时按空处理，不让派生计算把渲染打断。
+  const drafts = filterValues.value[draftPlatform.value] || {};
   filterGroups.value.forEach((group) => {
     const values = drafts[group.key] || [];
     if (!values.length) return;
@@ -752,6 +922,86 @@ const lifecycleDialogOpen = ref(false);
 
 const lifecycleDialogJob = ref<JobItem | null>(null);
 
+function resetForProfileSwitch(): void {
+  workflowEpoch.value += 1;
+  workflowStateRestored.value = false;
+  if (pollTimer.value !== undefined) {
+    window.clearTimeout(pollTimer.value);
+    pollTimer.value = undefined;
+  }
+  activeStep.value = "upload";
+  analysisReady.value = false;
+  selectedFile.value = null;
+  aiConsent.value = false;
+  dragActive.value = false;
+  uploadBusy.value = false;
+  resumeError.value = "";
+  // Spec041：旧画像的搜索草稿已在自己槽位里留好，这里只清工作副本，
+  // 不回写（否则会把新画像的草稿清掉）。
+  clearSearchDraftRefs();
+  fieldLabels.value = {};
+  filterValues.value = { boss: {}, zhilian: {} };
+  profileSummary.value = "";
+  profileFacts.value = {};
+  resumeAnalysis.value = null;
+  resumeAnalysisReset.value?.();
+  resumeAnalysisPhase.value = "idle";
+  appliedResumePlatforms.value = new Set();
+  scrapeTaskId.value = "";
+  scrapeBusy.value = false;
+  scrapeActionBusy.value = "";
+  scrapeSnapshot.value = null;
+  screenTaskId.value = "";
+  screenBusy.value = false;
+  pausingScreen.value = false;
+  screenSnapshot.value = null;
+  recrawlTaskId.value = "";
+  recrawlBusy.value = false;
+  recrawlSnapshot.value = null;
+  recrawlRetryCount.value = 0;
+  scrapeCompleted.value = false;
+  resultLoaded.value = false;
+  finishedPartial.value = false;
+  pipelineResult.value = null;
+  pipelineResultRunId.value = "";
+  resultPlatformFilter.value = "all";
+  resultRunIds.value = { boss: "", zhilian: "" };
+  resultEpoch.value += 1;
+  historyRound.value = null;
+  returningFromHistory.value = false;
+  platformBeforeHistory.value = null;
+  activeCategory.value = "matched";
+  rejectedIds.value = new Set();
+  currentRoundStatus.value = "";
+  pausedRunId.value = "";
+  interruptedRunId.value = "";
+  restoredTaskHint.value = "";
+  recrawlPlatformGuide.value = null;
+  scopePreviewByPlatform.value = { boss: null, zhilian: null };
+  scopePreviewBusy.value = false;
+  scopePreviewReqId.value += 1;
+  autoScreenArmed.value = false;
+  autoScreenFields.value = {};
+  autoScreenProfile.value = "";
+  profileError.value = "";
+  profileConfirmed.value = false;
+  oneClickOpen.value = false;
+  screenPanelOpen.value = false;
+  searchPanelsOpen.value = false;
+  advancedPanelsOpen.value = false;
+  activeTaskRestored.value = false;
+  unfinishedWorkflowRestored.value = false;
+  restoredWorkflowSnapshot.value = null;
+  resultsPageSeen.value = false;
+  resultsBootstrapPending.value = false;
+  sceneSnapshot.value = null;
+}
+
+// Spec041 返工：完成态现场恢复占位。刷新后（会话存档缺失、只剩已结束事实）
+// 先落到结果页骨架并置位，等后端最新结果补齐；期间不显示"暂无结果"，
+// 更不短暂回到 BOSS 空上传页。
+const resultsBootstrapPending = ref(false);
+
 // ---------------------------------------------------------------------------
 // 顶栏本轮状态胶囊数据（纯派生，不发请求）：
 // 四态按 spec FR-013 优先级判定；平台优先取任务自身平台（恢复任务快照携带），
@@ -762,12 +1012,23 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
     || screenSnapshot.value?.platform
     || draftPlatform.value;
 
+  // 简历分析在后台进行时只占用上传按钮，胶囊单独展示分析中，不能冒充抓取任务。
+  if (uploadBusy.value) {
+    return {
+      platform, phase: "scraped" as const, judged: 0, scope: platform,
+      ...capsuleNavigationMeta("none"),
+      capsule: { state: "analyzing", platform, progress: { done: 0 } },
+    };
+  }
+
   // ---- attention（最高）：暂停 / 出错 / 中断 ----
   const snapshots = [scrapeSnapshot.value, screenSnapshot.value, recrawlSnapshot.value];
   const failed = snapshots.find((s) => s && String(s.status) === "failed");
   if (failed) {
+    const stuckAt = failed === screenSnapshot.value || failed === recrawlSnapshot.value ? "screen" : "scrape";
     return {
       platform, phase: "scraping" as const, judged: 0, scope: platform,
+      ...capsuleNavigationMeta(stuckAt),
       capsule: {
         state: "attention", platform,
         attention: { kind: "error", message: failed.error || "任务执行出错" },
@@ -778,8 +1039,12 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
   const hasPaused = pausedRunId.value || interruptedRunId.value
     || snapshots.some((s) => s && (String(s.status) === "paused" || String(s.status) === "interrupted"));
   if (hasPaused) {
+    const stuckAt = screenSnapshot.value && ["paused", "interrupted"].includes(String(screenSnapshot.value.status))
+      || recrawlSnapshot.value && ["paused", "interrupted"].includes(String(recrawlSnapshot.value.status))
+      ? "screen" : "scrape";
     return {
       platform, phase: "scraping" as const, judged: 0, scope: platform,
+      ...capsuleNavigationMeta(stuckAt),
       capsule: {
         state: "attention", platform,
         attention: { kind: "paused", message: "任务已暂停，请处理后继续" },
@@ -813,6 +1078,7 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
     const progress = taskProgressFromSnapshot(snapshot);
     return {
       platform, phase, judged: progress.done, scope: platform,
+      ...capsuleNavigationMeta("none"),
       capsule: { state: "running", platform, progress: { phase, ...progress } },
       integrity: snapshot?.integrity,
     };
@@ -823,19 +1089,34 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
     || recrawlSnapshot.value?.integrity
     || scrapeSnapshot.value?.integrity
     || pipelineResult.value?.integrity;
-  if (resolvedIntegrity && ["failed", "unverifiable", "interrupted"].includes(resolvedIntegrity.conclusion)) {
-    const interrupted = resolvedIntegrity.conclusion === "interrupted";
+  // 用户主动「结束并保存」收尾的轮次：白箱如实记 interrupted（任务确实被停止），
+  // 但对用户来说这是正常收尾。这里按轮次口径展示（部分完成 / 已结束保存），
+  // 不再报"任务因取消或停止而中断"，也不再让灵动岛据此把人送回 02/03。
+  const integrityForDisplay = resolvedIntegrity
+    && finishedPartial.value
+    && resolvedIntegrity.conclusion === "interrupted"
+    ? {
+      ...resolvedIntegrity,
+      conclusion: "partial" as const,
+      label: "部分完成",
+      primary_code: "user_finished",
+      primary_reason: "已结束保存部分结果",
+    }
+    : resolvedIntegrity;
+  if (integrityForDisplay && ["failed", "unverifiable", "interrupted"].includes(integrityForDisplay.conclusion)) {
+    const interrupted = integrityForDisplay.conclusion === "interrupted";
     return {
       platform, phase: "scraping" as const, judged: 0, scope: platform,
+      ...capsuleNavigationMeta("screen"),
       capsule: {
         state: "attention", platform,
         attention: {
           kind: interrupted ? "paused" : "error",
-          message: resolvedIntegrity.primary_reason
-            || (interrupted ? "任务已中断" : resolvedIntegrity.label),
+          message: integrityForDisplay.primary_reason
+            || (interrupted ? "任务已中断" : integrityForDisplay.label),
         },
       },
-      integrity: resolvedIntegrity,
+      integrity: integrityForDisplay,
     };
   }
 
@@ -845,11 +1126,12 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
       const total = historyRound.value.jobCount;
       return {
         platform: historyRound.value.platform, phase: "scraped" as const, judged: total, scope: "history" as const,
+        ...capsuleNavigationMeta("none"),
         capsule: {
           state: "completed", platform: historyRound.value.platform,
           results: { matched: total, pending: 0 },
         },
-        integrity: historyRound.value.integrity || pipelineResult.value?.integrity,
+        integrity: integrityForDisplay,
       };
     }
     const counts = resultCountsFromPipeline(pipelineResult.value);
@@ -857,11 +1139,12 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
     const judged = g.matched.length + g.unmatched.length + g.uncertain.length + g.dropped.length;
     return {
       platform: historyRound.value.platform, phase: "judged" as const, judged, scope: "history" as const,
+      ...capsuleNavigationMeta("none"),
       capsule: {
         state: "completed", platform: historyRound.value.platform,
         results: counts,
       },
-      integrity: historyRound.value.integrity || pipelineResult.value?.integrity,
+      integrity: integrityForDisplay,
     };
   }
   if (resultLoaded.value && pipelineResult.value) {
@@ -870,11 +1153,12 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
       const total = (filteredPipelineResult.value.jobs || []).length;
       return {
         platform, phase: "scraped" as const, judged: total, scope,
+        ...capsuleNavigationMeta("none"),
         capsule: {
           state: "completed", platform,
           results: { matched: total, pending: 0 },
         },
-        integrity: pipelineResult.value?.integrity,
+        integrity: integrityForDisplay,
       };
     }
     const counts = resultCountsFromPipeline(pipelineResult.value);
@@ -882,65 +1166,42 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
     const judged = g.matched.length + g.unmatched.length + g.uncertain.length + g.dropped.length;
     return {
       platform, phase: "judged" as const, judged, scope,
+      ...capsuleNavigationMeta("none"),
       capsule: { state: "completed", platform, results: counts },
-      integrity: pipelineResult.value?.integrity,
+      integrity: integrityForDisplay,
     };
   }
 
   // ---- idle（常驻，最低优先级）：无任务无结果 ----
   return {
     platform, phase: "scraped" as const, judged: 0, scope: platform,
+    ...capsuleNavigationMeta("none"),
     capsule: { state: "idle", platform },
   };
 });
 
-// ---------------------------------------------------------------------------
-// 036 B088：消费胶囊点击导航信号（App.vue 经 requestCapsuleNavigation 派发）。
-// home → 01 上传页；task → 任务真实进度页（liveTaskStep 优先）；results → 04；
-// attention → 处理现场（liveTaskStep 优先）。
-//
-// 历史模式：不在此同步置空 historyRound/returningFromHistory——直接调
-// historyBackToLatest()（state.detail=null），由 DiscoveryView 既有
-// watch(historyDetail) 分支触发 returnToLatest() 完整清理（还原草稿平台、
-// 重置结果页筛选、重载最新结果），避免跳过清理残留历史轮状态（SC-010）。
-// returnToLatest 内部按 liveTaskStep 或结果页落点设置 activeStep。
-// ---------------------------------------------------------------------------
-watch(capsuleNavigationTarget, (target) => {
-  if (!target) return;
-  capsuleNavigationTarget.value = null;  // 消费本次请求
-  if (historyMode.value) {
-    historyBackToLatest();
-    return;
-  }
-  const liveStep = deriveLiveTaskStep({
-    scrapeBusy: scrapeBusy.value,
-    scrapeSnapshot: scrapeSnapshot.value,
-    screenBusy: screenBusy.value,
-    screenSnapshot: screenSnapshot.value,
-    recrawlBusy: recrawlBusy.value,
-    recrawlSnapshot: recrawlSnapshot.value,
-    pausedRunId: pausedRunId.value,
-    interruptedRunId: interruptedRunId.value,
-  });
-  if (target === "home") {
-    activeStep.value = "upload";
-  } else if (target === "task") {
-    activeStep.value = liveStep || "search";
-  } else if (target === "results") {
-    activeStep.value = "results";
-  } else if (target === "attention") {
-    activeStep.value = liveStep || "screen";
-  }
-});
+// Spec041：胶囊点击导航信号的消费（归一落点 / 历史退出 / 启动占位）已外迁到
+// useDiscoveryIslandBridge.ts，由视图在 setup 内构造；本文件只保留信号本身。
 
 return {
   WORKFLOW_STATE_VERSION,
   workflowStateKey,
+  profileId,
   workflowStateRestored,
   unfinishedWorkflowRestored,
   resultsPageSeen,
+  resultsBootstrapPending,
+  viewPlatform,
+  loadSearchDraftFor,
+  saveSearchDraftFor,
+  switchSearchDraftPlatform,
+  ensureSearchDraftLoaded,
+  mirrorSearchDraftKeywords,
+  setScopePreviewFor,
   restoredWorkflowSnapshot,
   activeTaskRestored,
+  resetForProfileSwitch,
+  sceneSnapshot,
   LOGIN_ERROR_CODES,
   loginGuide,
   platformState,
@@ -974,6 +1235,10 @@ return {
   profileSummary,
   profileFacts,
   resumeAnalysis,
+  resumeAnalysisPhase,
+  resumeAnalysisLandOnReturn,
+  resumeAnalysisReset,
+  resumeAnalysisRestore,
   appliedResumePlatforms,
   scrapeTaskId,
   scrapeBusy,
@@ -1081,6 +1346,7 @@ return {
   hideHistory,
   openHistoryRound,
   historyBackToLatest,
+  capsuleReturnToLatest,
   confirmHistoryDelete,
   cancelHistoryDelete,
   deleteHistoryRound,
@@ -1225,10 +1491,8 @@ export interface AiScreenLaunch {
  profile?: string;
 }
 
-export // 双平台合并加载：拉两个平台的 /api/latest-pipeline-result 并合并。
-// 刷新路径（loadLatestResult）与实时任务完成路径（pollTask）共用，
-// 保证两条路径行为一致（R2：实时路径只 set 单平台结果导致切平台显示 0）。
-interface MergedLatestResult {
+// 刷新路径与实时任务完成路径共用同一份“当前画像全局最新轮”契约。
+export interface MergedLatestResult {
   merged: PipelineResult;
   newer: {
     platform: "boss" | "zhilian";
@@ -1248,34 +1512,15 @@ interface MergedLatestResult {
   platformStatuses?: Partial<Record<"boss" | "zhilian", string>>;
 }
 
-// ---------------------------------------------------------------------------
-// 036 B088 顶栏胶囊（灵动岛）状态类型：四态 + 派生优先级
-// attention > running > completed > idle（spec FR-013）。
-// ---------------------------------------------------------------------------
-
-/** 胶囊四态（多态并存取优先级最高一件，不堆叠）。 */
-export type DynamicIslandState =
-  | { state: "idle"; platform: Platform }
-  | {
-      state: "running";
-      platform: Platform;
-      progress: { phase: "scraping" | "jd" | "screening"; done: number; total?: number };
-    }
-  | {
-      state: "completed";
-      platform: Platform;
-      results: { matched: number; pending: number };
-    }
-  | {
-      state: "attention";
-      platform: Platform;
-      attention: { kind: "paused" | "error" | "pending"; message: string };
-    };
-
 /** round-status 上抛 payload：既有展示字段 + 胶囊状态（App 供 DynamicIsland 消费）。 */
 export interface CapsuleStatusPayload extends RoundStatusPayload {
   capsule: DynamicIslandState;
   integrity?: IntegritySnapshot | null;
+  /** Spec041：供胶囊派生落点使用的真实现场，不参与展示文案。 */
+  enabledSteps?: string[];
+  stuckAt?: "scrape" | "screen" | "none";
+  historyMode?: boolean;
+  bootstrapping?: boolean;
 }
 
 // ---------------------------------------------------------------------------

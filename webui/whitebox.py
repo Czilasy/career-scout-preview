@@ -43,6 +43,26 @@ class WhiteboxService:
             raise WhiteboxWriteError('whitebox begin persistence failed') from exc
         run_id = str(row.get('id') if isinstance(row, dict) else row['id'])
         return WhiteboxRunRef(run_id, str(owner_kind), str(owner_id))
+    def resume(self, owner_kind: str, owner_id: str, plan: dict[str, Any], parent_owner_id: str | None=None) -> WhiteboxRunRef:
+        """继续（resume）场景：同一 owner 再跑一轮时，重置已有凭证重新收集。
+
+        收尾族：旧凭证在任务失败时已定稿为终态，继续成功的新证据若直接写入
+        会被「终态不可改」拒收，凭证永远停在失败。resume 重置结论快照、
+        保留历史事件；不存在时等同 begin。
+        """
+        self._validate_plan(plan)
+        try:
+            row = self.store.resume_whitebox_run(owner_kind, owner_id, plan, parent_owner_id)
+        except ValueError as exc:
+            if 'conflict' in str(exc).lower():
+                raise WhiteboxConflictError(str(exc)) from exc
+            self._persist_emergency({'owner_kind': owner_kind, 'owner_id': owner_id, 'stage': 'resume', 'event_type': 'whitebox_incomplete', 'idempotency_key': f'resume:{owner_kind}:{owner_id}', 'occurred_at': _now(), 'payload': {'reason': str(exc)}}, None)
+            raise
+        except Exception as exc:
+            self._persist_emergency({'owner_kind': owner_kind, 'owner_id': owner_id, 'stage': 'resume', 'event_type': 'whitebox_incomplete', 'idempotency_key': f'resume:{owner_kind}:{owner_id}', 'occurred_at': _now(), 'payload': {'reason': type(exc).__name__}}, None)
+            raise WhiteboxWriteError('whitebox resume persistence failed') from exc
+        run_id = str(row.get('id') if isinstance(row, dict) else row['id'])
+        return WhiteboxRunRef(run_id, str(owner_kind), str(owner_id))
     def set_lifecycle(self, run_ref: WhiteboxRunRef | str | dict[str, Any], lifecycle_status: str) -> dict[str, Any]:
         run_id = self._run_id(run_ref)
         setter = getattr(self.store, 'set_whitebox_lifecycle', None)

@@ -59,6 +59,32 @@ def _classify_scrape_block(err_msg: str) -> str:
     return ""
 
 
+#: 会携带批内信号（jd_batch）的阶段。批内信号是"正在抓某个 JD 批次"的
+#: 实时标记，前端据此决定暂停/结束时是否弹「立即 / 等这批」二选一。
+BATCH_PROGRESS_STAGES = ("fetch_jd", "jd_detail")
+
+
+def _carry_batch_signal(previous, snapshot, stage=None):
+    """把批内信号带过条级进度刷新（emit 是整块替换，不是合并）。
+
+    条级进度回调（每抓完一条岗位刷新一次）不带 ``jd_batch``；若直接整块替换，
+    「正在批内」的标记在第一条岗位抓完时就被抹掉，前端弹窗既弹不出也会被
+    自动关闭。规则：同一个批内阶段里，本次没上报 jd_batch 就沿用上一次的值；
+    批结束由显式传 ``jd_batch=None`` 的那次刷新清除。
+    """
+    if not isinstance(snapshot, dict) or not isinstance(previous, dict):
+        return snapshot
+    stage_key = str(stage if stage is not None else snapshot.get("stage") or "")
+    if stage_key not in BATCH_PROGRESS_STAGES or "jd_batch" in snapshot:
+        return snapshot
+    if str(previous.get("stage") or "") != stage_key:
+        return snapshot
+    inherited = previous.get("jd_batch")
+    if inherited is None:
+        return snapshot
+    return {**snapshot, "jd_batch": inherited}
+
+
 # 风控异常 reason → 安全失败码（合同 inprocess-runner §3 的防御性兜底）。
 # 016：RiskControlError 自带 code 后本表仅在异常对象缺码时使用；
 # 顺序敏感：限流优先于验证码，避免"频繁 + 滑块"文案被误判为验证码。

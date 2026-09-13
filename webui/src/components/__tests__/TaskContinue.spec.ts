@@ -24,7 +24,7 @@ describe("DiscoveryView paused AI recovery", () => {
   it("restores the AI stage and continues through the server resume route", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/latest-running-task") {
+      if (url.startsWith("/api/latest-running-task")) {
         return response({
           ok: true,
           has_task: true,
@@ -39,7 +39,7 @@ describe("DiscoveryView paused AI recovery", () => {
           version_match: true,
         });
       }
-      if (url === "/api/task-state/paused-ai-run") {
+      if (url.split("?")[0] === "/api/task-state/paused-ai-run") {
         return response({
           status: "paused",
           stage: "ai_rough",
@@ -54,7 +54,7 @@ describe("DiscoveryView paused AI recovery", () => {
       if (url === "/api/task/continue/paused-ai-run") {
         return response({ ok: true, task_id: "resumed-ai-run", status: "running" });
       }
-      if (url === "/api/task-state/resumed-ai-run") {
+      if (url.split("?")[0] === "/api/task-state/resumed-ai-run") {
         return response({ status: "paused", progress: {}, logs: [], error: "AI 接口限流" });
       }
       if (url.startsWith("/api/latest-pipeline-result")) {
@@ -111,7 +111,7 @@ describe("DiscoveryView paused AI recovery", () => {
     // cancel/continue/finish 是无 body POST，不提交草稿平台选择（http-api.md L323 平台不属于 activate 状态）。
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/latest-running-task") {
+      if (url.startsWith("/api/latest-running-task")) {
         return response({
           ok: true,
           has_task: true,
@@ -126,7 +126,7 @@ describe("DiscoveryView paused AI recovery", () => {
           version_match: true,
         });
       }
-      if (url === "/api/task-state/paused-zhilian-run") {
+      if (url.split("?")[0] === "/api/task-state/paused-zhilian-run") {
         return response({
           status: "paused",
           stage: "ai_rough",
@@ -140,7 +140,7 @@ describe("DiscoveryView paused AI recovery", () => {
       if (url === "/api/task/continue/paused-zhilian-run") {
         return response({ ok: true, task_id: "resumed-zhilian-run", status: "running" });
       }
-      if (url === "/api/task-state/resumed-zhilian-run") {
+      if (url.split("?")[0] === "/api/task-state/resumed-zhilian-run") {
         return response({ status: "paused", progress: {}, logs: [], error: "AI 接口限流" });
       }
       if (url.startsWith("/api/latest-pipeline-result")) {
@@ -187,14 +187,14 @@ describe("DiscoveryView paused AI recovery", () => {
       for (const endpointCase of endpointCases) {
         const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
           const url = String(input);
-          if (url === "/api/latest-running-task") {
+          if (url.startsWith("/api/latest-running-task")) {
             return response({
               ok: true, has_task: true, task_id: taskId, kind: "scrape", status: "paused",
               platform, progress: { current: 2, total: 5 }, logs: [],
               pause_info: { error_code: "source_rate_limited", error_reason: "账号限流" },
             });
           }
-          if (url === `/api/task-state/${taskId}`) {
+          if (url.split("?")[0] === `/api/task-state/${taskId}`) {
             return response({
               status: "paused", progress: { current: 2, total: 5 }, logs: [],
               pause_info: { error_code: "source_rate_limited", error_reason: "账号限流" },
@@ -213,7 +213,7 @@ describe("DiscoveryView paused AI recovery", () => {
             }
             return response({ ok: true, run_id: taskId, status: "cancelled" });
           }
-          if (url === `/api/task-state/${taskId}-resumed`) {
+          if (url.split("?")[0] === `/api/task-state/${taskId}-resumed`) {
             return response({ status: "completed", progress: {}, logs: [] });
           }
           if (url.startsWith("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
@@ -254,7 +254,7 @@ describe("DiscoveryView paused AI recovery", () => {
     // 样子（进度/日志/红色错误/中文原因），不重建空快照、不直出英文码。
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/latest-running-task") {
+      if (url.startsWith("/api/latest-running-task")) {
         return response({
           ok: true,
           has_task: true,
@@ -268,7 +268,7 @@ describe("DiscoveryView paused AI recovery", () => {
           version_match: true,
         });
       }
-      if (url === "/api/task-state/paused-ai-run") {
+      if (url.split("?")[0] === "/api/task-state/paused-ai-run") {
         return response({
           status: "paused",
           stage: "ai_rough",
@@ -329,7 +329,7 @@ describe("DiscoveryView paused AI recovery", () => {
       const taskId = `corrupt-scrape-${platform}`;
       const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
         const url = String(input);
-        if (url === "/api/latest-running-task") {
+        if (url.startsWith("/api/latest-running-task")) {
           return response({
             ok: true,
             has_task: true,
@@ -346,7 +346,7 @@ describe("DiscoveryView paused AI recovery", () => {
             },
           });
         }
-        if (url === `/api/task-state/${taskId}`) {
+        if (url.split("?")[0] === `/api/task-state/${taskId}`) {
           return response({
             status: "paused",
             progress: { current: 2, total: 5, overall_percent: 40 },
@@ -384,7 +384,7 @@ describe("DiscoveryView paused AI recovery", () => {
       expect(wrapper.find('[data-testid="continue-scrape"]').exists()).toBe(true);
       expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
       expect(wrapper.find('[data-testid="cancel-paused-scrape"]').exists()).toBe(true);
-      expect(fetchMock.mock.calls.some(([url]) => String(url) === `/api/task-state/${taskId}`)).toBe(true);
+      expect(fetchMock.mock.calls.some(([url]) => String(url).split("?")[0] === `/api/task-state/${taskId}`)).toBe(true);
     },
   );
 });

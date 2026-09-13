@@ -1,5 +1,4 @@
 <script setup lang="ts">
-// 021 B8 T027：视图壳——状态/动作外迁 composables，模板零改动。
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type Ref } from "vue";
 import {
   Bookmark, Check, Download, FileText, Filter, History, LoaderCircle, Play,
@@ -55,6 +54,11 @@ import { useDiscoverySearch } from "../composables/useDiscoverySearch";
 import { useDiscoveryExecution } from "../composables/useDiscoveryExecution";
 import { useDiscoveryTasks } from "../composables/useDiscoveryTasks";
 import { useDiscoveryResults } from "../composables/useDiscoveryResults";
+import { useDiscoverySceneState } from "../composables/useDiscoverySceneState";
+import { useDiscoverySceneIdentity } from "../composables/useDiscoverySceneIdentity";
+import { useProfileInputScene } from "../composables/useProfileInputScene";
+import { useDiscoveryIslandBridge } from "../composables/useDiscoveryIslandBridge";
+import { useDiscoveryLogViewer } from "../composables/useDiscoveryLogViewer";
 
 type StepId = "upload" | "search" | "screen" | "results";
 type ResultCategory = "matched" | "unmatched" | "uncertain" | "dropped";
@@ -95,8 +99,6 @@ interface TaskSnapshot {
   /** 一键链路标记：抓取任务完成后前端自动接续 AI 筛选。 */
   auto_screen?: boolean;
 }
-
-
 const props = defineProps<{ profileId: string }>();
 const emit = defineEmits<{
   notify: [notice: Notice];
@@ -108,7 +110,6 @@ const emit = defineEmits<{
   // D7：岗位发现流程检测未登录，引导用户去账号面板打开浏览器窗口登录。
   "open-browser-accounts": [];
 }>();
-
 const state = useDiscoveryState(props, emit);
 const {
   WORKFLOW_STATE_VERSION,
@@ -122,6 +123,7 @@ const {
   loginGuide,
   platformState,
   draftPlatform,
+  viewPlatform,
   schemaLoader,
   cityLoader,
   schemaRef,
@@ -166,6 +168,7 @@ const {
   recrawlRetryCount,
   scrapeCompleted,
   resultLoaded,
+  resultsBootstrapPending,
   finishedPartial,
   recrawlPlatformGuide,
   exportBusy,
@@ -255,7 +258,6 @@ const {
   showHistory,
   hideHistory,
   openHistoryRound,
-  historyBackToLatest,
   confirmHistoryDelete,
   cancelHistoryDelete,
   deleteHistoryRound,
@@ -271,6 +273,7 @@ const search = useDiscoverySearch(state, deps);
 const execution = useDiscoveryExecution(state, deps);
 const tasks = useDiscoveryTasks(state, deps);
 const results = useDiscoveryResults(state, deps);
+state.capsuleReturnToLatest.value = results.returnToLatest;
 
 // 跨域函数接线：一次成型，缺任一成员即编译错误（契约 discovery-deps.md 约定 2）。
 wireDiscoveryDeps(deps, {
@@ -280,6 +283,18 @@ wireDiscoveryDeps(deps, {
   tasks,
   results,
 });
+
+const sceneStore = useDiscoverySceneState();
+// Spec041 返工：现场身份 = 画像 + 稳定轮次（不随 task_id / 结果 run id 变化）+ 平台；
+// 页面内现场（画像框高度等）由 useProfileInputScene 接同一身份键。
+const { identity: sceneIdentity } = useDiscoverySceneIdentity(state, props);
+useProfileInputScene(state, sceneIdentity);
+useDiscoveryIslandBridge(state);
+const {
+  open: historyLogOpen,
+  initialTaskId: historyLogTaskId,
+  openForTask: openHistoryLog,
+} = useDiscoveryLogViewer(() => props.profileId);
 
 // 模板绑定：composable 返回值解构
 // （024 档位/规模风险警示已抽为 useModeWarnings，在下方解构出 scopePreview
@@ -391,6 +406,12 @@ const {
   handleLifecycleDialogKeydown,
 } = { ...workflow, ...search, ...execution, ...tasks, ...results };
 
+// Spec041 返工：刷新恢复必须在首帧之前完成。完成态结果页（平台、结果、结果分类、
+// 页面现场）同步接回后再渲染，避免先显示一屏 BOSS 空上传页再被异步纠正
+//（真实验收失败项一：「不得短暂恢复 BOSS 或空上传页」）。
+restoreWorkflowState();
+restoreSaved02State();
+
 // 024 档位/规模风险警示：并入「当前模式」说明行内，不占独立警告框
 // （依赖上面解构出的 executionSelection / scopePreview，故在此调用）。
 const modeWarnings = useModeWarnings(executionSelection, scopePreview);
@@ -414,6 +435,8 @@ const roundFlow = reactive(useScreenRoundFlow({
     recrawlBusy,
     recrawlTaskId,
     recrawlSnapshot: recrawlSnapshot as unknown as Ref<ApiTaskSnapshot | null>,
+    // Spec041 返工：暂停/取消后的任务状态复核也要按当前画像查。
+    profileId: computed(() => props.profileId),
     pollTimer,
     finishedPartial,
     resultsPageSeen,
@@ -456,7 +479,9 @@ watch(activeStep, (step) => {
   // 026 B078：进当前轮 04 页＝流程结束，置位并持久化已结束事实（唯一判据）。
   // 035：历史轮浏览、从历史「回到最新」过渡期间，以及未结束任务存在时
   //（含刷新恢复把 activeStep 恢复为 results 的路径）一律不得置位。
-  if (step === "results" && !historyMode && !returningFromHistory && !hasLiveTaskState()) {
+  // 041：已抓取未筛选轮只是先看一眼结果，流程未结束，刷新后仍回到该现场。
+  if (step === "results" && !historyMode && !returningFromHistory && !hasLiveTaskState()
+      && !isScrapedOnly.value) {
     markResultsPageSeen();
   }
 });
@@ -479,13 +504,24 @@ watch(
 );
 
 watch(() => props.profileId, () => {
-  if (!pausedRunId.value && !scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) {
-    void loadLatestResult();
-  }
+  sceneStore.clearForProfileSwitch();
+  state.resetForProfileSwitch();
+  historyStore.hide();
+  historyStore.setProfile(props.profileId);
+  restoreWorkflowState();
+  void loadAdvancedSettings();
+  void loadFilterLabels();
+  void loadCityCatalog();
+  void restoreRunningTask().finally(() => {
+    restoreSaved02State();
+    if (!scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) void tasks.maybeAutoStartNewRound();
+  });
 });
 
 onBeforeUnmount(() => {
+  state.sceneSnapshot.value = sceneStore.getCurrent(sceneIdentity.value);
   persistWorkflowState();
+  sceneStore.persistToSession(props.profileId);
   if (pollTimer.value) window.clearTimeout(pollTimer.value);
   document.removeEventListener("keydown", handleLifecycleDialogKeydown);
 });
@@ -509,15 +545,8 @@ watch(historyDetail, (detail, prev) => {
 
 defineExpose({ openHistoryDrawer, toggleHistoryDrawer, closeHistoryDrawer });
 
-// 035：历史轮「查看该轮运行日志」——复用日志界面，按该轮抓取任务过滤。
-const historyLogOpen = ref(false);
-const historyLogTaskId = ref("");
-
-function openHistoryLog(item: { scrape_task_id?: string }) {
-  if (!item.scrape_task_id) return;
-  historyLogTaskId.value = item.scrape_task_id;
-  historyLogOpen.value = true;
-}
+// 035：历史轮「查看该轮运行日志」——复用日志界面，按该轮抓取任务过滤；
+// 现场（任务号 + 开关 + 切画像清理）由 useDiscoveryLogViewer 持有。
 
 watch(lifecycleDialogOpen, (open) => {
   if (open) document.addEventListener("keydown", handleLifecycleDialogKeydown);
@@ -542,7 +571,7 @@ watch(restoredTaskHint, (value) => {
 });
 
 onMounted(() => {
-  restoreWorkflowState();
+  // 现场恢复已在 setup 里同步完成（首帧即正确页面）；这里只做异步加载与任务接回。
   void loadAdvancedSettings();
   void loadFilterLabels();
   void loadCityCatalog();
@@ -567,7 +596,7 @@ onMounted(() => {
       class="platform-segment"
       role="tablist"
       aria-label="新任务目标平台"
-      :data-testid="`platform-current-${draftPlatform}`"
+      :data-testid="`platform-current-${viewPlatform}`"
       :data-loaded-schema-platform="schemaRef?.platform || ''"
       :data-loaded-city-platform="cityCatalogRef?.platform || ''"
     >
@@ -576,8 +605,8 @@ onMounted(() => {
         :key="platform"
         type="button"
         role="tab"
-        :aria-selected="draftPlatform === platform"
-        :class="['platform-segment-btn', { active: draftPlatform === platform }]"
+        :aria-selected="viewPlatform === platform"
+        :class="['platform-segment-btn', { active: viewPlatform === platform }]"
         :data-testid="`platform-segment-${platform}`"
         :disabled="scopeLocked"
         :title="scopeLocked ? '任务进行中，平台已锁定' : undefined"
@@ -630,7 +659,7 @@ onMounted(() => {
         </div>
       </header>
 
-      <section v-if="activeStep === 'upload'" class="content-card workflow-card upload-layout">
+      <section v-show="activeStep === 'upload'" class="content-card workflow-card upload-layout">
         <div class="workflow-copy">
           <span class="card-kicker">简历只会发往你配置的 AI 服务</span>
           <h2>上传后生成建议，不替你做最终决定</h2>
@@ -686,8 +715,8 @@ onMounted(() => {
         </div>
       </section>
 
-      <section v-else-if="activeStep === 'search'" class="workflow-stack search-layout">
-        <CollapsibleCard title="哪些词用于广泛抓取？" v-model="searchPanelsOpen" :class="{ locked: scopeLocked }">
+      <section v-show="activeStep === 'search'" class="workflow-stack search-layout">
+        <CollapsibleCard title="哪些词用于广泛抓取？" v-model="searchPanelsOpen" :scene-identity="sceneIdentity" scene-card-key="search" :class="{ locked: scopeLocked }">
           <template #prefix>
             <Search :size="17" aria-hidden="true" />
           </template>
@@ -729,6 +758,7 @@ onMounted(() => {
                   :key="city"
                   :city="city"
                   :platform="draftPlatform"
+                  :scene-identity="sceneIdentity"
                   :model-value="locationDraft.getLocations(draftPlatform, city)"
                   :disabled="scopeLocked"
                   @update:model-value="locationDraft.setLocations(draftPlatform, city, $event)"
@@ -784,7 +814,7 @@ onMounted(() => {
           </label>
         </CollapsibleCard>
 
-        <CollapsibleCard class="advanced-panel" title="高级执行设置" v-model="advancedPanelsOpen">
+        <CollapsibleCard class="advanced-panel" title="高级执行设置" v-model="advancedPanelsOpen" :scene-identity="sceneIdentity" scene-card-key="advanced">
           <template #prefix>
             <SlidersHorizontal :size="17" aria-hidden="true" />
           </template>
@@ -838,7 +868,7 @@ onMounted(() => {
           </div>
         </CollapsibleCard>
 
-        <TaskProgress :snapshot="scrapeSnapshot" kind="scrape" :task-id="scrapeTaskId" />
+        <TaskProgress :snapshot="scrapeSnapshot" kind="scrape" :task-id="scrapeTaskId" :user-finished="finishedPartial" />
         <div
           v-if="loginGuide.visible"
           class="login-guide"
@@ -897,8 +927,8 @@ onMounted(() => {
         </div>
       </section>
 
-      <section v-else-if="activeStep === 'screen'" class="workflow-stack">
-        <CollapsibleCard title="确认 6 类筛选条件" v-model="screenPanelOpen">
+      <section v-show="activeStep === 'screen'" class="workflow-stack">
+        <CollapsibleCard title="确认筛选条件" v-model="screenPanelOpen" :scene-identity="sceneIdentity" scene-card-key="screen">
           <template #prefix>
             <Filter :size="17" aria-hidden="true" />
           </template>
@@ -960,12 +990,12 @@ onMounted(() => {
 
         <ContinuePlatformGuide v-if="!historyMode && roundFlow.continueGuide" :guide="roundFlow.continueGuide" @choose="roundFlow.chooseContinuePlatform" @cancel="roundFlow.cancelContinueGuide" />
 
-        <TaskProgress :snapshot="screenSnapshot" kind="screen" :task-id="screenTaskId" />
+        <TaskProgress :snapshot="screenSnapshot" kind="screen" :task-id="screenTaskId" :user-finished="finishedPartial" />
         <ScreenRecrawlProgress v-if="recrawlSnapshot || recrawlBusy" :snapshot="recrawlSnapshot" :task-id="recrawlTaskId" :action="roundFlow.recrawlAction" :busy="Boolean(roundFlow.busyAction)" :busy-action="roundFlow.busyAction" :busy-label="roundFlow.busyAction === 'pause-recrawl' ? '正在暂停重抓…' : ''" :show-finish-save="roundFlow.recrawlAction.kind === 'pause-recrawl' || roundFlow.recrawlAction.kind === 'continue-recrawl'" :show-cancel="roundFlow.recrawlAction.kind === 'pause-recrawl' || roundFlow.recrawlAction.kind === 'continue-recrawl'" :cancel-busy="roundFlow.busyAction === 'cancel-recrawl'" cancel-label="停止详情补抓" cancel-test-id="cancel-recrawl" @pause-recrawl="roundFlow.pauseRecrawl()" @continue-recrawl="roundFlow.continueRecrawl()" @finish-save="roundFlow.finishRecrawl()" @cancel="roundFlow.cancelRecrawl()" />
       </section>
 
       <section
-        v-else
+        v-show="activeStep === 'results'"
         class="results-stage"
         :class="{
           'has-recrawl-guide': Boolean(roundFlow.continueGuide) || (activeCategory === 'uncertain' && recrawlPlatformGuide),
@@ -982,9 +1012,15 @@ onMounted(() => {
           @dismiss="dismissRecrawlCapsule()"
         />
         <div class="command-band">
-        <div v-if="!historyMode && !resultLoaded" class="latest-empty" data-testid="latest-result-empty">
-          暂无结果：开始新一轮并将最新结果保存后，这里会显示最新轮次。
-        </div>
+          <div v-if="!historyMode && !resultLoaded && !resultsBootstrapPending" class="latest-empty" data-testid="latest-result-empty">
+            暂无结果：开始新一轮并将最新结果保存后，这里会显示最新轮次。
+          </div>
+          <div v-if="!historyMode && resultsBootstrapPending" class="latest-empty" data-testid="latest-result-loading">
+            正在恢复上次的结果…
+          </div>
+          <button v-if="!historyMode && isScrapedOnly && resultLoaded" class="button primary" type="button" data-testid="scraped-only-confirm-filters" @click="enterScreenStep()">
+            确认筛选条件
+          </button>
           <div class="result-tabs" role="tablist" aria-label="AI 筛选结果分类">
             <button
               v-for="tab in resultTabs"
@@ -1009,12 +1045,17 @@ onMounted(() => {
           </div>
         </div>
         <JobWorkspace
+          v-if="!resultsBootstrapPending"
           :jobs="currentJobs"
           :empty-message="currentEmptyMessage"
           :defer-mobile-detail="Boolean(recrawlSnapshot && recrawlSnapshot.status === 'paused')"
           :platform-filter="historyMode ? '' : resultPlatformFilter"
           :result-epoch="resultEpoch"
+          :scene-identity="sceneIdentity"
+          :scene-mode="historyMode ? 'history' : 'current'"
+          :history-run-id="historyRound?.runId || ''"
           @update:platform-filter="onResultPlatformFilterChange"
+          @selection-fallback="notify('原选中岗位已不在新结果中，已切换到第一条', 'info')"
         >
           <template #heading-actions>
             <button
@@ -1115,6 +1156,7 @@ onMounted(() => {
     <LogViewerDialog
       :open="historyLogOpen"
       :initial-task-id="historyLogTaskId"
+      :profile-id="profileId"
       @close="historyLogOpen = false"
     />
 
@@ -1158,57 +1200,14 @@ onMounted(() => {
       @confirm="confirmOneClick"
     />
 
-    <!-- 025 B076：批中暂停二选一弹窗（立即停止 / 等这批抓完） -->
+    <!-- 025 B076：批中二选一弹窗（暂停：立即停止 / 等这批抓完；结束保存：等这批再保存 / 立即保存） -->
     <PauseBatchChoiceDialog
       :open="roundFlow.pauseDialogOpen"
       :batch-info="roundFlow.pauseBatchInfo"
+      :kind="roundFlow.pauseDialogKind"
       @close="roundFlow.closePauseDialog()"
       @choose="roundFlow.confirmPauseChoice"
     />
   </main>
 </template>
-<style scoped>
-.adv-mode-summary {
-  margin: 0 0 14px;
-  padding: 9px 11px;
-  border: 1px solid var(--hair-2);
-  border-radius: 7px;
-  background: var(--panel-2);
-  color: var(--ink-3);
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.mode-warning-inline {
-  color: #b45309;
-  font-weight: 700;
-}
-
-.history-round-marker {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 40px;
-  padding: 0 12px;
-  border: 1px solid var(--hair);
-  border-radius: 8px;
-  background: var(--panel);
-  color: var(--text-soft);
-  font-size: 0.86rem;
-}
-
-.latest-empty {
-  margin: 0 0 16px;
-  padding: 18px;
-  border: 1px dashed var(--hair-2);
-  border-radius: 8px;
-  background: var(--panel);
-  color: var(--text-soft);
-  text-align: center;
-}
-
-/* 搜索页有 fixed 地点浮层：只淡入不位移，避免 transform 成为 fixed 定位容器 */
-.workflow-stack.search-layout {
-  animation: stage-fade .22s ease both;
-}
-</style>
+<style scoped src="./DiscoveryView.css"></style>

@@ -27,11 +27,14 @@ import type {
   IslandInterruptContent,
   IslandLiveState,
 } from "../composables/useIslandCarousel";
-import type { IntegrityConclusion } from "../types";
+import { deriveTarget, type NavInput } from "../composables/useIslandNavigation";
+import type { CapsuleTarget as SharedCapsuleTarget, IntegrityConclusion } from "../types";
 import { useIslandValueTransition } from "../composables/useIslandValueTransition";
 import IslandNoticePanel from "./IslandNoticePanel.vue";
 
-export type CapsuleTarget = "home" | "task" | "results" | "attention" | "reminders";
+// 对外保留旧的两种通知目标作为兼容适配；真正的落点仍由新目标派生，
+// 父层会把旧目标再按当前真实任务归一化，不会回到固定页面。
+export type CapsuleTarget = SharedCapsuleTarget | "task" | "attention";
 
 const props = defineProps<{
   status: CapsuleStatusPayload | null;
@@ -91,6 +94,22 @@ const platformLabel = computed(() =>
 );
 
 const isScrapedPhase = computed(() => props.status?.phase === "scraped");
+const navigationInput = computed<NavInput>(() => {
+  const state = capsule.value;
+  const taskPhase = state.state === "running"
+    ? state.progress.phase
+    : state.state === "completed"
+      ? (isScrapedPhase.value ? "scraped" : "completed")
+      : "none";
+  return {
+    capsuleState: state.state,
+    taskPhase,
+    stuckAt: props.status?.stuckAt || "none",
+    enabledSteps: new Set(props.status?.enabledSteps || ["upload", "search", "screen", "results"]),
+    historyMode: Boolean(props.status?.historyMode || props.status?.scope === "history"),
+    bootstrapping: Boolean(props.status?.bootstrapping),
+  };
+});
 
 const runningLabel = computed(() => {
   // 037 复审：三种阶段文案——列表抓取 / JD 抓取 / AI 精筛（旧版只有前两种，
@@ -121,13 +140,8 @@ const attentionMessage = computed(() =>
   capsule.value.state === "attention" ? capsule.value.attention.message : "",
 );
 
-const stateTarget = computed<CapsuleTarget>(() => {
-  switch (capsule.value.state) {
-    case "running": return "task";
-    case "completed": return "results";
-    case "attention": return "attention";
-    default: return "home";
-  }
+const stateTarget = computed<SharedCapsuleTarget>(() => {
+  return deriveTarget(navigationInput.value);
 });
 
 // 037：总未读 = panel 未读（终态通知 + 已沉入的打断） + carousel 队列（未沉入的打断）
@@ -181,17 +195,27 @@ const widthAnimate = computed(() =>
   pillWidth.value !== null ? { width: pillWidth.value } : undefined,
 );
 
+/** 一条 lane 的自然宽（优先取 CSS 计算出的亚像素宽度；无布局环境回退 offsetWidth）。 */
+function laneNaturalWidth(el: HTMLElement): number {
+  const cssWidth = Number.parseFloat(window.getComputedStyle(el).width);
+  return Number.isFinite(cssWidth) && cssWidth > 0 ? cssWidth : el.offsetWidth;
+}
+
 function remeasureWidth() {
   const track = trackEl.value;
   if (!track) return;
   // track 的 children 顺序 = [main lane, ...interrupt lanes]，与 activeLaneIndex 对齐。
-  const el = track.children[activeLaneIndex.value] as HTMLElement | undefined;
-  if (!el) return;
+  const activeEl = track.children[activeLaneIndex.value] as HTMLElement | undefined;
+  if (!activeEl) return;
+  // 038 复审修根因：宽度按「队列里最宽的那条 lane」算，不再只看当前这条。
+  // 轨道宽 = 最宽 lane（列向 flex 的自然宽）；pill 若只按当前 lane 算，更宽的
+  // 那条在队时（打断队列 2.2s 窗口）未读角标会被挤出 pill 右边界裁掉。
+  const widest = Math.max(
+    ...[...track.children].map((child) => laneNaturalWidth(child as HTMLElement)),
+  );
   const extra = unread.value > 0 ? BADGE_W : 0;
-  const cssWidth = Number.parseFloat(window.getComputedStyle(el).width);
-  const naturalWidth = Number.isFinite(cssWidth) && cssWidth > 0 ? cssWidth : el.offsetWidth;
   const target =
-    naturalWidth + ISLAND_EFFECT_BLEED * 2 + PILL_PAD_X + PILL_BORDER_W + extra;
+    widest + ISLAND_EFFECT_BLEED * 2 + PILL_PAD_X + PILL_BORDER_W + extra;
   pillWidth.value = Math.min(Math.max(target, PILL_MIN_W), window.innerWidth - 32);
 }
 
@@ -364,11 +388,21 @@ function onPillClick() {
     }
     return;
   }
+  // Spec041 返工（真实验收失败项二）：把灵动岛按真实进度派生的目标原样发出
+  //（task-scrape / task-screen / results / home），不在这一层压成 "task"
+  // 丢掉"抓取还是筛选"的信息；落点的最终裁决由桥接层与历史退出流程负责。
   emit("navigate", stateTarget.value);
 }
 
+function legacyCompatibleTarget(target: SharedCapsuleTarget): SharedCapsuleTarget | "task" {
+  return target === "task-scrape" || target === "task-screen" ? "task" : target;
+}
+
 function onRowClick(notice: IslandNotice) {
-  emit("navigate", notice.target);
+  const target = notice.target === "task" || notice.target === "attention"
+    ? notice.target
+    : legacyCompatibleTarget(notice.target as SharedCapsuleTarget);
+  emit("navigate", target);
   requestClose();
 }
 
@@ -494,6 +528,20 @@ function setTrackRef(el: unknown): void {
             class="island-idle-label"
             data-testid="island-idle"
           >{{ platformLabel }}</Motion>
+
+          <!-- 简历分析在后台进行时，胶囊回到上传页并明确显示分析中。 -->
+          <template v-else-if="livePhase === 'analyzing'">
+            <span class="island-live phase-analyzing" aria-hidden="true"></span>
+            <Motion
+              :key="'analyzing-' + capsule.platform"
+              :initial="animOn ? { y: 5, opacity: 0 } : false"
+              :animate="{ y: 0, opacity: 1 }"
+              :transition="valueSpring"
+              as="span"
+              class="island-value"
+              data-testid="island-analyzing-value"
+            >分析中</Motion>
+          </template>
 
           <!-- running：正在抓取 / 抓取 JD / AI精筛 + live dot；旧值上滑淡出 -->
           <template v-else-if="['scraping', 'jd', 'screening'].includes(livePhase)">
@@ -738,7 +786,11 @@ function setTrackRef(el: unknown): void {
 .island-carousel-track {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  /* 038 复审修根因：旧值 center 会让每条 lane 在"最宽那条"撑出来的轨道里水平
+     居中——队列里残留一条更宽的 lane 时，当前这条被推向右，pill 左侧就会露出
+     一大条空白、右侧被 overflow 裁掉（用户真机现象）。改左对齐后每条 lane 都
+     从轨道左边缘起排；单条 lane 时两者完全等价，视觉零变化。 */
+  align-items: flex-start;
   gap: 0;
   flex: none;
   transform-origin: center center;

@@ -323,6 +323,7 @@ def register_results_routes(app, ctx):
         """
         query_platform = request.args.get("platform", "").strip() or None
         query_run_id = request.args.get("run_id", "").strip() or None
+        query_profile_id = request.args.get("profile_id", "").strip() or None
         # T409: 精确 run_id 查询
         if query_run_id:
             try:
@@ -330,6 +331,11 @@ def register_results_routes(app, ctx):
             except ctx.operational_errors:
                 run = None
             if run is None:
+                return jsonify({"ok": True, "has_result": False})
+            run_owner = str(run.get("profile_id") or "")
+            if query_profile_id and run_owner and run_owner != query_profile_id:
+                # Spec041 收尾：无归属（NULL/空）老数据对所有画像可见；
+                # 有归属的轮次仍严格按画像过滤。
                 return jsonify({"ok": True, "has_result": False})
             # 只返回已完成或部分完成的结果
             if run["status"] not in ("succeeded", "partial", "scraped_only"):
@@ -341,14 +347,16 @@ def register_results_routes(app, ctx):
                     "message": "run_id 与 platform 不一致",
                 }), 409
             # 从该 run 的 result snapshot 构造响应
-            payload = ctx.store.load_latest_pipeline_result(query_run_id)
+            payload = ctx.store.load_latest_pipeline_result(
+                query_run_id, profile_id=query_profile_id)
             if payload is None:
                 return jsonify({"ok": True, "has_result": False})
         # T409: 按平台过滤
         elif query_platform:
-            payload = ctx.store.load_latest_pipeline_result_for_platform(query_platform)
+            payload = ctx.store.load_latest_pipeline_result_for_platform(
+                query_platform, profile_id=query_profile_id)
         else:
-            payload = ctx.store.load_latest_pipeline_result()
+            payload = ctx.store.load_latest_pipeline_result(profile_id=query_profile_id)
         if payload is None:
             return jsonify({"ok": True, "has_result": False})
         result = payload["result"]

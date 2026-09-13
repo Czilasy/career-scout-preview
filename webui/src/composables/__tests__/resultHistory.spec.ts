@@ -1,5 +1,9 @@
 import { flushPromises } from "@vue/test-utils";
-import { useResultHistory, type HistoryRoundItem } from "../resultHistory";
+import {
+  setHistoryProfile,
+  useResultHistory,
+  type HistoryRoundItem,
+} from "../resultHistory";
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -32,6 +36,7 @@ function item(overrides: Partial<HistoryRoundItem> = {}): HistoryRoundItem {
 
 describe("useResultHistory", () => {
   afterEach(() => {
+    setHistoryProfile("");
     vi.unstubAllGlobals();
   });
 
@@ -54,7 +59,7 @@ describe("useResultHistory", () => {
   it("opens a round detail and closes the drawer", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/result-history/h1")) {
+      if ((url.includes("/api/result-history/h1?") || url.endsWith("/api/result-history/h1"))) {
         return response({
           ok: true,
           has_result: true,
@@ -80,10 +85,10 @@ describe("useResultHistory", () => {
   it("deletes a round and clears the currently opened detail", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/result-history/h1") && init?.method === "DELETE") {
+      if ((url.includes("/api/result-history/h1?") || url.endsWith("/api/result-history/h1")) && init?.method === "DELETE") {
         return response({ ok: true, deleted: true, run_id: "h1" });
       }
-      if (url.endsWith("/api/result-history/h1")) {
+      if ((url.includes("/api/result-history/h1?") || url.endsWith("/api/result-history/h1"))) {
         return response({ ok: true, has_result: true, source_run_id: "h1", platform: "boss", status: "failed", result: { jobs: [], total_kept: 2 } });
       }
       if (url.includes("/api/result-history")) {
@@ -109,7 +114,7 @@ describe("useResultHistory", () => {
     let resolveList: (value: Response) => void = () => {};
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/api/result-history/h1") && init?.method === "DELETE") {
+      if ((url.includes("/api/result-history/h1?") || url.endsWith("/api/result-history/h1")) && init?.method === "DELETE") {
         return response({ ok: true, deleted: true, run_id: "h1" });
       }
       if (url.includes("/api/result-history")) {
@@ -161,19 +166,90 @@ describe("useResultHistory", () => {
     await expect(history.archiveAllCurrentResults()).rejects.toThrow();
   });
 
+  it("scopes history requests to the current profile and swaps slots on switch", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/result-history?profile_id=profile-a")) {
+        return response({ ok: true, items: [item({ run_id: "a1" })] });
+      }
+      if (url.includes("/api/result-history?profile_id=profile-b")) {
+        return response({ ok: true, items: [item({ run_id: "b1" })] });
+      }
+      return response({ ok: true, items: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const history = useResultHistory();
+    setHistoryProfile("profile-a");
+    await history.loadHistory();
+    expect(history.items.value.map((round) => round.run_id)).toEqual(["a1"]);
+
+    history.detail.value = {
+      ok: true, has_result: true, source_run_id: "a1", platform: "boss",
+      status: "done", result: { jobs: [] },
+    } as never;
+    setHistoryProfile("profile-b");
+    expect(history.items.value).toEqual([]);
+    expect(history.detail.value).toBeNull();
+
+    await history.loadHistory();
+    expect(history.items.value.map((round) => round.run_id)).toEqual(["b1"]);
+  });
+
+  it("ignores a late list response from the previous profile", async () => {
+    let resolveOld: (value: Response) => void = () => {};
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("profile_id=profile-a")) {
+        return new Promise<Response>((resolve) => { resolveOld = resolve; });
+      }
+      if (url.includes("profile_id=profile-b")) {
+        return response({ ok: true, items: [item({ run_id: "b1" })] });
+      }
+      return response({ ok: true, items: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const history = useResultHistory();
+    setHistoryProfile("profile-a");
+    const pending = history.loadHistory();
+    setHistoryProfile("profile-b");
+    await history.loadHistory();
+    resolveOld(response({ ok: true, items: [item({ run_id: "a-late" })] }));
+    await pending;
+    await flushPromises();
+    expect(history.items.value.map((round) => round.run_id)).toEqual(["b1"]);
+  });
+
+  it("sends the archive request with the current profile id", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.endsWith("/api/result-history/archive-latest")) {
+        return response({ ok: true, archived_run_ids: [] });
+      }
+      return response({ ok: true, items: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const history = useResultHistory();
+    setHistoryProfile("profile-c");
+    await history.archiveAllCurrentResults();
+    const archiveCall = calls.find((call) => call.url.endsWith("/api/result-history/archive-latest"));
+    expect(JSON.parse(String(archiveCall?.init?.body))).toEqual({ profile_id: "profile-c" });
+  });
+
   // B099：切轮次不是「回到最新」。清空展示会被当成回最新而触发第二条
   // 异步加载，两条加载赛跑导致「先闪最新、点急了停在最新」。
   it("keeps the current detail while another round loads", async () => {
     let resolveDetail: (value: Response) => void = () => {};
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/result-history/h1")) {
+      if ((url.includes("/api/result-history/h1?") || url.endsWith("/api/result-history/h1"))) {
         return response({
           ok: true, has_result: true, source_run_id: "h1", platform: "boss",
           status: "done", result: { jobs: [], total_kept: 1 },
         });
       }
-      if (url.endsWith("/api/result-history/h2")) {
+      if ((url.includes("/api/result-history/h2?") || url.endsWith("/api/result-history/h2"))) {
         return new Promise<Response>((resolve) => { resolveDetail = resolve; });
       }
       return response({});
@@ -199,10 +275,10 @@ describe("useResultHistory", () => {
     let resolveFirst: (value: Response) => void = () => {};
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/result-history/h1")) {
+      if ((url.includes("/api/result-history/h1?") || url.endsWith("/api/result-history/h1"))) {
         return new Promise<Response>((resolve) => { resolveFirst = resolve; });
       }
-      if (url.endsWith("/api/result-history/h2")) {
+      if ((url.includes("/api/result-history/h2?") || url.endsWith("/api/result-history/h2"))) {
         return response({
           ok: true, has_result: true, source_run_id: "h2", platform: "boss",
           status: "done", result: { jobs: [], total_kept: 2 },

@@ -43,6 +43,17 @@ def _kernel_check_error(cdp_port: int) -> str | None:
     return None
 
 
+def _stop_requested(stop_event) -> bool:
+    """任务已请求停止时，浏览器的启动、等待与重试必须立即收手。
+
+    收尾族：任务已经失败/暂停/取消后，绝不能还在后台反复拉起浏览器。
+    """
+    if stop_event is None:
+        return False
+    try:
+        return bool(stop_event.is_set())
+    except AttributeError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +61,8 @@ def _kernel_check_error(cdp_port: int) -> str | None:
 # ---------------------------------------------------------------------------
 
 def ensure_chrome_ready(cdp_port: int | None = None, *,
-                        minimize_after_launch: bool = False) -> tuple[bool, str]:
+                        minimize_after_launch: bool = False,
+                        stop_event=None) -> tuple[bool, str]:
     """Ensure the dedicated debug Chrome is running; launch it if not.
 
     Returns ``(True, "")`` when CDP is reachable (already running or just
@@ -66,8 +78,13 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
     把窗口最小化到任务栏（不切 headless，避免平台风控）。已运行的 Chrome
     不动，避免打断用户正在进行的登录/人工操作；登录空间打开浏览器的调用
     方不要开启此参数。
+
+    ``stop_event``：可选的任务停止信号。任务已停止（暂停/取消/结束）时，
+    本函数立即返回失败并停止启动与重试——任务停了，浏览器就不该再被拉起。
     """
     port = cdp_port or boss.DEFAULT_CDP_PORT
+    if _stop_requested(stop_event):
+        return False, "任务已停止，不启动调试浏览器"
     if boss.is_cdp_ready(port):
         cdp_data_dir = _cdp_data_dir()
         kernel_error = _kernel_check_error(port)
@@ -106,6 +123,11 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
         except Exception as exc:
             return False, f"切换账号时关闭旧 Chrome 失败：{type(exc).__name__}"
     # Not running: prepare the isolated profile, stop stale processes, launch.
+    # 启动耗时留痕：启动慢要能被日志说清（哪一步花了多久、重启几次），不靠猜。
+    _launch_started_at = time.time()
+    _logger.info(
+        "启动调试浏览器：port=%s profile=%s", port, _cdp_data_dir(),
+    )
     profile = boss.prepare_cdp_profile(data_dir=_cdp_data_dir())
     cdp_data_dir = profile["path"]
     try:
@@ -139,6 +161,8 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
     parent_exited_at = None
     PARENT_EXIT_GRACE = 10  # 主进程退出后给 CDP 10s 宽限期
     while time.time() < deadline:
+        if _stop_requested(stop_event):
+            return False, "任务已停止，已中止等待调试浏览器"
         if boss.is_cdp_ready(port):
             # 内核校验：非 Chromium 内核（如 Firefox/魔改壳）立即报错，
             # 不做重试等待（换内核不会自愈，避免无反馈等待）
@@ -152,6 +176,10 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
                 except Exception:
                     _logger.debug("窗口最小化失败（锦上添花步骤，忽略）", exc_info=True)
 
+            _logger.info(
+                "调试浏览器就绪：port=%s 耗时=%.1fs 重启次数=%d",
+                port, time.time() - _launch_started_at, attempt,
+            )
             return True, ""
         try:
             rc = proc.poll()
@@ -165,6 +193,8 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
             if time.time() - parent_exited_at > PARENT_EXIT_GRACE:
                 attempt += 1
                 if attempt <= 3:
+                    if _stop_requested(stop_event):
+                        return False, "任务已停止，不再重启调试浏览器"
                     # 重试前清理可能残留的 Chrome 子进程
                     # （否则新 Chrome 又会 handoff 给旧子进程，无限循环）
                     try:
@@ -172,6 +202,10 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
                     except Exception:
                         _logger.debug("CDP Chrome 停止失败（可能已自行退出）", exc_info=True)
 
+                    _logger.warning(
+                        "调试浏览器主进程退出，第 %d 次重启（已等 %.1fs）：exit_code=%s",
+                        attempt, time.time() - _launch_started_at, rc,
+                    )
                     time.sleep(2)
                     proc = boss.launch_chrome(cmd)
                     parent_exited_at = None
@@ -182,6 +216,10 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
                     return False, f"调试浏览器启动后立即退出（exit code={rc}，已重试 {attempt-1} 次）。stderr 末尾：\n{tail}"
                 return False, f"调试浏览器启动后立即退出（exit code={rc}，已重试 {attempt-1} 次），无 stderr 输出。"
         time.sleep(1)
+    _logger.warning(
+        "等待调试浏览器就绪超时：port=%s 已等 %.1fs 重启次数=%d",
+        port, time.time() - _launch_started_at, attempt,
+    )
     return False, "等待 CDP 就绪超时（90s）。Chrome 进程仍在运行但未开放调试端口。"
 
 

@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import uuid
 import unittest
 from unittest import mock
@@ -262,6 +263,7 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         with mock.patch.object(executor, "submit"):
             resp = self.client.post("/api/execute-search", json={
                 "platform": "boss",
+                "profile_id": "career-profile-a",
                 "script_params": {
                     "keyword": "Python",
                     "city": ["上海"],
@@ -288,6 +290,7 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         self.assertTrue(params["profile_key"])
         self.assertTrue(params["task_input_digest"])
         self.assertEqual(params["browser_account"], body.get("browser_account") or params["browser_account"])
+        self.assertEqual(run["profile_id"], "career-profile-a")
 
     def test_execute_search_zhilian_start_entry_is_reachable(self):
         """智联启用时可从公共 scope/start 入口创建冻结平台任务。"""
@@ -1884,6 +1887,53 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertEqual(data["fields"]["profile_facts"], facts)
+
+    def test_analyze_resume_background_task_can_be_restored_after_page_reload(self):
+        """Spec041：分析任务离开页面后仍可由 latest-running/task-state 接回。"""
+        import io
+        started = threading.Event()
+        release = threading.Event()
+        fields = {
+            "keyword": [{"word": "Python 后端", "recommended": True}],
+            "city": [], "salary": [], "experience": [], "degree": [],
+            "industry": [], "scale": [], "stage": [], "profile_summary": "画像",
+        }
+
+        def analyze(*_args, **_kwargs):
+            started.set()
+            release.wait(2)
+            return fields
+
+        store = self.app.config["TASK_STORE"]
+        with mock.patch.object(store, "get_ai_settings", return_value={
+            "is_configured": True, "endpoint_url": "https://api.example.com", "model": "test",
+        }), mock.patch.object(store, "get_credential_ref", return_value="ref"), \
+                mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.analyze_resume_to_fields", side_effect=analyze):
+            resp = self.client.post(
+                "/api/analyze-resume",
+                data={
+                    "file": (io.BytesIO(b"resume"), "resume.txt"),
+                    "platform": "boss", "background": "true", "profile_id": "profile-41",
+                },
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(resp.status_code, 202)
+            task_id = resp.get_json()["task_id"]
+            self.assertTrue(started.wait(1))
+            live = self.client.get("/api/latest-running-task").get_json()
+            self.assertEqual(live["kind"], "resume_analysis")
+            self.assertEqual(live["profile_id"], "profile-41")
+            release.set()
+            deadline = time.time() + 2
+            state = {}
+            while time.time() < deadline:
+                state = self.client.get(f"/api/task-state/{task_id}").get_json()
+                if state.get("status") == "done":
+                    break
+                time.sleep(0.01)
+            self.assertEqual(state.get("status"), "done")
+            self.assertEqual(state["result"]["fields"]["profile_summary"], "画像")
 
     def test_analyze_resume_zhilian_projects_company_nature_and_drops_stage(self):
         """智联简历分析返回 company_nature 语义，不出现 stage。"""

@@ -72,11 +72,13 @@ function roundContext(overrides: Partial<RoundContext> = {}): RoundContext {
   };
 }
 
-describe("useScreenRoundFlow", () => {
-  beforeEach(() => {
-    apiRequestMock.mockReset();
-  });
+// 本文件三个 describe 共用模块级 apiRequest mock：清理必须写在顶层，
+// 只写在某个 describe 内会让其它块的调用记录跨用例累积（导致 not.toHaveBeenCalled 误报）。
+beforeEach(() => {
+  apiRequestMock.mockReset();
+});
 
+describe("useScreenRoundFlow", () => {
   it("restores the full round context and confirms the profile", () => {
     const { refs, api } = makeDeps();
     const flow = useScreenRoundFlow({ refs, api });
@@ -703,6 +705,120 @@ describe("pauseScreen 批中弹窗分支（025 B076）", () => {
   });
 });
 
+describe("结束保存/补抓的批内二选一（025 B076 扩展）", () => {
+  function jdBatchSnapshot(batch: unknown = { current: 2, total: 4 }) {
+    return {
+      status: "running",
+      progress: { stage: "fetch_jd", current: 30, total: 57, jd_batch: batch },
+    };
+  }
+
+  it("03 面板批内点结束保存 → 打开二选一（kind=finish），不直接保存", () => {
+    const { refs, api } = makeDeps();
+    refs.screenTaskId.value = "screen-1";
+    refs.screenSnapshot.value = jdBatchSnapshot();
+    const flow = useScreenRoundFlow({ refs, api });
+    expect(flow.openScreenFinishChoice()).toBe(true);
+    expect(flow.pauseDialogOpen.value).toBe(true);
+    expect(flow.pauseDialogKind.value).toBe("finish");
+    expect(api.finishPausedTask).not.toHaveBeenCalled();
+  });
+
+  it("03 面板非批内点结束保存 → 不接管（调用方直接保存）", () => {
+    const { refs, api } = makeDeps();
+    refs.screenSnapshot.value = { status: "running", progress: { stage: "ai_fine" } };
+    const flow = useScreenRoundFlow({ refs, api });
+    expect(flow.openScreenFinishChoice()).toBe(false);
+    expect(flow.pauseDialogOpen.value).toBe(false);
+  });
+
+  it("结束保存选「等这批抓完再保存」→ 保存请求带 waitForBatch=true", async () => {
+    const { refs, api } = makeDeps();
+    refs.screenTaskId.value = "screen-1";
+    refs.screenSnapshot.value = jdBatchSnapshot();
+    const flow = useScreenRoundFlow({ refs, api });
+    flow.openScreenFinishChoice();
+    await flow.confirmPauseChoice("graceful");
+    expect(flow.pauseDialogOpen.value).toBe(false);
+    expect(api.finishPausedTask).toHaveBeenCalledWith(
+      "screen-1", { waitForBatch: true },
+    );
+  });
+
+  it("结束保存选「立即保存」→ waitForBatch=false", async () => {
+    const { refs, api } = makeDeps();
+    refs.screenTaskId.value = "screen-1";
+    refs.screenSnapshot.value = jdBatchSnapshot();
+    const flow = useScreenRoundFlow({ refs, api });
+    flow.openScreenFinishChoice();
+    await flow.confirmPauseChoice("immediate");
+    expect(api.finishPausedTask).toHaveBeenCalledWith(
+      "screen-1", { waitForBatch: false },
+    );
+  });
+
+  it("补抓批内点暂停 → 打开二选一，不直接调暂停 API", async () => {
+    const { refs, api } = makeDeps();
+    refs.recrawlTaskId.value = "recrawl-1";
+    refs.recrawlSnapshot.value = jdBatchSnapshot();
+    const flow = useScreenRoundFlow({ refs, api });
+    await flow.pauseRecrawl();
+    expect(flow.pauseDialogOpen.value).toBe(true);
+    expect(flow.pauseDialogKind.value).toBe("pause");
+    expect(apiRequestMock).not.toHaveBeenCalled();
+  });
+
+  it("补抓二选一选立即停止 → 调暂停 API mode=immediate 并轮询到已暂停", async () => {
+    vi.useFakeTimers();
+    try {
+      const { refs, api } = makeDeps();
+      refs.recrawlTaskId.value = "recrawl-1";
+      refs.recrawlSnapshot.value = jdBatchSnapshot();
+      apiRequestMock
+        .mockResolvedValueOnce({ ok: true, status: "pausing" })
+        .mockResolvedValueOnce({ status: "paused" });
+      const flow = useScreenRoundFlow({ refs, api });
+      await flow.pauseRecrawl();
+      const promise = flow.confirmPauseChoice("immediate");
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+      await promise;
+      expect(apiRequestMock).toHaveBeenCalledWith(
+        "/api/task/pause/recrawl-1", { method: "POST", json: { mode: "immediate" } },
+      );
+      expect(refs.pausedRunId.value).toBe("recrawl-1");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("补抓批内点结束保存 → 打开结束保存二选一", async () => {
+    const { refs, api } = makeDeps();
+    refs.recrawlTaskId.value = "recrawl-1";
+    refs.recrawlSnapshot.value = jdBatchSnapshot();
+    const flow = useScreenRoundFlow({ refs, api });
+    await flow.finishRecrawl();
+    expect(flow.pauseDialogOpen.value).toBe(true);
+    expect(flow.pauseDialogKind.value).toBe("finish");
+    expect(api.finishPausedTask).not.toHaveBeenCalled();
+  });
+
+  it("弹窗期间补抓批次结束 → 弹窗自动关闭", async () => {
+    const { refs, api } = makeDeps();
+    refs.recrawlTaskId.value = "recrawl-1";
+    refs.recrawlSnapshot.value = jdBatchSnapshot();
+    const flow = useScreenRoundFlow({ refs, api });
+    await flow.finishRecrawl();
+    expect(flow.pauseDialogOpen.value).toBe(true);
+    refs.recrawlSnapshot.value = {
+      status: "running",
+      progress: { stage: "fetch_jd", current: 57, total: 57, jd_batch: null },
+    };
+    await flushPromises();
+    expect(flow.pauseDialogOpen.value).toBe(false);
+  });
+});
+
 describe("pauseRecrawl 的未知状态保护", () => {
   it("暂停请求失败时保留重抓占用，避免误开新任务", async () => {
     const { refs, api } = makeDeps();
@@ -729,5 +845,16 @@ describe("pauseRecrawl 的未知状态保护", () => {
     expect(refs.recrawlBusy.value).toBe(false);
     expect(refs.recrawlSnapshot.value?.status).toBe("failed");
     expect(api.notify).toHaveBeenCalledWith("重抓任务已失败", "error");
+  });
+});
+
+describe("全国（不填城市）轮次恢复", () => {
+  it("恢复的范围是「全国」时不把哨兵写进城市草稿", () => {
+    const { refs, api } = makeDeps();
+    const flow = useScreenRoundFlow({ refs, api });
+    const ok = flow.restoreRoundContext(roundContext({ cities: ["全国"] }));
+    expect(ok).toBe(true);
+    expect(refs.cityText.value).toBe("");
+    expect(refs.selectedKeywords.value).toEqual(["Python"]);
   });
 });

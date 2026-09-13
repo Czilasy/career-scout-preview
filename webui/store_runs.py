@@ -378,6 +378,40 @@ class StoreRunsMixin:
             )
             return cursor.rowcount == 1
 
+    def settle_paused_run_as_completed(self, run_id, *, processed_count=None,
+                                       source_count=None, current_stage="scrape") -> bool:
+        """受控纠正：把「事实已完成、却被误记为 paused」的 run 定稿为 succeeded。
+
+        收尾族「完成优先」的专用出口：只允许 paused → succeeded，不放开通用
+        RUN_TRANSITIONS（其余状态一律不动并返回 False）。写终态时清掉暂停残留
+        的 error_code/error_reason，避免界面继续显示旧的「CDP 不可用」文案。
+        """
+        ts = _now()
+        with self._connection() as conn:
+            conn.execute(_BEGIN_IMMEDIATE)
+            self._assert_recovery_writes_allowed(conn)
+            row = conn.execute(
+                "SELECT status FROM screening_runs WHERE id = ?", (str(run_id),)
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            if row["status"] != "paused":
+                return False
+            fields = [_STATUS_SET_CLAUSE, "error_code = NULL", "error_reason = NULL",
+                      "current_stage = ?", _UPDATED_AT_SET_CLAUSE]
+            params = ["succeeded", str(current_stage), ts]
+            if processed_count is not None:
+                fields.append("processed_count = ?")
+                params.append(int(processed_count))
+            if source_count is not None:
+                fields.append("source_count = ?")
+                params.append(int(source_count))
+            params.append(str(run_id))
+            conn.execute(
+                f"UPDATE screening_runs SET {', '.join(fields)} WHERE id = ?", params
+            )
+        return True
+
     def finalize_run_status(self, run_id):
         """根据当前进度判定最终状态（FR-016, FR-036）。
 

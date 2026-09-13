@@ -38,21 +38,30 @@ class _FakeStore:
                                "dropped": run.get("_dropped") or []},
                 }
 
-    def list_history_rounds(self, platform=None):
-        return list(self.rounds_by_platform.get(platform, []))
+    def list_history_rounds(self, platform=None, profile_id=None):
+        rows = list(self.rounds_by_platform.get(platform, []))
+        if profile_id:
+            # 与真实 store 同口径：本画像的轮 + 无归属老轮。
+            rows = [
+                row for row in rows
+                if not str(row.get("profile_id") or "")
+                or str(row.get("profile_id")) == str(profile_id)
+            ]
+        return rows
 
     def load_latest_pipeline_result(self, run_id=None):
         return self.payloads.get(str(run_id))
 
 
 def _round(run_id, status="done", finished_at=None, jobs=None, dropped=None,
-           platform="boss", profile_summary="画像A"):
+           platform="boss", profile_summary="画像A", profile_id=None):
     return {
         "id": run_id, "platform": platform, "status": status,
         "finished_at": finished_at
         or _CST_NOW.isoformat(),
         "created_at": finished_at or _CST_NOW.isoformat(),
         "profile_summary": profile_summary,
+        "profile_id": profile_id,
         "_jobs": jobs or [], "_dropped": dropped or [],
     }
 
@@ -902,6 +911,36 @@ class ProfileFilterTests(unittest.TestCase):
         ]
         others = self._collect(rounds, "画像A")
         self.assertEqual([i.job["job_id"] for i in others], ["boss-ok"])
+
+    def test_profile_id_scopes_rounds_even_when_summary_empty(self):
+        """Spec041：给定画像 id 时，别的画像的轮不参与（摘要为空也一样）。"""
+        rounds = [
+            _round("r-a", profile_id="profile-a", profile_summary="",
+                   jobs=[_job("boss-a")]),
+            _round("r-b", profile_id="profile-b", profile_summary="",
+                   jobs=[_job("boss-b")]),
+        ]
+        others = collect_other_platform_jobs(
+            _FakeStore({"boss": rounds}), "zhilian",
+            profile_id="profile-a", now=_CST_NOW)
+        self.assertEqual({item.job["job_id"] for item in others}, {"boss-a"})
+
+    def test_profile_id_keeps_unowned_legacy_round(self):
+        """无归属老轮按「老数据对所有画像可见」口径一并保留。"""
+        rounds = [_round("r-legacy", profile_id=None, profile_summary="",
+                         jobs=[_job("boss-old")])]
+        others = collect_other_platform_jobs(
+            _FakeStore({"boss": rounds}), "zhilian",
+            profile_id="profile-a", now=_CST_NOW)
+        self.assertEqual([item.job["job_id"] for item in others], ["boss-old"])
+
+    def test_without_profile_id_keeps_legacy_summary_behavior(self):
+        """不传画像 id（老任务）时保持旧口径：只按摘要过滤。"""
+        rounds = [_round("r-b", profile_id="profile-b", profile_summary="",
+                         jobs=[_job("boss-b")])]
+        others = collect_other_platform_jobs(
+            _FakeStore({"boss": rounds}), "zhilian", "", now=_CST_NOW)
+        self.assertEqual([item.job["job_id"] for item in others], ["boss-b"])
 
 
 if __name__ == "__main__":

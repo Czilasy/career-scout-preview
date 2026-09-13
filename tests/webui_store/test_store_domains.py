@@ -418,6 +418,32 @@ class CandidateProfileStoreTests(unittest.TestCase):
         # Copied profile must NOT inherit AI negative preference
         self.assertEqual(copied.get("ai_preference") or {}, {})
 
+    def test_page2_draft_round_trip_and_per_profile_isolation(self):
+        """第 2 页输入（关键词/城市/画像文本）挂在画像上：写入读回、跨画像隔离。"""
+        p1 = self.store.create_profile("画像 A")
+        p2 = self.store.create_profile("画像 B")
+        self.assertEqual(p1["page2_draft"], {})
+        draft = {
+            "keywords": [{"word": "AI应用开发", "recommended": True}],
+            "selectedKeywords": ["AI应用开发"],
+            "customKeyword": "",
+            "cityText": "深圳",
+            "customCity": "",
+            "profileSummary": "3年Python后端",
+        }
+
+        updated = self.store.update_profile(p1["id"], page2_draft=draft)
+        self.assertEqual(updated["page2_draft"], draft)
+
+        # 重开库仍在（关标签页/重启后靠它回填）
+        reopened = TaskStore(pathlib.Path(self.temp.name) / "db")
+        self.assertEqual(reopened.get_profile(p1["id"])["page2_draft"], draft)
+        # 别的画像不受影响
+        self.assertEqual(reopened.get_profile(p2["id"])["page2_draft"], {})
+        # 只改名字等其它字段时，这份输入不被清掉
+        renamed = self.store.update_profile(p1["id"], name="画像 A2")
+        self.assertEqual(renamed["page2_draft"], draft)
+
     def test_profile_isolation_for_feedback(self):
         p1 = self.store.create_profile("P1")
         p2 = self.store.create_profile("P2")

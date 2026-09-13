@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from flask import jsonify
+from flask import jsonify, request
 
 from webui.constants import LOG_TAIL_LINES
 from webui.error_registry import RECOVERABLE_SYSTEMIC_BLOCK_CODES
@@ -23,6 +23,28 @@ from webui.task_runners import _iso_epoch_ms
 from webui.task_pause_support import is_user_paused_run
 from webui.pipeline_exec_status import user_visible_failure_reason
 from webui.whitebox import WhiteboxService
+
+_RESUME_ANALYSIS_KIND = "resume_analysis"
+
+
+def _resume_analysis_payload(task_id: str, task: dict) -> dict:
+    """简历分析任务的轻量快照：不查 DB、不套抓取/筛选进度口径。"""
+    return {
+        "ok": True,
+        "has_task": True,
+        "task_id": task_id,
+        "kind": _RESUME_ANALYSIS_KIND,
+        "status": str(task.get("status") or "running"),
+        "progress": dict(task.get("progress") or {}),
+        "logs": list((task.get("logs") or [])[-LOG_TAIL_LINES:]),
+        "error": str(task.get("error") or ""),
+        "started_at": task.get("started_at"),
+        "finished_at": task.get("finished_at"),
+        "platform": task.get("platform"),
+        "profile_id": task.get("profile_id"),
+        "source": "memory",
+        "resumable": False,
+    }
 
 
 def register_running_task_routes(app, ctx):
@@ -74,8 +96,20 @@ def register_running_task_routes(app, ctx):
         3. DB 中最近 interrupted 筛选（服务重启打断的工作线程）
         4. 无任务
         """
+        profile_filter = str(request.args.get("profile_id") or "").strip()
+        latest_finished_analysis: tuple[str, dict] | None = None
         with ctx.lock:
             for task_id, task in reversed(list(ctx.tasks.items())):
+                if profile_filter and str(task.get("profile_id") or "") != profile_filter:
+                    continue
+                if task.get("kind") == _RESUME_ANALYSIS_KIND:
+                    # 运行中的分析任务优先返回用于刷新接回；终态任务先记下，
+                    # 等更明确的抓取/筛选线索都排除了再兜底返回。
+                    if task["status"] in ("running", "queued"):
+                        return jsonify(_resume_analysis_payload(task_id, task))
+                    if latest_finished_analysis is None:
+                        latest_finished_analysis = (task_id, task)
+                    continue
                 try:
                     _mem_db_ep = ((ctx.store.get_screening_run(task_id) or {}).get("execution_params") or {})
                 except ctx.operational_errors:
@@ -102,6 +136,7 @@ def register_running_task_routes(app, ctx):
                         # 注册时冻结值，不得因缺平台补成 BOSS。
                         "platform": task.get("platform"),
                         "task_input_digest": task.get("task_input_digest"),
+                        "profile_id": task.get("profile_id"),
                         "auto_screen": bool(task.get("auto_screen") or _mem_db_ep.get("auto_screen")),
                         "auto_screen_fields": _mem_db_ep.get("auto_screen_fields") or {},
                         "auto_screen_profile": str(_mem_db_ep.get("auto_screen_profile") or ""),
@@ -139,15 +174,18 @@ def register_running_task_routes(app, ctx):
                 _failed_resume_placeholders = ",".join(
                     "?" for _ in _failed_resume_codes
                 )
+                _profile_clause = " AND profile_id = ?" if profile_filter else ""
                 _resume_row = conn.execute(
                     "SELECT id, status, current_stage, error_code, error_reason, "
                     "processed_count, source_count, pending_count, match_count, "
-                    "mismatch_count, total_dropped, backend_version, updated_at "
+                    "mismatch_count, total_dropped, backend_version, updated_at, "
+                    "profile_id "
                     "FROM screening_runs "
-                    "WHERE status = 'paused' "
-                    f"OR (status = 'failed' AND error_code IN ({_failed_resume_placeholders})) "
+                    "WHERE (status = 'paused' "
+                    f"OR (status = 'failed' AND error_code IN ({_failed_resume_placeholders})))"
+                    f"{_profile_clause} "
                     "ORDER BY updated_at DESC LIMIT 1",
-                    _failed_resume_codes,
+                    tuple(_failed_resume_codes) + ((profile_filter,) if profile_filter else ()),
                 )
                 _resume_row = _resume_row.fetchone()
                 prow = (
@@ -241,6 +279,9 @@ def register_running_task_routes(app, ctx):
                 "error": "task_state_unavailable",
                 "detail": type(exc).__name__,
             }), 503
+        if run is not None and profile_filter and str(run.get("profile_id") or "") != profile_filter:
+            # 不能把别的画像的中断任务接回当前画像。
+            run = None
         if run is not None and ctx.has_newer_saved_result_than(run.get("updated_at")):
             run = None
         if run is not None:
@@ -353,10 +394,12 @@ def register_running_task_routes(app, ctx):
             with ctx.store._connection() as conn:
                 auto_rows = conn.execute(
                     "SELECT id, platform, current_stage, source_count, "
-                    "execution_params_json, updated_at "
+                    "execution_params_json, updated_at, profile_id "
                     "FROM screening_runs WHERE status = 'succeeded' "
                     "AND current_stage = 'scrape' "
-                    "ORDER BY updated_at DESC LIMIT 20"
+                    + ("AND profile_id = ? " if profile_filter else "")
+                    + "ORDER BY updated_at DESC LIMIT 20",
+                    ((profile_filter,) if profile_filter else ()),
                 ).fetchall()
         except (sqlite3.Error, RuntimeError):
             auto_rows = []
@@ -455,7 +498,10 @@ def register_running_task_routes(app, ctx):
             with ctx.store._connection() as conn:
                 failed_rows = conn.execute(
                     "SELECT * FROM screening_runs WHERE status = 'failed' "
-                    "AND current_stage = 'scrape' ORDER BY updated_at DESC LIMIT 20"
+                    "AND current_stage = 'scrape' "
+                    + ("AND profile_id = ? " if profile_filter else "")
+                    + "ORDER BY updated_at DESC LIMIT 20",
+                    ((profile_filter,) if profile_filter else ()),
                 ).fetchall()
         except (sqlite3.Error, RuntimeError):
             failed_rows = []
@@ -503,4 +549,8 @@ def register_running_task_routes(app, ctx):
                 "execution_params": failed_params,
                 "integrity": failed_integrity,
             })
+        if latest_finished_analysis is not None:
+            # 没有任何在跑/可续的抓取或筛选任务时，把最近完成（或失败）的
+            # 简历分析任务交还前端：刷新后仍能按真实状态接回分析结果。
+            return jsonify(_resume_analysis_payload(*latest_finished_analysis))
         return jsonify({"ok": True, "has_task": False})

@@ -1,6 +1,7 @@
 import { computed, ref, watch } from "vue";
 import type { Ref } from "vue";
 import { apiRequest, errorMessage } from "../api";
+import { stripNationwideCities } from "../discovery";
 import {
   deriveScreenPrimaryAction,
   continueTargets,
@@ -36,6 +37,8 @@ export interface ScreenRoundFlowDeps {
     recrawlBusy: Ref<boolean>;
     recrawlTaskId: Ref<string>;
     recrawlSnapshot: Ref<TaskSnapshot | null>;
+    /** Spec041 返工：任务状态查询要带当前画像（旧假件可不传，退回无画像兼容口径）。 */
+    profileId?: Ref<string>;
     pollTimer?: Ref<number | undefined>;
     finishedPartial: Ref<boolean>;
     resultsPageSeen: Ref<boolean>;
@@ -53,11 +56,15 @@ export interface ScreenRoundFlowDeps {
     continueAiScreen: (platform?: Platform) => Promise<void>;
     recrawlUncertain: (platform?: Platform) => Promise<void>;
     continueRecrawl: () => Promise<void>;
-    finishPausedTask: (runId: string) => Promise<void>;
+    finishPausedTask: (
+      runId: string,
+      options?: { waitForBatch?: boolean },
+    ) => Promise<void>;
     resetWorkflow: () => Promise<void>;
     loadLatestResult: () => Promise<void>;
-    /** 035：历史模式触发守卫时完整退出历史（含平台还原/展示清理/落进度页）。 */
-    returnToLatest: () => Promise<void>;
+    /** 035：历史模式触发守卫时完整退出历史（含平台还原/展示清理/落进度页）。
+     *  Spec041 返工：返回真实落点步骤，调用方按自己的落点继续，不依赖其返回值。 */
+    returnToLatest: () => Promise<unknown>;
     notify: (message: string, tone?: Notice["tone"]) => void;
   };
 }
@@ -95,11 +102,15 @@ function snapshotWithProgress(
   };
 }
 
-async function readTaskState(runId: string): Promise<TaskSnapshot | null> {
+/** Spec041 返工：任务状态查询带当前画像（后端按归属校验，跨画像按不存在处理）。 */
+function taskStateUrl(runId: string, profileId?: string): string {
+  const profile = profileId ? `?profile_id=${encodeURIComponent(profileId)}` : "";
+  return `/api/task-state/${encodeURIComponent(runId)}${profile}`;
+}
+
+async function readTaskState(runId: string, profileId?: string): Promise<TaskSnapshot | null> {
   try {
-    return await apiRequest<TaskSnapshot>(
-      `/api/task-state/${encodeURIComponent(runId)}`,
-    );
+    return await apiRequest<TaskSnapshot>(taskStateUrl(runId, profileId));
   } catch {
     return null;
   }
@@ -111,9 +122,12 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   const continueGuide = ref<{ boss: boolean; zhilian: boolean } | null>(null);
   const busyAction = ref("");
   const suppressProfileWatch = ref(false);
-  // 025 B076：批中暂停二选一弹窗状态（批内信号 → 弹窗；任务状态变化自动关闭）
+  // 025 B076：批中二选一弹窗状态（批内信号 → 弹窗；任务状态变化自动关闭）。
+  // 暂停与结束保存共用一个弹窗：kind 决定文案，source 决定看哪个任务快照。
   const pauseDialogOpen = ref(false);
   const pauseBatchInfo = ref<{ current: number; total: number } | null>(null);
+  const pauseDialogKind = ref<"pause" | "finish">("pause");
+  const pauseDialogSource = ref<"screen" | "recrawl">("screen");
 
   const screenStatus = computed(() => {
     const ctx = roundContext.value;
@@ -207,7 +221,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     try {
       deps.refs.keywords.value = ctx.keywords.map((word) => ({ word, recommended: false }));
       deps.refs.selectedKeywords.value = [...ctx.keywords];
-      deps.refs.cityText.value = ctx.cities.join(",");
+      deps.refs.cityText.value = stripNationwideCities(ctx.cities).join(",");
       if (ctx.platform) {
         deps.refs.filterValues.value = {
           ...deps.refs.filterValues.value,
@@ -248,8 +262,10 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
 
   // 025 B076：判定「正处抓 JD 批次中」——stage=fetch_jd 且批内信号 jd_batch 非空，
   // 且任务未进入暂停/终态（弹窗竞态边界：批完成或任务已停视为不在批内）。
-  function inJdBatch(): boolean {
-    const snapshot = deps.refs.screenSnapshot.value;
+  function inJdBatch(source: "screen" | "recrawl" = "screen"): boolean {
+    const snapshot = source === "recrawl"
+      ? deps.refs.recrawlSnapshot.value
+      : deps.refs.screenSnapshot.value;
     const status = String(snapshot?.status || "");
     if (["paused", "failed", "cancelled", "interrupted"].includes(status)) return false;
     const progress = snapshot?.progress as Record<string, unknown> | undefined;
@@ -258,9 +274,17 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     return Boolean(batch && typeof batch === "object");
   }
 
-  function openPauseDialog(): void {
-    const progress = deps.refs.screenSnapshot.value?.progress as Record<string, unknown> | undefined;
+  function openPauseDialog(
+    kind: "pause" | "finish" = "pause",
+    source: "screen" | "recrawl" = "screen",
+  ): void {
+    const snapshot = source === "recrawl"
+      ? deps.refs.recrawlSnapshot.value
+      : deps.refs.screenSnapshot.value;
+    const progress = snapshot?.progress as Record<string, unknown> | undefined;
     const batch = (progress?.jd_batch ?? {}) as { current?: number; total?: number };
+    pauseDialogKind.value = kind;
+    pauseDialogSource.value = source;
     pauseBatchInfo.value = {
       current: Number(batch.current || 0),
       total: Number(batch.total || 0),
@@ -274,9 +298,9 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
 
   // 弹窗打开期间任务状态变化（批次完成/任务已暂停等）→ 自动关闭（竞态边界）
   watch(
-    () => deps.refs.screenSnapshot.value,
+    [() => deps.refs.screenSnapshot.value, () => deps.refs.recrawlSnapshot.value],
     () => {
-      if (pauseDialogOpen.value && !inJdBatch()) closePauseDialog();
+      if (pauseDialogOpen.value && !inJdBatch(pauseDialogSource.value)) closePauseDialog();
     },
     { deep: true },
   );
@@ -307,7 +331,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       for (let i = 0; i < maxPolls; i += 1) {
         await delay(300);
         const data = await apiRequest<TaskSnapshot>(
-          `/api/task-state/${encodeURIComponent(runId)}`,
+          taskStateUrl(runId, deps.refs.profileId?.value),
         );
         if (String(data.status) === "paused") {
           deps.refs.pausedRunId.value = runId;
@@ -346,7 +370,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     } catch (error) {
       // 暂停请求或状态查询失败时，任务真实状态未知，不能把它误当作空闲。
       // 再读一次权威状态：已收口才释放；读不到则保留占用，刷新后可继续对账。
-      const latest = await readTaskState(runId);
+      const latest = await readTaskState(runId, deps.refs.profileId?.value);
       const latestStatus = String(latest?.status || "");
       if (latest && TERMINAL_POLL_STATUSES.has(latestStatus)) {
         deps.refs.screenSnapshot.value = latest;
@@ -394,10 +418,32 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   }
 
   async function confirmPauseChoice(mode: "immediate" | "graceful"): Promise<void> {
+    const kind = pauseDialogKind.value;
+    const source = pauseDialogSource.value;
     closePauseDialog();
+    if (kind === "finish") {
+      const finishRunId = source === "recrawl"
+        ? (deps.refs.recrawlTaskId.value || deps.refs.pausedRunId.value)
+        : (deps.refs.screenTaskId.value || deps.refs.pausedRunId.value);
+      if (!finishRunId) return;
+      // 结束保存：等这批抓完 = 请服务端等当前批收尾后再取快照（数据更全）。
+      await deps.api.finishPausedTask(finishRunId, { waitForBatch: mode === "graceful" });
+      return;
+    }
+    if (source === "recrawl") {
+      await doPauseRecrawl(mode);
+      return;
+    }
     const runId = deps.refs.screenTaskId.value;
     if (!runId) return;
     await doPause(runId, mode);
+  }
+
+  /** 03 面板「结束并保存结果」：批内 → 打开二选一，返回是否已接管。 */
+  function openScreenFinishChoice(): boolean {
+    if (!inJdBatch("screen")) return false;
+    openPauseDialog("finish", "screen");
+    return true;
   }
 
   async function continueScreen(platform?: Platform): Promise<void> {
@@ -469,10 +515,8 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     if (busyAction.value || deps.refs.recrawlBusy.value) return;
     busyAction.value = "recrawl";
     try {
-      // 显式平台（选平台后/单平台视图）：重抓开始即切 03 展示进度。
-      // 无平台（"全部"视图）：由 recrawlUncertain 决定——多平台先弹选择
-      // 引导（留在 04），单平台直接重抓并在内部切 03。
-      if (platform) deps.refs.activeStep.value = "screen";
+      // 重抓是结果页上的后台动作；无论从哪个平台入口发起，都留在当前页，
+      // 进度由顶部胶囊和当前结果页的进度卡同步展示。
       await deps.api.recrawlUncertain(platform);
     } finally {
       busyAction.value = "";
@@ -480,6 +524,16 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   }
 
   async function pauseRecrawl(): Promise<void> {
+    if (busyAction.value) return;
+    // 025 B076：补抓的抓 JD 批次与 AI 筛选同形态 → 批内点暂停同样弹二选一。
+    if (inJdBatch("recrawl")) {
+      openPauseDialog("pause", "recrawl");
+      return;
+    }
+    await doPauseRecrawl("graceful");
+  }
+
+  async function doPauseRecrawl(mode: "immediate" | "graceful"): Promise<void> {
     const runId = deps.refs.recrawlTaskId.value;
     if (!runId || busyAction.value) return;
     busyAction.value = "pause-recrawl";
@@ -488,13 +542,16 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       deps.refs.recrawlSnapshot.value, "正在暂停重抓…",
     );
     try {
-      await apiRequest(`/api/task/pause/${encodeURIComponent(runId)}`, { method: "POST" });
+      await apiRequest(`/api/task/pause/${encodeURIComponent(runId)}`, {
+        method: "POST",
+        json: { mode },
+      });
       let terminalStatus = "";
       let terminalSnapshot: TaskSnapshot | null = null;
       for (let i = 0; i < 15; i += 1) {
         await delay(300);
         const data = await apiRequest<TaskSnapshot>(
-          `/api/task-state/${encodeURIComponent(runId)}`,
+          taskStateUrl(runId, deps.refs.profileId?.value),
         );
         deps.refs.recrawlSnapshot.value = data;
         if (TERMINAL_POLL_STATUSES.has(String(data.status))) {
@@ -520,7 +577,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
         deps.api.notify("正在等待重抓暂停结果，请稍后查看", "warning");
       }
     } catch (error) {
-      const latest = await readTaskState(runId);
+      const latest = await readTaskState(runId, deps.refs.profileId?.value);
       const latestStatus = String(latest?.status || "");
       if (latest && TERMINAL_POLL_STATUSES.has(latestStatus)) {
         deps.refs.recrawlSnapshot.value = latest;
@@ -593,7 +650,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       );
       applyCancelled(cleanupFailureMessage(data));
     } catch (error) {
-      const latest = await readTaskState(runId);
+      const latest = await readTaskState(runId, deps.refs.profileId?.value);
       const latestStatus = String(latest?.status || "");
       if (latest && TERMINAL_POLL_STATUSES.has(latestStatus)) {
         deps.refs.recrawlSnapshot.value = latest;
@@ -625,6 +682,11 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   async function finishRecrawl(): Promise<void> {
     const runId = deps.refs.recrawlTaskId.value || deps.refs.pausedRunId.value;
     if (!runId || busyAction.value) return;
+    // 批内结束保存：让用户选"等这批抓完再保存 / 立即保存"。
+    if (inJdBatch("recrawl")) {
+      openPauseDialog("finish", "recrawl");
+      return;
+    }
     busyAction.value = "finish";
     try {
       await deps.api.finishPausedTask(runId);
@@ -704,6 +766,8 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     closePauseDialog,
     pauseDialogOpen,
     pauseBatchInfo,
+    pauseDialogKind,
+    openScreenFinishChoice,
     continueScreen,
     chooseContinuePlatform,
     cancelContinueGuide,

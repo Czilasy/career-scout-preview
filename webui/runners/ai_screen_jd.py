@@ -109,6 +109,7 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
         ctx.activate_task_browser(task_id)
         chrome_ok, chrome_err = ensure_chrome_ready(
             frozen_cdp_port, minimize_after_launch=True,
+            stop_event=stop_event,
         )
         if not chrome_ok:
             reason = f"调试浏览器未就绪（{chrome_err}），请处理后继续"

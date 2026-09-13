@@ -59,6 +59,9 @@ def register_log_routes(app, ctx):
         # 035：按任务过滤（运行日志）——仅保留包含该 task_id 的日志行。
         task_id = str(request.args.get("task_id") or "").strip()
 
+        # 统一成 (行号, 行文本) 列表：文件日志行号 = 1..N 的位置；持久化任务
+        # 日志行号 = task_logs.seq（稳定递增）。游标（since/offset/start/end）
+        # 全部按这套稳定行号进出，前端据此做增量合并。
         if task_id:
             # 任务输出由 task_logs 持久化，历史轮次对应的 pipeline run id
             # 不会出现在 career-scout.log 的每一行中。优先返回持久化日志；
@@ -70,16 +73,24 @@ def register_log_routes(app, ctx):
             except ctx.operational_errors:
                 task_rows = None
             if task_rows is not None:
-                lines = [str(row["line"]) for row in task_rows]
+                numbered = [
+                    (int(row.get("seq") or 0), str(row["line"]))
+                    for row in task_rows
+                ]
                 identity = f"task:{task_id}"
             else:
-                lines, identity = _read_file()
-                lines = [line for line in lines if task_id in line]
+                # 旧版兼容：文件里按文本过滤。过滤后重新编号（1..M），与旧行为
+                # 一致，游标在过滤集内自洽。
+                file_lines, identity = _read_file()
+                filtered = [line for line in file_lines if task_id in line]
+                numbered = list(enumerate(filtered, start=1))
         else:
-            lines, identity = _read_file()
-        total = len(lines)
+            file_lines, identity = _read_file()
+            numbered = list(enumerate(file_lines, start=1))
+
+        total = numbered[-1][0] if numbered else 0
         rotated = bool(client_identity and identity and identity != client_identity)
-        if not lines:
+        if not numbered:
             return jsonify({
                 "ok": True, "lines": [], "start": 0, "end": 0,
                 "total": 0, "identity": identity or "",
@@ -87,26 +98,30 @@ def register_log_routes(app, ctx):
             })
         if rotated:
             # 轮转：直接返回新文件尾部，前端据此重置展示（实时更新不失效）
-            selected = lines[-tail:]
-            start = total - len(selected) + 1
-            end = total
+            selected = numbered[-tail:]
         elif offset and offset > 1:
             # 更早分页：返回行号 < offset 的最多 tail 行（上滑加载历史）
-            limit = min(tail, offset - 1)
-            selected = lines[max(0, offset - 1 - limit): offset - 1]
-            start = offset - len(selected)
-            end = offset - 1
-        elif since and since > 0 and total > since:
-            # 轮询增量：返回行号 > since 的新增行
-            selected = lines[since:]
-            start = since + 1
-            end = total
+            selected = [item for item in numbered if item[0] < offset][-tail:]
+        elif since and since > 0:
+            # 轮询增量：只返回行号 > since 的新增行。没有新增行时必须返回
+            # 空增量——旧实现会退回重发整个尾部，轮询每拍把同一批日志再追加
+            # 一遍（运行日志重复渲染 15 倍的根因）。
+            selected = [item for item in numbered if item[0] > since]
         else:
-            selected = lines[-tail:]
-            start = total - len(selected) + 1
-            end = total
+            selected = numbered[-tail:]
+        lines = [line for _, line in selected]
+        if selected:
+            start = selected[0][0]
+            end = selected[-1][0]
+        elif since and since > 0:
+            # 无新增行：保持游标不动（end == since），前端不会前移也不会重复。
+            start = since + 1
+            end = since
+        else:
+            start = 0
+            end = 0
         return jsonify({
-            "ok": True, "lines": selected, "start": start, "end": end,
+            "ok": True, "lines": lines, "start": start, "end": end,
             "total": total, "identity": identity or "",
             "rotated": rotated, "empty": False,
         })

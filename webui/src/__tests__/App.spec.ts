@@ -228,6 +228,24 @@ describe("App", () => {
     expect(wrapper.find('[data-testid="island-unread"]').exists()).toBe(false);
   });
 
+  it("037 复审: 同一条提示短时间内重复到达只播报一次（灵动岛不再出现重复行）", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const view = wrapper.findComponent(DiscoveryView);
+
+    // 暂停现场：点暂停后的即时对账 + 轮询下一拍会各发一次同样的任务错误。
+    const message = "已暂停：本轮已完成 1 个组合，断点已保存；点「继续」接着抓";
+    view.vm.$emit("notify", { message, tone: "warning" } as never);
+    view.vm.$emit("notify", { message, tone: "warning" } as never);
+    await flushPromises();
+    expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
+
+    // 不同内容的提示照旧逐条播报，不被去重吞掉。
+    view.vm.$emit("notify", { message: "已停止抓取，结果已保存", tone: "success" } as never);
+    await flushPromises();
+    expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("2");
+  });
+
   it("037: island panel and top drawers are mutually exclusive", async () => {
     // 默认 mock 对 /api/job-reminders 返回 {}（缺 items 字段），抽屉渲染会崩；
     // 这里给规范空列表（002 合同），聚焦互斥行为本身。
@@ -442,7 +460,7 @@ describe("App", () => {
     }
     if (url.endsWith("/api/check")) return response({ connected: true });
     if (url.endsWith("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
-    if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+    if (url.includes("/api/latest-running-task")) return response({ ok: true, has_task: false });
     if (url.endsWith("/api/advanced-settings")) {
       return response({ ok: true, selection: "custom", settings: {}, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
     }

@@ -111,14 +111,17 @@ class DedupeOutcome:
 
 
 def collect_other_platform_jobs(
-    store, current_platform: str, profile_summary: str = "", *, now=None,
+    store, current_platform: str, profile_summary: str = "", *,
+    profile_id: str | None = None, now=None,
 ) -> list[OtherPlatformJob]:
     """收集对端判定源：近 ``DEDUPE_WINDOW_DAYS`` 天全部可见轮的非剔除岗位。
 
     逐轮过滤：可见状态（done/partial/scraped_only）、定稿时间超窗整轮跳过、
-    轮画像摘要与当前任务双非空且不一致整轮跳过（R4：不跨画像串台；任一
-    为空不过滤）、轮内无非剔除岗位（全剔除行）整轮跳过。轮按定稿顺序从
-    旧到新汇入，同岗位多轮取最近轮为追溯目标（由索引层保证）。
+    ``profile_id`` 给定则只取该画像的轮（无归属老轮按"老数据对所有画像可见"
+    口径一并保留，与历史列表一致）、轮画像摘要与当前任务双非空且不一致整轮
+    跳过（R4：不跨画像串台；任一为空不过滤）、轮内无非剔除岗位（全剔除行）
+    整轮跳过。轮按定稿顺序从旧到新汇入，同岗位多轮取最近轮为追溯目标
+    （由索引层保证）。
     """
     current_platform = str(current_platform or "")
     current_summary = str(profile_summary or "").strip()
@@ -130,7 +133,13 @@ def collect_other_platform_jobs(
             continue
         # list_history_rounds 新→旧；反转为旧→新，保证“首个命中定源、
         # 追溯取最近轮”的顺序语义。
-        rounds = list(store.list_history_rounds(platform_key) or [])
+        # Spec041：筛选任务带画像时按画像取轮，别的画像的轮不参与去重；
+        # 老任务（无画像）保持旧口径。
+        if profile_id:
+            rounds = list(store.list_history_rounds(
+                platform_key, profile_id=str(profile_id)) or [])
+        else:
+            rounds = list(store.list_history_rounds(platform_key) or [])
         for run in reversed(rounds):
             if str(run.get("status") or "") not in VISIBLE_STATUSES:
                 continue
@@ -225,7 +234,7 @@ def split_cross_platform_duplicates(
 
 def apply_to_screening_input(
     store, raw_jobs: list, current_platform: str, profile_summary: str = "",
-    *, enabled: bool = True, now=None,
+    *, profile_id: str | None = None, enabled: bool = True, now=None,
 ) -> DedupeOutcome:
     """组合入口（app.py 一行调用）：开关旁路直通，开启则收集 + 拆分。"""
     jobs = list(raw_jobs or [])
@@ -233,5 +242,6 @@ def apply_to_screening_input(
         return DedupeOutcome(
             kept_jobs=jobs, total_scraped=len(jobs))
     other_jobs = collect_other_platform_jobs(
-        store, current_platform, profile_summary, now=now)
+        store, current_platform, profile_summary,
+        profile_id=profile_id, now=now)
     return split_cross_platform_duplicates(jobs, other_jobs, current_platform)

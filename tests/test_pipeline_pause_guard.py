@@ -644,5 +644,272 @@ class CancelCleanupTests(unittest.TestCase):
         stop.assert_called_once_with(task_id)
 
 
+class _ScreenStore:
+    """AI 筛选 runner 预 JD 段所需的最小 store 替身（不提供白箱能力）。"""
+
+    def __init__(self, scrape_run):
+        self.scrape_run = dict(scrape_run)
+
+    def get_screening_run(self, run_id):
+        if run_id == self.scrape_run.get("id"):
+            return dict(self.scrape_run)
+        return None
+
+    def get_whitebox_run(self, owner_kind, owner_id):
+        return None
+
+    def create_screening_run(self, *args, **kwargs):
+        return None
+
+    def save_filter_snapshot(self, *args, **kwargs):
+        return None
+
+    def save_verdict_and_checkpoint_atomic(self, *args, **kwargs):
+        return None
+
+    def get_ai_settings(self):
+        return {"endpoint_url": "http://ai.local", "model": "gpt"}
+
+    def get_credential_ref(self):
+        return "cred-ref"
+
+    def load_checkpoint(self, *args, **kwargs):
+        return set()
+
+    def append_task_event(self, *args, **kwargs):
+        return None
+
+    def append_task_events(self, *args, **kwargs):
+        return None
+
+
+class _ScreenCtx:
+    """AI 筛选 runner 的 ctx 替身：只支撑到 JD 段入口。"""
+
+    def __init__(self, task_id, scrape_id, scrape_run, result_dir):
+        self.lock = threading.RLock()
+        self.tasks = {
+            task_id: {
+                "kind": "ai_screen", "status": "running", "progress": {},
+                "logs": [], "result": None, "error": "",
+                "stop_event": threading.Event(),
+            },
+            scrape_id: {
+                "kind": "scrape", "status": "done",
+                "result": {
+                    "ok": True,
+                    "jobs": [{"job_id": "j1", "platform_job_id": "j1", "title": "岗位"}],
+                    "total_scraped": 1,
+                },
+            },
+        }
+        self.store = _ScreenStore(scrape_run)
+        self.operational_errors = (Exception,)
+        self.backend_version = "test"
+        self.app = SimpleNamespace(config={"RESULT_DIR": result_dir})
+        self.screen_stage_messages = {}
+        self.event_stage_names = {}
+
+    def write_run(self, *args, **kwargs):
+        return None
+
+    def activate_task_browser(self, task_id, **kwargs):
+        return None
+
+    def account_for_run(self, run=None):
+        return "a"
+
+    def screen_overall_percent(self, stage, current, total):
+        return 0
+
+    def jd_checkpoint_path(self, result_dir, run_id):
+        return str(Path(result_dir) / f"{run_id}.json")
+
+    def load_jd_checkpoint(self, path):
+        return {}
+
+    def remove_jd_checkpoint(self, path):
+        return None
+
+    def save_jd_checkpoint(self, *args, **kwargs):
+        return None
+
+    def record_pause_failure(self, *args, **kwargs):
+        return None
+
+    def release_worker_resume_claims(self, task):
+        return None
+
+    def is_user_finished(self, run_id):
+        return False
+
+    def schedule_pipeline_task_cleanup(self, task_id):
+        return None
+
+    def clear_auto_screen(self, task_id):
+        return None
+
+    def prune_history_best_effort(self):
+        return None
+
+
+class BatchSignalProgressTests(unittest.TestCase):
+    """批内信号（jd_batch）必须活过条级进度刷新。
+
+    批中暂停二选一依赖「任务正处于 JD 批次内」这个实时标记；进度快照是整块
+    替换的，条级回调不带该标记——被冲掉后弹窗既弹不出来也会被自动关闭
+    （智联逐条抓取时整批都会丢标记）。
+    """
+
+    def test_carry_rule_keeps_signal_inside_same_stage(self):
+        from webui.task_runner_support import _carry_batch_signal
+        previous = {
+            "stage": "fetch_jd", "current": 0,
+            "jd_batch": {"current": 2, "total": 4},
+        }
+
+        kept = _carry_batch_signal(previous, {"stage": "fetch_jd", "current": 1})
+        self.assertEqual(kept["jd_batch"], {"current": 2, "total": 4})
+
+        cleared = _carry_batch_signal(
+            previous, {"stage": "fetch_jd", "jd_batch": None})
+        self.assertIsNone(cleared["jd_batch"])
+
+        other_stage = _carry_batch_signal(
+            previous, {"stage": "screen_b", "current": 1})
+        self.assertNotIn("jd_batch", other_stage)
+
+        no_signal_before = _carry_batch_signal(
+            {"stage": "fetch_jd", "current": 0},
+            {"stage": "fetch_jd", "current": 1},
+        )
+        self.assertNotIn("jd_batch", no_signal_before)
+
+    def test_ai_screen_emit_keeps_signal_through_item_progress(self):
+        from webui.execution_config import (
+            ExecutionConfigSnapshot, FrozenTaskScope,
+        )
+        from webui.runners import ai_screen_task as module
+
+        config = ExecutionConfigSnapshot({
+            "inter_combo_delay": 0, "detail_batch_size": 5,
+            "detail_interval": 0, "detail_reset_every": 1,
+            "detail_batch_cooldown": 0, "detail_tab_pool_size": 1,
+            "screen_batch_size": 5, "screen_concurrency": 1,
+            "match_batch_size": 5, "match_concurrency": 1,
+        })
+        scope = FrozenTaskScope(
+            keywords=["前端"], scope_kind="city", cities=["上海"],
+            pages_per_combination=1, combination_count=1, planned_pages=1,
+            task_size="small", platform="boss",
+        )
+        task_id, scrape_id = "screen-batch-signal", "scrape-batch-signal"
+        seen = []
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _ScreenCtx(
+                task_id, scrape_id,
+                {
+                    "id": scrape_id, "status": "succeeded", "platform": "boss",
+                    "execution_params": {
+                        "execution_config": config.to_dict(),
+                        "frozen_scope": scope.to_dict(),
+                    },
+                },
+                tmp,
+            )
+
+            def fake_jd_stage(*args, **kwargs):
+                emit = args[12]
+                emit(stage="fetch_jd", current=0, total=2,
+                     message="抓取 JD 0/2",
+                     jd_batch={"current": 1, "total": 1})
+                # 条级进度刷新（不带批内信号）
+                emit(stage="fetch_jd", current=1, total=2, message="抓取 JD 1/2")
+                with ctx.lock:
+                    seen.append(dict(ctx.tasks[task_id]["progress"]))
+                # 批结束：显式清空
+                emit(stage="fetch_jd", current=2, total=2,
+                     message="抓取 JD 2/2", jd_batch=None)
+                with ctx.lock:
+                    seen.append(dict(ctx.tasks[task_id]["progress"]))
+                return None  # 终止路径：不触达收尾段
+
+            dedupe = SimpleNamespace(
+                dropped_entries=[], dup_verdicts={}, progress_message="",
+                ledger_payload=lambda: {},
+            )
+            with mock.patch.object(
+                    module, "run_rough_stage",
+                    return_value=([{"job_id": "j1", "platform_job_id": "j1",
+                                    "title": "岗位"}], [])), \
+                    mock.patch.object(module, "run_jd_stage",
+                                      side_effect=fake_jd_stage), \
+                    mock.patch(
+                        "webui.cross_platform_dedupe.apply_to_screening_input",
+                        return_value=dedupe), \
+                    mock.patch("webui.ai.retrieve_api_key",
+                               return_value="sk-test"), \
+                    mock.patch("webui.ai.is_ai_available",
+                               return_value=True):
+                module.run_ai_screen_task(
+                    ctx, task_id, {"keyword": "前端"}, "3 年 Python 后端",
+                    scrape_id, "", None, config,
+                )
+
+        self.assertEqual(
+            seen[0].get("jd_batch"), {"current": 1, "total": 1},
+            "条级进度刷新不得冲掉批内信号（否则暂停二选一弹不出来）",
+        )
+        self.assertIsNone(
+            seen[1].get("jd_batch"),
+            "批结束必须清空批内信号（弹窗据此自动关闭）",
+        )
+
+
+class InterComboCooldownSegmentTests(unittest.TestCase):
+    """组合间防限流冷却分段响应停止信号（冷却期间点暂停不用等睡满）。"""
+
+    def test_inter_combo_wait_aborts_early_when_stop_event_set(self):
+        from webui.pipeline_exec import run_search
+        stop_event = threading.Event()
+        # 用户点暂停等价于 request_stop：停止原因写在事件上（缺省会按取消处理）
+        stop_event.stop_mode = "pause"
+        sleeps = []
+
+        def _fake_sleep(seconds):
+            sleeps.append(seconds)
+            stop_event.set()
+
+        class _ListSource:
+            platform = "boss"
+            cdp_port = 9222
+
+            def preflight(self):
+                return SourceOutcome.success()
+
+            def fetch_list(self, _plan_item, *, on_page_completed=None):
+                return SourceOutcome.success(
+                    jobs=[{"job_id": "j1", "title": "工程师"}],
+                    scope_complete=True,
+                )
+
+        with mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ), mock.patch("webui.pipeline_exec.close_debug_chrome"), \
+                mock.patch("webui.pipeline_exec_search.time.sleep",
+                           side_effect=_fake_sleep):
+            result = run_search(
+                {"keyword": "前端,后端", "city": ["上海"]},
+                _ListSource(), pages=1, stop_event=stop_event,
+                close_chrome_on_success=False,
+            )
+
+        self.assertEqual(result.get("stop_mode"), "pause", result)
+        self.assertLess(
+            sum(sleeps), 25,
+            "组合间冷却必须分段响应停止信号，不等整段睡完",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,13 +8,16 @@ import type {
   LocationCatalogResponse,
   LocationCondition,
   Platform,
+  SceneIdentity,
 } from "../types";
+import { useDiscoverySceneState } from "../composables/useDiscoverySceneState";
 
 const props = withDefaults(defineProps<{
   city: string;
   platform: Platform;
   modelValue: LocationCondition[];
   disabled?: boolean;
+  sceneIdentity?: SceneIdentity;
 }>(), {
   disabled: false,
 });
@@ -32,6 +35,57 @@ const loading = ref(false);
 const unavailable = ref(false);
 const cityCode = ref("");
 const panelStyle = ref<Record<string, string>>({});
+const sceneStore = useDiscoverySceneState();
+let sceneReady = false;
+let catalogRequestId = 0;
+
+function restoreScene(): void {
+  catalogRequestId += 1;
+  sceneReady = false;
+  loading.value = false;
+  unavailable.value = false;
+  const identity = props.sceneIdentity;
+  if (!identity) {
+    sceneReady = true;
+    return;
+  }
+  const saved = sceneStore.getCurrent(identity).cityPanels[props.city];
+  if (saved) {
+    open.value = saved.open;
+    districts.value = saved.districts.map((district) => ({
+      ...district,
+      children: district.children?.map((child) => ({ ...child })),
+    }));
+    cityCode.value = saved.cityCode;
+  } else {
+    open.value = false;
+    districts.value = [];
+    cityCode.value = "";
+  }
+  sceneReady = true;
+}
+
+function persistScene(): void {
+  const identity = props.sceneIdentity;
+  if (!sceneReady || !identity) return;
+  const current = sceneStore.getCurrent(identity);
+  sceneStore.saveCurrent(identity, {
+    cityPanels: {
+      ...current.cityPanels,
+      [props.city]: {
+        open: open.value,
+        districts: districts.value,
+        cityCode: cityCode.value,
+      },
+    },
+  });
+}
+
+watch(
+  () => [props.sceneIdentity?.profileId, props.sceneIdentity?.runEpoch, props.sceneIdentity?.platform, props.city, props.platform],
+  restoreScene,
+  { immediate: true },
+);
 
 const label = computed(() => locationSummary(props.modelValue) || props.city);
 const selectedCount = computed(() => props.modelValue.length);
@@ -98,19 +152,24 @@ function positionPanel(): void {
 }
 
 async function loadCatalog(): Promise<void> {
+  const requestId = ++catalogRequestId;
+  const platform = props.platform;
+  const city = props.city;
   loading.value = true;
   unavailable.value = false;
   try {
     const data = await apiRequest<LocationCatalogResponse>(
-      `/api/location-catalog?platform=${props.platform}&city=${encodeURIComponent(props.city)}`,
+      `/api/location-catalog?platform=${platform}&city=${encodeURIComponent(city)}`,
     );
+    if (requestId !== catalogRequestId || platform !== props.platform || city !== props.city) return;
     districts.value = data.districts || [];
     cityCode.value = data.city_code || "";
   } catch {
+    if (requestId !== catalogRequestId || platform !== props.platform || city !== props.city) return;
     districts.value = [];
     unavailable.value = true;
   } finally {
-    loading.value = false;
+    if (requestId === catalogRequestId) loading.value = false;
   }
 }
 
@@ -162,10 +221,12 @@ onMounted(() => {
   document.addEventListener("pointerdown", handleDocumentPointerDown, true);
 });
 onBeforeUnmount(() => {
+  persistScene();
   document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
   clearRepositionListeners();
 });
 watch(open, (value) => {
+  persistScene();
   if (value) {
     void nextTick(() => {
       positionPanel();
@@ -184,6 +245,8 @@ watch(
     if (open.value) void nextTick(positionPanel);
   },
 );
+
+watch([districts, cityCode], () => persistScene(), { deep: true });
 
 function toggleDistrict(district: LocationCatalogEntry): void {
   const current = props.modelValue.filter(

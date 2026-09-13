@@ -3,7 +3,7 @@
 import type { Ref } from "vue";
 import type { DiscoveryState } from "./useDiscoveryState";
 import type { SearchNeeds } from "./discoveryDeps";
-import { nextTick } from "vue";
+import { computed, nextTick, watch } from "vue";
 import type {
   AdvancedSettingsState,
   CandidateProfile,
@@ -28,6 +28,7 @@ import {
   DEFAULT_PLATFORM,
   filterPipelineResultByPlatform,
   normalizeScopePreview,
+  isNationwideCityName,
   partitionPipelineResult,
   projectResumeSuggestionToSchema,
   shouldConfirmNationalScope,
@@ -35,13 +36,17 @@ import {
 } from "../discovery";
 import { setThemePlatform } from "../composables/useTheme";
 import { liveTaskStep } from "./useDiscoveryState";
-import { useAutoGrowTextarea } from "./useAutoGrowTextarea";
+import {
+  useResumeAnalysisFlow,
+  type ResumeAnalysisTaskState,
+} from "./useResumeAnalysisFlow";
 import type { AnalyzeResponse } from "./useDiscoveryState";
 
 export function useDiscoverySearch(state: DiscoveryState, deps: SearchNeeds) {
-  const { LOGIN_ERROR_CODES, SPEED_FIELDS, activeCategory, activeStep, advancedBusy, advancedRanges, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, cityCatalogBusy, cityCatalogRef, cityList, cityLoader, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, draftPlatformDisabled, dragActive, executionSelection, fieldLabels, filterGroups, filterValues, finishedPartial, historyBackToLatest, historyRound, interruptedRunId, keywords, locationDraft, loginGuide, nationalScopeConfirm, oneClickOpen, pagesValue, pausedRunId, pendingPlatformSwitch, pipelineResult, pipelineResultRunId, platformState, profileConfirmed, profileError, profileFacts, profileInputEl, profileSummary, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resumeAnalysis, resumeError, schemaBusy, schemaLoader, schemaRef, scopePreview, scopePreviewBusy, scopePreviewReqId, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uploadBusy } = state;
-  const { cancelActiveTasksForNewRound, clearLatestResult, enterSearchStep, notify, openOneClickDialog, restoreRunningTask, startScrape } = deps;
-  const { scheduleResize: scheduleProfileSummaryResize } = useAutoGrowTextarea(profileInputEl, profileSummary);
+  const { LOGIN_ERROR_CODES, SPEED_FIELDS, activeCategory, activeStep, advancedBusy, advancedRanges, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, cityCatalogBusy, cityCatalogRef, cityList, cityLoader, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, draftPlatformDisabled, dragActive, executionSelection, fieldLabels, filterGroups, filterValues, finishedPartial, historyBackToLatest, historyRound, interruptedRunId, keywords, locationDraft, loginGuide, mirrorSearchDraftKeywords, nationalScopeConfirm, oneClickOpen, pagesValue, pausedRunId, pendingPlatformSwitch, pipelineResult, pipelineResultRunId, platformState, profileConfirmed, profileError, profileFacts, profileInputEl, profileSummary, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resumeAnalysis, resumeAnalysisLandOnReturn, resumeAnalysisPhase, resumeAnalysisReset, resumeAnalysisRestore, resumeError, schemaBusy, schemaLoader, schemaRef, scopePreview, scopePreviewBusy, scopePreviewReqId, setScopePreviewFor, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uploadBusy } = state;
+  const { cancelActiveTasksForNewRound, clearLatestResult, enterSearchStep, notify, openOneClickDialog, props, restoreRunningTask, startScrape } = deps;
+  // 画像框自动高度（含页面二高度现场）由 useProfileInputScene 统一接线：
+  // 内容/可见性变化都会触发重算并回写现场，这里不再单独调度。
 
 
 async function showLoginGuide(platform: Platform) {
@@ -92,7 +97,7 @@ function setDraftPlatform(platform: Platform) {
   draftPlatform.value = platform;
   // 同步主题品牌色到新平台（boss 青 / 智联蓝）。
   setThemePlatform(platform);
-  // B007：切平台视为新草稿，清掉旧 run 身份与 scope 快照；双平台结果保留。
+  // B007：切平台视为新草稿，清掉旧 run 身份与 scope 快照；已加载的最新轮结果保留。
   scopePreview.value = null;
   scopePreviewBusy.value = false;
   scrapeTaskId.value = "";
@@ -198,6 +203,13 @@ function confirmCities() {
 function addCustomCity() {
   const city = customCity.value.trim().replace(/[，,]+$/, "");
   if (!city) return;
+  if (isNationwideCityName(city)) {
+    // 「全国」不是城市：不选城市就是全国范围，不把它写进城市草稿，
+    // 否则范围预览会把它当城市名发出去、被后端拒绝（挡新一轮）。
+    customCity.value = "";
+    deps.notify("「全国」不用填——不选城市就是全国范围", "warning");
+    return;
+  }
   if (cityList.value.includes(city)) {
     customCity.value = "";
     return;
@@ -242,50 +254,46 @@ function handleDrop(event: DragEvent) {
 }
 
 
-async function analyzeResume() {
-  resumeError.value = "";
-  if (!selectedFile.value) {
-    deps.notify("请先选择简历文件", "warning");
-    return;
-  }
-  if (!aiConsent.value) {
-    deps.notify("请勾选 AI 解析同意后再继续", "warning");
-    return;
-  }
-  uploadBusy.value = true;
-  try {
-    // 035：未结束任务存在时，上传简历不取消旧任务、不开新一轮，直接跳回任务视图。
-    // 跳回落点按任务类型分派（FR-011）：抓取活 → 02；筛选/重抓活 → 03。
-    const liveStep = liveTaskStep(state);
-    if (liveStep) {
-      activeStep.value = liveStep;
-      deps.notify("当前还有任务在跑，已回到任务进度", "warning");
-      return;
-    }
-    if (!(await deps.cancelActiveTasksForNewRound())) return;
-    if (!(await deps.clearLatestResult())) return;
-    const form = new FormData();
-    form.append("file", selectedFile.value);
-    form.append("platform", draftPlatform.value);
-    resumeAnalysis.value = null;
-    appliedResumePlatforms.value = new Set();
-    const data = await apiRequest<AnalyzeResponse>("/api/analyze-resume", {
+const resumeFlow = useResumeAnalysisFlow({
+  refs: {
+    activeStep,
+    uploadBusy,
+    resumeError,
+    resumeAnalysis,
+  },
+  api: {
+    postAnalyzeResume: (form) => apiRequest<AnalyzeResponse>("/api/analyze-resume", {
       method: "POST",
       body: form,
-    });
-    historyRound.value = null;
-    historyBackToLatest();
+    }),
+    fetchTaskState: (taskId) => apiRequest<ResumeAnalysisTaskState>(
+      // Spec041 返工：任务状态查询必须带当前画像，跨画像读一律按不存在处理。
+      `/api/task-state/${encodeURIComponent(taskId)}`
+      + (props.profileId ? `?profile_id=${encodeURIComponent(props.profileId)}` : ""),
+    ),
+    cancelActiveTasksForNewRound: () => deps.cancelActiveTasksForNewRound(),
+    clearLatestResult: () => deps.clearLatestResult(),
+    enterSearchStep: () => deps.enterSearchStep(),
+    notify: (message, tone) => deps.notify(message, tone),
+  },
+  onAnalysisSuccess: (raw) => {
+    const data = raw as AnalyzeResponse;
+    const viewingHistory = Boolean(historyRound.value);
+    if (!viewingHistory) historyBackToLatest();
     scrapeTaskId.value = "";
     screenTaskId.value = "";
     recrawlTaskId.value = "";
     scrapeSnapshot.value = null;
     screenSnapshot.value = null;
     recrawlSnapshot.value = null;
-    pipelineResultRunId.value = "";
-    resultPlatformFilter.value = "all";
-    finishedPartial.value = false;
+    if (!viewingHistory) {
+      historyRound.value = null;
+      pipelineResultRunId.value = "";
+      resultPlatformFilter.value = "all";
+      finishedPartial.value = false;
+    }
     recrawlPlatformGuide.value = null;
-    resultRunIds.value = { boss: "", zhilian: "" };
+    if (!viewingHistory) resultRunIds.value = { boss: "", zhilian: "" };
     pausedRunId.value = "";
     interruptedRunId.value = "";
     restoredTaskHint.value = "";
@@ -294,22 +302,58 @@ async function analyzeResume() {
     locationDraft.reset();
     oneClickOpen.value = false;
     scopePreviewBusy.value = false;
-    currentRoundStatus.value = "";
-    activeCategory.value = "matched";
+    if (!viewingHistory) {
+      currentRoundStatus.value = "";
+      activeCategory.value = "matched";
+    }
     initializeFromAnalysis(data);
     analysisReady.value = true;
     scrapeCompleted.value = false;
-    resultLoaded.value = false;
-    pipelineResult.value = null;
-    rejectedIds.value = new Set();
-    deps.enterSearchStep();
+    if (!viewingHistory) {
+      resultLoaded.value = false;
+      pipelineResult.value = null;
+      rejectedIds.value = new Set();
+    }
     deps.notify("简历分析完成，请确认关键词与城市", "success");
-  } catch (error) {
-    resumeError.value = "失败，点击重试";
-    deps.notify(errorMessage(error, "简历分析失败"), "error");
-  } finally {
-    uploadBusy.value = false;
+  },
+});
+
+watch(resumeFlow.phase, (phase) => {
+  resumeAnalysisPhase.value = phase;
+});
+resumeAnalysisLandOnReturn.value = () => {
+  resumeFlow.landOnReturn();
+  // 结果域可能在同一个事件循环里立即读取落点，不能等 watch 的下一拍。
+  resumeAnalysisPhase.value = resumeFlow.phase.value;
+};
+resumeAnalysisReset.value = resumeFlow.reset;
+resumeAnalysisRestore.value = resumeFlow.restore;
+
+function analyzeResume() {
+  resumeError.value = "";
+  const file = selectedFile.value;
+  if (!file) {
+    deps.notify("请先选择简历文件", "warning");
+    return;
   }
+  if (!aiConsent.value) {
+    deps.notify("请勾选 AI 解析同意后再继续", "warning");
+    return;
+  }
+  // 035：未结束任务存在时，上传简历不取消旧任务、不开新一轮，直接跳回任务视图。
+  // 跳回落点按任务类型分派（抓取活 → 02；筛选/重抓活 → 03）。
+  const liveStep = liveTaskStep(state);
+  if (liveStep) {
+    activeStep.value = liveStep;
+    deps.notify("当前还有任务在跑，已回到任务进度", "warning");
+    return;
+  }
+  resumeFlow.startAnalysis({
+    file,
+    platform: draftPlatform.value,
+    aiConsent: aiConsent.value,
+    profileId: props.profileId,
+  });
 }
 
 
@@ -330,6 +374,9 @@ function initializeFromAnalysis(data: AnalyzeResponse) {
     .sort((a, b) => Number(b.recommended) - Number(a.recommended));
   const recommended = keywords.value.filter((item) => item.recommended).map((item) => item.word);
   selectedKeywords.value = recommended.length ? recommended : keywords.value.map((item) => item.word);
+  // Spec041 返工：分析结果是平台无关的建议，写入两个平台槽位；用户随后在
+  // 各平台的增删仍只影响该平台（真实验收失败项三：切平台不丢也不串）。
+  mirrorSearchDraftKeywords();
   // 城市由用户选择，AI 不代填；未选择时默认全国。
   cityText.value = "";
   // T507：按当前已加载 schema 投影筛选建议（platform-schema.md L147）。
@@ -353,10 +400,28 @@ function applyResumeAnalysisToCurrentSchema() {
   if (!analysis || !schema || schema.platform !== draftPlatform.value) return;
   if (appliedResumePlatforms.value.has(draftPlatform.value)) return;
   const semantic = analysis.semantic;
-  const projected = semantic
-    ? projectResumeSuggestionToSchema(semantic, schema)
+  const semanticForSchema = semantic
+    ? {
+      ...semantic,
+      recruiter_activity: semantic.recruiter_activity
+        || semantic.recruiterActivity
+        || semantic["招聘者活跃时间"]
+        || [],
+    }
+    : undefined;
+  const projected = semanticForSchema
+    ? projectResumeSuggestionToSchema(semanticForSchema, schema)
     : {};
-  if (!semantic) {
+  // 第七类是单选档位：兼容分析服务返回中文档位，也兼容已经返回稳定码的结果。
+  const activityField = schema.fields.find((field) => field.key === "recruiter_activity");
+  const activityValues = semanticForSchema?.recruiter_activity || [];
+  if (activityField && activityValues.length) {
+    const activityCodes = activityValues
+      .map((value) => activityField.options.find((option) => option.label === value || option.value === value)?.value)
+      .filter((value): value is string => Boolean(value));
+    if (activityCodes.length) projected.recruiter_activity = activityCodes;
+  }
+  if (!semanticForSchema) {
     // 旧响应兜底：直接按当前 schema 校验 code。
     for (const field of schema.fields) {
       const value = analysis.fields[field.key];
@@ -410,7 +475,6 @@ function confirmProfile() {
 
 function handleProfileInput() {
  if (profileError.value && profileSummary.value.trim().length >= 10) profileError.value = "";
- scheduleProfileSummaryResize();
 }
 
 
@@ -488,40 +552,49 @@ function currentScopePreviewKey(): string {
 
 
 async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
+  // Spec041 返工：所有出口都推进请求序号——新平台即使不发新请求（例如没选
+  // 关键词），旧平台的在飞响应也必须失效，不能覆盖新平台。
+  const reqId = ++scopePreviewReqId.value;
+  const requestPlatform = draftPlatform.value;
+  const isStale = () => reqId !== scopePreviewReqId.value || requestPlatform !== draftPlatform.value;
   if (!selectedKeywords.value.length) {
-    scopePreview.value = null;
+    setScopePreviewFor(requestPlatform, null);
+    // Spec041 补丁：本次调用已推进请求序号，在飞的旧请求不会再来清"忙"，
+    // 这里不清就会永久卡在 busy（schema 不可用分支同样要清）。
+    scopePreviewBusy.value = false;
     return null;
   }
   // 平台切换期间 schema 仍属于旧平台，或当前平台明确禁用新任务时，
   // 不向后端提交范围预览；否则会把一个预期的“平台不可用”状态制造成
   // 503 警告。schema 就绪后由 watcher 重新尝试可用平台的预览。
   if (schemaBusy.value || draftPlatformDisabled.value) {
-    scopePreview.value = null;
+    setScopePreviewFor(requestPlatform, null);
     scopePreviewBusy.value = false;
     return null;
   }
-  const reqId = ++scopePreviewReqId.value;
   scopePreviewBusy.value = true;
   try {
     const data = await settingsApi.previewScope({
-      platform: draftPlatform.value,
-      keywords: selectedKeywords.value,
+      platform: requestPlatform,
+      keywords: [...selectedKeywords.value],
       scope_kind: cityList.value.length ? "cities" : "nationwide",
-      cities: cityList.value.length ? cityList.value : [],
-      locations: locationDraft.allLocations(draftPlatform.value, cityList.value),
+      cities: cityList.value.length ? [...cityList.value] : [],
+      locations: locationDraft.allLocations(requestPlatform, cityList.value),
       pages_per_combination: pagesValue.value,
     });
-    if (reqId !== scopePreviewReqId.value) return scopePreview.value;
-    scopePreview.value = normalizeScopePreview(data);
+    if (isStale()) return scopePreview.value;
+    const preview = normalizeScopePreview(data);
+    // 只写到发起请求的那个平台槽位：切平台后旧响应不会污染新平台。
+    setScopePreviewFor(requestPlatform, preview);
     scopePreviewKey = currentScopePreviewKey();
-    return scopePreview.value;
+    return preview;
   } catch (error) {
-    if (reqId !== scopePreviewReqId.value) return scopePreview.value;
-    scopePreview.value = null;
+    if (isStale()) return scopePreview.value;
+    setScopePreviewFor(requestPlatform, null);
     deps.notify(errorMessage(error, "搜索范围校验失败"), "warning");
     return null;
   } finally {
-    scopePreviewBusy.value = false;
+    if (reqId === scopePreviewReqId.value) scopePreviewBusy.value = false;
   }
 }
 
@@ -595,6 +668,7 @@ return {
   chooseFile,
   handleDrop,
   analyzeResume,
+  resumeAnalysisFlow: resumeFlow,
   initializeFromAnalysis,
   applyResumeAnalysisToCurrentSchema,
   toggleKeyword,
