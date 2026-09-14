@@ -1,6 +1,6 @@
 """详情抓取人形模拟行为（024）：加载随机等待、人形滚动、概率鼠标移动。
 
-参考 roadmap/boss-zhipin-scraper 的 ``human_scroll`` / ``human_mouse_jitter``
+参考 boss-zhipin-scraper 开源项目（地址见 roadmap/README.md）的 ``human_scroll`` / ``human_mouse_jitter``
 实现，按 024 冻结表 #12-#14 以档位（stable/balanced/extreme）给出参数：
 - 详情加载等待（随机区间）：stable 5-10s / balanced 3-6s / extreme 1-2s
 - 详情滚动（次数）：stable 3-7 / balanced 2-4 / extreme 1-2

@@ -1,5 +1,16 @@
 <!--
   Sync Impact Report
+  Version: 1.3.0 → 1.4.0
+  Modified: 原则 II「单文件尺寸边界」——拆分批次只做聚焦验证，若属于同一用户目标则不单独重复全量
+  Modified: 原则 V「验证门禁」——开发/返修聚焦，整条交付链收敛后一次全量，失败后禁止无改动重跑
+  Templates: ✅ .specify/templates/spec-template.md / plan-template.md / tasks-template.md
+  Project rules: ✅ AGENTS.md
+  Active specs: ✅ 036 v2 / 042 R0
+  Follow-up: 无
+-->
+
+<!--
+  Sync Impact Report（历史）
   Version: 1.2.0 → 1.3.0
   Added: 原则 VII「错误处理与可观测性」——禁止新增纯 pass 吞异常、宽异常必须留痕或显式返回、日志统一配置、pass-only 基线只降不升（卫生测试强制）
   Modified: 原则 I 措辞「蓝图注册」→「路由注册」（031 统一路由注册方式，移除蓝图差异）
@@ -32,7 +43,7 @@
 
 ### II. 单文件尺寸边界
 
-Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。超过上限的文件必须拆分为职责内聚的模块，并保留原入口兼容导出。拆文件只搬代码、不改行为、不改接口、不改数据库结构；每批拆分必须完成聚焦测试、后端全量测试、前端测试与构建验证。
+Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。超过上限的文件必须拆分为职责内聚的模块，并保留原入口兼容导出。拆文件只搬代码、不改行为、不改接口、不改数据库结构；拆分过程中必须完成聚焦测试与直接受影响回归。若拆分是同一用户目标的前置批次，不得在拆分和后续功能之间重复运行后端全量；整条交付链收敛后按原则 V 统一验证。
 
 ### III. 引用方向
 
@@ -44,8 +55,10 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 
 ### V. 验证门禁
 
-- 适用范围：功能开发、重构、拆分等 Spec Kit 交付批次。
-- 每个功能或拆分批次交付前必须通过：相关模块聚焦测试、后端全量测试、前端测试、`npm run build`、仓库卫生检查。无客观证据不得宣称完成。
+- 适用范围：功能开发、缺陷修复、重构、拆分等 Spec Kit 交付链。
+- 开发、调试和返修阶段 MUST 只运行聚焦测试、原失败用例和直接受影响的必要相邻回归；MUST NOT 在每次修改、每个 Task、每个子 Spec 或每个前置拆分批次后机械运行后端全量。
+- 同一用户目标下的前置拆分、功能实现和返修 MUST 视为一条交付链。整条交付链全部收敛后，才运行一次干净的后端全量、前端测试、`npm run build` 与仓库卫生检查。无客观证据不得宣称完成。
+- 后端全量失败时 MUST 保留失败清单和输出，先只重跑原失败用例、直接受影响测试与必要相邻回归；MUST NOT 为了获取失败名称、重复观察同一失败或在没有相关改动时再次运行全量。只有实际修复完成、聚焦回归通过并再次收敛后，才允许进行下一次最终全量确认。
 - 版本提升、打包、提交、推送、Release 等收口任务不适用本门禁，按根目录 `AGENTS.md`「收口任务验证与命令边界」执行，默认不跑全量测试。
 
 ### VI. 模块地图与落位规则
@@ -185,7 +198,9 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/src/composables/useModeWarnings.ts` — 档位/规模风险警示文案：极限档与总页数 >30 两条警示的合并计算（031 B8 自 DiscoveryView.vue 抽出）
 - `webui/src/composables/useNarrowSearchLayout.ts` — 窄屏布局断点判定：`max-width: 1050px` 媒体查询订阅，供两个配置抽屉的联动/独立切换（031 B8 自 DiscoveryView.vue 抽出）
 - `webui/src/components/TaskCompletedToast.vue` — ~~顶部冒泡提示组件~~（035 历史组件；统一 Spec 037 已删除，"完成→查看最新"由灵动岛 completed pill + navigate 接管）
-- `packaging/window_controls.py` — 窗口控制 Win32 助手：无边框窗口控制原语与最大化避让任务栏适配（036）
+- `packaging/window_controls.py` — 窗口控制 Win32 助手：无边框窗口控制原语、句柄定位、顶层唯一 `WM_GETMINMAXINFO` 适配器（当前显示器工作区 + 逐轴最小/最大跟踪）与无边框尺寸修正（036 / 042 R0）
+- `packaging/window_interaction.py` — 窗口交互引擎：页面声明区域后由宿主执行的八方向拉伸/标题带移动/最大化拖下还原/顶部释放最大化（几何数学 + 指针与窗口矩形原语 + 循环 + js_api 入口），只单向依赖 `window_controls` 与 `window_metrics`（036 v2 新增）
+- `packaging/window_metrics.py` — 窗口度量域：显示器工作区解析（当前显示器优先，注入提供者兜底）、DPI 缩放、CSS↔物理像素换算、逐轴最小跟踪尺寸，以及拉伸/移动矩形、抓取还原、拖动阈值、顶部释放等纯几何判定（036 v2 依原则 VI 预警线分流新增）
 - `webui/src/components/WindowTitleBar.vue` — 自绘标题栏组件：桌面版窗口标题栏（文字+三按钮+拖拽区+主题配色，仅 EXE 渲染）（036）
 - `webui/src/components/DynamicIsland.vue` — 顶栏胶囊灵动岛组件：live 仪表盘/转盘轮播/两色完成态/红光/未读通知面板/motion-v 动画与 collapse 暴露（统一 Spec 037）
 - `webui/src/composables/useIslandCarousel.ts` — 灵动岛转盘轮播状态机：mainLaneState 直接读 roundStatus（永不冻结，硬不变式 FR-011）/打断队列 FIFO/只转一次/定时沉入 panel/badgeCount（037 新增）
@@ -232,6 +247,6 @@ webui/src/
 
 ## Governance
 
-本宪法高于临时实现偏好；与根目录 `AGENTS.md` 冲突时，任务分类与验证矩阵优先，本宪法只约束功能/重构/拆分交付。修订必须更新版本号并同步模板与项目规则。违反文件边界或验证门禁的改动必须先修复再交付。
+本宪法高于临时实现偏好；与 Codex 全局提示词或根目录 `AGENTS.md` 冲突时，以更高层规则的验证节奏为准，本宪法只能细化命令与范围，不得额外制造重复全量。修订必须更新版本号并同步模板与项目规则。违反文件边界或验证门禁的改动必须先修复再交付。
 
-**Version**: 1.3.0 | **Ratified**: 2026-08-10 | **Last Amended**: 2026-08-30
+**Version**: 1.4.0 | **Ratified**: 2026-08-10 | **Last Amended**: 2026-09-14

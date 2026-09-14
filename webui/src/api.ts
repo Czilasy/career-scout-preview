@@ -18,6 +18,8 @@ let sessionInitialization: Promise<void> | null = null;
 declare global {
   interface Window {
     pywebview?: {
+      // 桌面壳平台标识（pywebview 注入）：Windows 桌面壳为 "edgechromium"
+      platform?: string;
       api?: {
         open_external?: (url: string) => Promise<{ ok: boolean; error?: string }>;
         quit_app?: () => Promise<{ ok: boolean; error?: string }>;
@@ -26,6 +28,9 @@ declare global {
         window_toggle_maximize?: () => Promise<{ ok: boolean; maximized?: boolean; error?: string }>;
         window_is_maximized?: () => Promise<{ ok: boolean; maximized?: boolean; error?: string }>;
         window_close?: () => Promise<{ ok: boolean; error?: string }>;
+        // 036 v2 页面声明区域后的宿主执行入口（标题带移动 / 八方向拉伸）
+        window_begin_move?: (x?: number, y?: number) => Promise<{ ok: boolean; error?: string }>;
+        window_begin_resize?: (direction: string, x?: number, y?: number) => Promise<{ ok: boolean; error?: string }>;
       };
     };
   }

@@ -4,7 +4,8 @@
 ``specs/029-desktop-window-browsers/contracts/desktop-window-state.md``：
 
 - ``width/height/x/y`` 语义为**普通矩形**（最大化关窗时 = 最后一次普通矩形，
-  全屏矩形禁止写入）；
+  全屏矩形禁止写入）；尺寸语义（036 v2）：默认 1400×800、常规下限
+  1024×700、上限 = 当前显示器工作区，读时逐轴抬到下限并钳进工作区；
 - ``maximized`` 标记上次关窗时窗口处于最大化，启动据此真最大化开窗；
 - 无记忆 / 损坏 / schema 2 污染记忆（尺寸装不进任何工作区，即被 Bug 写成
   全屏矩形的）→ 一律按首开处理：默认普通矩形 + ``maximized=True``；
@@ -23,13 +24,14 @@ from typing import Callable, NamedTuple, Optional
 # 路径与常量（desktop.py re-export 保持旧调用面）
 DEFAULT_STATE_DIR = Path(os.path.expanduser("~/.career-scout"))
 WINDOW_STATE_FILENAME = "desktop_window.json"
-# 窗口尺寸：frameless 不可拉伸，最小 = 最大 = 默认，固定 1400×800。
+# 窗口尺寸（036 v2）：默认 1400×800，常规下限 1024×700，
+# 上限 = 当前显示器工作区（不再是静态常量；小工作区时逐轴放宽下限）。
 DEFAULT_WIDTH = 1400
 DEFAULT_HEIGHT = 800
-MIN_WIDTH = 1400
-MIN_HEIGHT = 800
-MAX_WIDTH = 1400
-MAX_HEIGHT = 800
+MIN_WIDTH = 1024
+MIN_HEIGHT = 700
+MAX_SANE_SIZE = 32767
+"""Win32 坐标/尺寸理智上界：超出视为损坏记忆，不作为合法记忆放过。"""
 _WINDOW_STATE_SCHEMA_VERSION = 3
 
 
@@ -74,7 +76,9 @@ def _read_default_size(state_dir):
         height = int(data["default_height"])
     except (KeyError, ValueError, TypeError):
         return (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-    if not (MIN_WIDTH <= width <= MAX_WIDTH) or not (MIN_HEIGHT <= height <= MAX_HEIGHT):
+    if width < MIN_WIDTH or height < MIN_HEIGHT:
+        return (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+    if width > MAX_SANE_SIZE or height > MAX_SANE_SIZE:
         return (DEFAULT_WIDTH, DEFAULT_HEIGHT)
     return (width, height)
 
@@ -87,6 +91,22 @@ def _clamp_size_to_workareas(width, height, workareas):
     if workareas:
         (_ax, _ay, aw, ah) = workareas[0]
         return (min(width, aw), min(height, ah))
+    return (width, height)
+
+
+def _raise_to_min(width, height, workareas=None):
+    """逐轴抬到常规下限（1024×700）；已知工作区时以工作区为上限（小工作区例外）。"""
+    min_w, min_h = MIN_WIDTH, MIN_HEIGHT
+    max_w = max_h = None
+    if workareas:
+        (_ax, _ay, aw, ah) = workareas[0]
+        min_w, min_h = min(min_w, aw), min(min_h, ah)
+        max_w, max_h = aw, ah
+    width = max(int(width), min_w)
+    height = max(int(height), min_h)
+    if max_w is not None:
+        width = min(width, max_w)
+        height = min(height, max_h)
     return (width, height)
 
 
@@ -174,12 +194,15 @@ def load_window_state(state_dir=None, workarea_provider=None):
         # 记忆字段不完整 → 无记忆，按首开处理
         return no_memory
 
-    if not (MIN_WIDTH <= width <= MAX_WIDTH) or not (MIN_HEIGHT <= height <= MAX_HEIGHT):
+    if width <= 0 or height <= 0:
+        return no_memory
+    if width > MAX_SANE_SIZE or height > MAX_SANE_SIZE:
         return no_memory
 
     maximized = bool(data.get("maximized")) if schema == _WINDOW_STATE_SCHEMA_VERSION else False
 
     if workareas is None:
+        width, height = _raise_to_min(width, height)
         return (width, height, x, y, maximized)
 
     fits_any = any(width <= aw and height <= ah for (_ax, _ay, aw, ah) in workareas)
@@ -188,6 +211,7 @@ def load_window_state(state_dir=None, workarea_provider=None):
             # schema 2 污染记忆（旧 Bug 的全屏矩形）→ 视同无记忆
             return no_memory
         width, height = _clamp_size_to_workareas(width, height, workareas)
+    width, height = _raise_to_min(width, height, workareas)
 
     inside_any = any(
         ax <= x < ax + aw and ay <= y < ay + ah for (ax, ay, aw, ah) in workareas

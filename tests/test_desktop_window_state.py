@@ -100,18 +100,16 @@ class LoadSaveTests(unittest.TestCase):
             result, (ws.DEFAULT_WIDTH, ws.DEFAULT_HEIGHT, None, None, True)
         )
 
-    def test_load_size_below_min_first_open_maximized(self):
-        """尺寸小于 min_size → 视同无记忆。"""
+    def test_load_size_below_min_raised_to_min(self):
+        """尺寸小于常规下限 → 抬到 1024×700（不再当作无记忆）。"""
         _write_state(
             self.state_dir, {"schema": 3, "width": 800, "height": 600, "x": 0, "y": 0}
         )
         result = ws.load_window_state(state_dir=self.state_dir)
-        self.assertEqual(
-            result, (ws.DEFAULT_WIDTH, ws.DEFAULT_HEIGHT, None, None, True)
-        )
+        self.assertEqual(result, (ws.MIN_WIDTH, ws.MIN_HEIGHT, 0, 0, False))
 
-    def test_load_size_over_upper_bound_first_open_maximized(self):
-        """尺寸超上界 → 视同无记忆。"""
+    def test_load_size_over_sane_bound_first_open_maximized(self):
+        """尺寸超出理智上界（Win32 取值上限）→ 视同损坏记忆。"""
         _write_state(
             self.state_dir, {"schema": 3, "width": 99999, "height": 800, "x": 0, "y": 0}
         )
@@ -265,8 +263,8 @@ class Schema2UpgradeTests(unittest.TestCase):
         result = ws.load_window_state(state_dir=self.state_dir)
         self.assertEqual(result, (1400, 800, 10, 10, False))
 
-    def test_schema3_oversize_rejected_as_first_open(self):
-        """schema 3 超限尺寸（超出 MIN/MAX）→ 视同无记忆，首开处理。"""
+    def test_schema3_oversize_clamped_to_workarea(self):
+        """schema 3 超出当前工作区 → 钳进工作区（不再作废记忆）。"""
         _write_state(
             self.state_dir,
             {"schema": 3, "width": 5000, "height": 3000, "x": 5000, "y": 5000},
@@ -275,8 +273,8 @@ class Schema2UpgradeTests(unittest.TestCase):
             state_dir=self.state_dir,
             workarea_provider=lambda: [(0, 0, 1920, 1040)],
         )
-        # 超出 MAX → no_memory：默认尺寸 + 首开最大化
-        self.assertEqual(result, (1400, 800, None, None, True))
+        # 尺寸钳到工作区上限（1920×1040），位置越界 → 主工作区居中
+        self.assertEqual(result, (1920, 1040, 0, 0, False))
 
     def test_schema2_missing_memory_uses_configured_default(self):
         """schema 2 缺记忆字段 → 用用户配置的 default 尺寸 + 首开最大化。"""
@@ -285,8 +283,8 @@ class Schema2UpgradeTests(unittest.TestCase):
             {"schema": 2, "default_width": 1440, "default_height": 900},
         )
         result = ws.load_window_state(state_dir=self.state_dir)
-        # default 超出 MIN/MAX → 回退常量 1400×800
-        self.assertEqual(result, (1400, 800, None, None, True))
+        # 036 v2：default 不再受 1400×800 静态上界约束，配置值被保留
+        self.assertEqual(result, (1440, 900, None, None, True))
 
     def test_schema2_invalid_default_falls_back_constant(self):
         """default 字段非法 → 常量默认。"""
@@ -356,6 +354,86 @@ class DefaultRectTests(unittest.TestCase):
 
 
 # ===========================================================================
+# 036 v2 尺寸语义：默认 1400×800 / 常规下限 1024×700 / 上限 = 当前工作区
+# ===========================================================================
+class SizeSemanticsTests(unittest.TestCase):
+    """替代旧的「min = max = 默认 1400×800」固定语义（spec FR-005/FR-006/FR-007）。"""
+
+    def setUp(self):
+        self.state_dir = _state_dir(self)
+
+    def test_constants(self):
+        self.assertEqual((ws.DEFAULT_WIDTH, ws.DEFAULT_HEIGHT), (1400, 800))
+        self.assertEqual((ws.MIN_WIDTH, ws.MIN_HEIGHT), (1024, 700))
+
+    def test_min_size_memory_kept(self):
+        _write_state(
+            self.state_dir,
+            {"schema": 3, "width": 1024, "height": 700, "x": 0, "y": 0},
+        )
+        result = ws.load_window_state(
+            state_dir=self.state_dir,
+            workarea_provider=lambda: [(0, 0, 1920, 1040)],
+        )
+        self.assertEqual(result, (1024, 700, 0, 0, False))
+
+    def test_larger_than_default_memory_kept(self):
+        """合法放大记忆（1600×900）不再被 1400×800 静态上界拒绝。"""
+        _write_state(
+            self.state_dir,
+            {"schema": 3, "width": 1600, "height": 900, "x": 40, "y": 40},
+        )
+        result = ws.load_window_state(
+            state_dir=self.state_dir,
+            workarea_provider=lambda: [(0, 0, 2560, 1400)],
+        )
+        self.assertEqual(result, (1600, 900, 40, 40, False))
+
+    def test_upper_bound_follows_current_workarea(self):
+        _write_state(
+            self.state_dir,
+            {"schema": 3, "width": 2500, "height": 1500, "x": 0, "y": 0},
+        )
+        result = ws.load_window_state(
+            state_dir=self.state_dir,
+            workarea_provider=lambda: [(0, 0, 1920, 1040)],
+        )
+        self.assertEqual(result, (1920, 1040, 0, 0, False))
+
+    def test_small_workarea_relaxes_min(self):
+        """工作区比常规下限小 → 允许小于 1024×700，但不得大于工作区。"""
+        _write_state(
+            self.state_dir,
+            {"schema": 3, "width": 1400, "height": 800, "x": 0, "y": 0},
+        )
+        result = ws.load_window_state(
+            state_dir=self.state_dir,
+            workarea_provider=lambda: [(0, 0, 900, 600)],
+        )
+        self.assertEqual(result, (900, 600, 0, 0, False))
+
+    def test_below_min_without_provider_raised_to_min(self):
+        """无 provider 时也要抬到常规下限（不放过小于下限的记忆）。"""
+        _write_state(
+            self.state_dir,
+            {"schema": 3, "width": 700, "height": 500, "x": 0, "y": 0},
+        )
+        result = ws.load_window_state(state_dir=self.state_dir)
+        self.assertEqual(result, (1024, 700, 0, 0, False))
+
+    def test_configured_default_below_min_falls_back(self):
+        """用户配置的 default 低于常规下限 → 回退常量默认。"""
+        _write_state(
+            self.state_dir,
+            {"schema": 3, "default_width": 800, "default_height": 600},
+        )
+        result = ws.load_window_state(state_dir=self.state_dir)
+        self.assertEqual(
+            result, (ws.DEFAULT_WIDTH, ws.DEFAULT_HEIGHT, None, None, True)
+        )
+
+
+# ===========================================================================
 # 纯逻辑：WindowStateTracker（research D1）
 # ===========================================================================
 class TrackerTests(unittest.TestCase):
@@ -379,6 +457,13 @@ class TrackerTests(unittest.TestCase):
     def test_resized_non_numeric_ignored(self):
         self.tracker.on_resized(None, 800)
         self.assertIsNone(self.tracker.last_normal)
+
+    def test_resized_above_default_recorded(self):
+        """拉伸到大于默认尺寸（1600×900）后，快照保留该尺寸（无静态上界）。"""
+        self.tracker.on_resized(1600, 900)
+        self.tracker.on_moved(80, 90)
+        result = self.tracker.snapshot_for_save(1600, 900, 80, 90)
+        self.assertEqual(result, (1600, 900, 80, 90, False))
 
     def test_maximized_freezes_normal_rect(self):
         self.tracker.on_resized(1200, 800)

@@ -6,14 +6,14 @@
 
 ## 设计前必读
 
-- 本地开发设计新东西前，先查看 `roadmap/` 下本地参考文档（如 `REFERENCE_GET_JOBS.md`、`REFERENCE_BOSS_ZHIPIN_SCRAPER.md`；该目录仅本地存在且已 `.gitignore`，公开仓库不含）。有可借鉴零件就借鉴，没有现成方案再自由发挥。
+- 本地开发设计新东西前，先看 `roadmap/README.md`（路由：本目录有什么、去哪找）与 `PLATFORM_KNOWLEDGE.md`（平台线索、外部参考入口）；该目录仅本地存在且已 `.gitignore`，公开仓库不含。有可借鉴零件就借鉴，没有现成方案再自由发挥。
 - 做前端视觉设计（新主题、换肤、改版式、新页面、调色）前，先看 `design/` 下的界面设计图，**以图为准、不从代码推断视觉**（该目录仅本地存在且已 `.gitignore`；页面编号与规则见 `design/README.md`）。
 
 ## 功能开发流程与架构边界
 
 - 本项目的功能需求必须先完成 grill-me 边界质询并冻结需求；冻结后进入完整 Spec Kit 流程：`speckit-constitution → speckit-clarify（按需）→ speckit-specify → speckit-plan → speckit-tasks → speckit-implement → speckit-converge`。该项目硬性流程不替代全局授权边界。
 - 项目架构原则、文件边界与职责分层以 `.specify/memory/constitution.md` 为准；Plan/Tasks 必须写明允许修改、禁止修改、新增文件和引用方向。
-- 文件规模红线：Python 文件原则上不超过 800 行，Vue 文件原则上不超过 1200 行。超过红线的文件在未拆分前，普通功能不得继续向其中追加新逻辑；拆分必须单独建立 Spec。以下为最后一次记录的定位线索，不代表当前实时行数，修改前必须重新测量：`webui/historical_recovery.py`、`scripts/zhilian_cdp_raw.py`、`webui/task_runners.py`、`webui/src/views/DiscoveryView.vue`（2026-08-30 实测，工程还债 Spec 031 处理中）。
+- 文件规模红线：Python 文件原则上不超过 800 行，Vue 文件原则上不超过 1200 行。超过红线的文件在未拆分前，普通功能不得继续向其中追加新逻辑；拆分必须单独建立 Spec。以下为 2026-09-14 实测的超限产品文件（仅作定位线索，不代表实时行数，修改前必须重新测量）：`scripts/maintenance/historical_recovery.py`、`webui/exec_search_api.py`、`webui/pipeline_exec_details.py`、`webui/pipeline_exec_search.py`、`webui/runners/recrawl_task.py`、`webui/task_continue_api.py`、`webui/updater.py`、`webui/src/views/DiscoveryView.vue`（Vue 文件，红线 1200）。
 
 ## 树干与树枝（通用与平台专属的边界）
 
@@ -25,9 +25,12 @@
 - 方向唯一：树枝适配树干，不是树干适配树枝。
 - 检验三条：新增平台无需改树干；删掉任一树枝树干仍能运行；树干中找不到平台名。
 
-## 开发验证命令
+## 开发验证节奏与命令
 
-- 后端回归：`uv run python -m unittest discover -s tests`。
+- 开发、调试和返修过程中只运行聚焦测试、原失败用例和直接受影响的必要相邻回归；禁止每次修改后机械运行后端全量。
+- 同一个用户目标下的前置拆分、功能实现和返修视为一条交付链，不得让每个子 Spec、子批次各自重复运行后端全量。
+- 整条交付链全部收敛后才运行一次干净的后端全量：`uv run python -m unittest discover -s tests`。全量失败时必须保留失败清单与输出，先只跑失败用例及受影响范围；禁止为了获取失败名称或确认未修复状态立即重跑全量。
+- 只有实际修复完成、原失败用例与直接回归通过并再次收敛后，才允许进行下一次最终全量确认；两次全量之间必须有明确相关改动和聚焦通过证据。
 - 前端测试：在 `webui/` 执行 `npm test`。
 - 前端构建：在 `webui/` 执行 `npm run build`。
 - `tests/test_e2e_smoke.py` 是使用临时数据库、测试客户端和外部边界桩的跨层自动化冒烟，不得冒充真实浏览器、真实账号和真实数据的端到端验收。

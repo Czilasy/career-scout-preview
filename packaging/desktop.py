@@ -11,12 +11,16 @@ T035 接线点（冻结合同 ``specs/003-desktop-exe/contracts/desktop-shell.md
    PYTHON_EXECUTABLE=sys.executable, START_TASKS=True})``，
    ``app.run(use_reloader=False, threaded=True)`` 在独立 daemon 线程。
 4. **就绪轮询**（§4）：``GET /api/session`` 直到 200，超时 ≤30s → 错误退出。
-5. **窗口**（§5，029 修订）：固定 1400×800（frameless 不可拉伸，
-   min=max=default），``resizable=True``；从 ``~/.career-scout/desktop_window.json``
-   （schema 3）恢复普通矩形与最大化标记——无记忆/损坏/污染记忆一律首开
-   最大化；事件维护普通矩形（窗口状态域 ``packaging/window_state.py``）。
-   shown 后 ``_fix_frameless_size`` 修正 pywebview 先设 Size 后去边框导致
-   的窗口缩水（Win32 SetWindowPlacement 修正 rcNormalPosition）。
+5. **窗口**（§5，029 修订）：普通矩形来自
+   ``~/.career-scout/desktop_window.json``（schema 3），``resizable=True``；
+   无记忆/损坏/污染记忆一律首开最大化；事件维护普通矩形（窗口状态域
+   ``packaging/window_state.py``）。shown 后安装窗口适配器
+   （``window_controls.install_window_adapter``：顶层唯一
+   ``WM_GETMINMAXINFO`` 链，按当前显示器工作区钳制并设置逐轴最小/最大
+   跟踪尺寸），并修正 pywebview 先设 Size 后去边框导致的窗口缩水
+   （``window_controls.fix_frameless_size``，Win32 SetWindowPlacement
+   修正 rcNormalPosition）。036 v2 的拉伸/移动由
+   ``packaging/window_interaction.py`` 在页面一次调用后原生执行。
 6. **closing 生命周期**（§6）：``events.closing`` → 按 Tracker 快照落盘
    （最大化 → 最后普通矩形 + ``maximized:true``）→ ``cancel_running_tasks``
    → 返回退出码；``main()`` 调用方 ``os._exit(code)`` 兜底（合同 §6）。
@@ -60,17 +64,17 @@ try:  # 包导入（unittest/PyInstaller 模块分析）
 except ImportError:  # 脚本直跑（python packaging/desktop.py）时的同目录回退
     import window_state as _ws  # type: ignore
 
-# 窗口控制域（036 自绘标题栏）：无边框窗口的最小化/最大化/还原原语
+# 窗口控制域（036 自绘标题栏 / 窗口适配器）与窗口交互域（036 v2 拉伸/移动）
 try:
     from packaging import window_controls as _wc
+    from packaging import window_interaction as _wi
 except ImportError:  # 脚本直跑时的同目录回退
     import window_controls as _wc  # type: ignore
+    import window_interaction as _wi  # type: ignore
 
 DEFAULT_HEIGHT = _ws.DEFAULT_HEIGHT
 DEFAULT_STATE_DIR = _ws.DEFAULT_STATE_DIR
 DEFAULT_WIDTH = _ws.DEFAULT_WIDTH
-MAX_HEIGHT = _ws.MAX_HEIGHT
-MAX_WIDTH = _ws.MAX_WIDTH
 MIN_HEIGHT = _ws.MIN_HEIGHT
 MIN_WIDTH = _ws.MIN_WIDTH
 WINDOW_STATE_FILENAME = _ws.WINDOW_STATE_FILENAME
@@ -336,7 +340,7 @@ def is_allowed_external_url(url):
     )
 
 
-class DesktopJsApi:
+class DesktopJsApi(_wi.DesktopWindowInteractionApi):
     """暴露给 WebUI 前端的桌面壳能力。
 
     - ``open_external(url)``：系统默认浏览器打开白名单链接（桌面壳
@@ -346,6 +350,8 @@ class DesktopJsApi:
       ``run_desktop_shell`` 在窗口创建后注入 ``quit_handler``。
     - ``window_minimize()`` / ``window_toggle_maximize()``：
       自绘标题栏最小化 / 最大化-还原 切换（036）。
+    - ``window_begin_move()`` / ``window_begin_resize()``（基类提供）：
+      036 v2 页面声明区域后的宿主执行入口，命中判定在页面（Research D9）。
     - ``window_close()``：自绘标题栏关闭按钮，走既有优雅退出
       （保存窗口状态 + 取消运行中任务），等价系统关闭按钮。
     """
@@ -353,12 +359,7 @@ class DesktopJsApi:
     def __init__(self):
         # run_desktop_shell 创建窗口后注入（保存状态 + 取消任务 + 关窗）
         self.quit_handler = None
-        # 窗口创建后注入：window_controls 原语依赖注入的 window 对象。
-        # 属性名必须下划线开头：pywebview 页面加载完成后会递归枚举 js_api
-        # 全部公开属性生成前端 API 清单（webview/util.py get_functions），
-        # 公开持有 Window 会让枚举爬进整个窗口/.NET 窗体对象图——真机实测
-        # 页面加载 20 秒起步、有概率永久卡死（036 回归根因，2026-09-02
-        # py-spy 实拍定位）；下划线属性被枚举跳过，注入与调用不受影响。
+        # 窗口创建后由 wire_desktop_api 注入（下划线属性，不被 API 枚举爬取）
         self._window = None
 
     def window_minimize(self):
@@ -447,251 +448,15 @@ def _window_maximized_now(window):
         return False
 
 
-def _find_main_hwnd_pid():
-    """EnumWindows 找当前进程的可见顶层窗口 hwnd。
-
-    纯 Win32（GetWindowThreadProcessId + IsWindowVisible），**不碰**
-    ``window.native``——shown 回调跑在工作线程（pywebview Event.set
-    用 threading.Thread），访问 ``native.Handle`` 会跨线程强制 WinForms
-    句柄创建抛 InvalidOperationException，是旧版 hook=False 的根因
-    （2026-09-03 _probe_hook.py 验证：改 EnumWindows 后 PASS）。
-
-    标题含 "Career Scout" 的优先（多窗口兜底）；否则取第一个可见顶层。
-    """
-    import ctypes
-    from ctypes import wintypes
-
-    user32 = ctypes.windll.user32
-    user32.GetWindowThreadProcessId.argtypes = [
-        wintypes.HWND, ctypes.POINTER(wintypes.DWORD),
-    ]
-    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-    user32.IsWindowVisible.argtypes = [wintypes.HWND]
-    user32.IsWindowVisible.restype = wintypes.BOOL
-    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-    user32.GetWindowTextW.restype = ctypes.c_int
-
-    pid = os.getpid()
-    found = []
-    EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-
-    def _cb(hwnd, _lparam):
-        pid_out = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid_out))
-        if pid_out.value != pid:
-            return True
-        if not user32.IsWindowVisible(hwnd):
-            return True
-        buf = ctypes.create_unicode_buffer(256)
-        n = user32.GetWindowTextW(hwnd, buf, 256)
-        title = buf.value[:32] if n else ""
-        found.append((hwnd, title))
-        return True
-
-    user32.EnumWindows(EnumProc(_cb), 0)
-    if not found:
-        return None, ""
-    # 标题含 Career Scout 优先
-    for hwnd, title in found:
-        if "Career Scout" in title:
-            return hwnd, title
-    return found[0][0], found[0][1]
-
-
-def _install_maximize_clamp(window, state_dir=None, logger=None):
-    """hook WM_GETMINMAXINFO，无边框窗口最大化钳进工作区（治本）。
-
-    WinForms 无边框窗体最大化的默认矩形 = 整屏（物理 1920×1080）而非
-    工作区（1920×1040），任务栏被盖住——「全屏大小但没对上屏幕」根因。
-    ``Form.MaximizedBounds`` 在 pywebview winforms frameless 上实测不
-    生效（2026-09-03 diag：设后最大化尺寸仍 1920×1080）。改走 Win32：
-    ``SetWindowLongPtrW`` 装自己的 WndProc，拦截 ``WM_GETMINMAXINFO``
-    把 ptMaxSize/ptMaxPosition/ptMaxTrackSize 填成工作区矩形，绕过
-    所有 .NET/pywebview 最大化机制；安装后 ``ShowWindowAsync`` 重切
-    一次让消息重发读新值。
-
-    时机：挂在 ``events.shown``（窗口显示后）。shown 回调跑在工作线程
-    （pywebview Event.set 用 threading.Thread），但 **不碰 native 对象**
-    ——hwnd 用 ``_find_main_hwnd_pid``（EnumWindows 纯 Win32）拿，
-    SetWindowLongPtrW/ShowWindowAsync 是 Win32 API，跨线程安全。
-
-    2026-09-03：``_probe_hook.py`` 独立验证 PASS（intercepted_count=2，
-    最大化矩形钳到 1920×1040）。旧版 hook=False 根因即跨线程访问
-    ``native.Handle``。
-    """
-    if sys.platform != "win32":
-        return
-    _diag = lambda msg: log_error(f"[clamp] {msg}", state_dir=state_dir, logger=logger) if (state_dir or logger) else None
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        user32 = ctypes.windll.user32
-        user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.GetWindowLongPtrW.restype = ctypes.c_void_p
-        user32.SetWindowLongPtrW.argtypes = [
-            wintypes.HWND, ctypes.c_int, ctypes.c_void_p
-        ]
-        user32.SetWindowLongPtrW.restype = ctypes.c_void_p
-        user32.CallWindowProcW.argtypes = [
-            ctypes.c_void_p, wintypes.HWND, wintypes.UINT,
-            wintypes.WPARAM, wintypes.LPARAM
-        ]
-        user32.CallWindowProcW.restype = ctypes.c_ssize_t
-        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-        user32.GetWindowRect.restype = wintypes.BOOL
-        user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.ShowWindowAsync.restype = wintypes.BOOL
-
-        hwnd, title = _find_main_hwnd_pid()
-        if not hwnd:
-            _diag("find_hwnd FAIL: no candidate")
-            return
-        _diag(f"find_hwnd ok hwnd={hwnd} title={title!r}")
-
-        GWLP_WNDPROC = -4
-        WM_GETMINMAXINFO = 0x0024
-        SW_RESTORE, SW_MAXIMIZE = 9, 3
-
-        workareas = default_workarea_provider()
-        if not workareas:
-            _diag("workarea FAIL: empty provider")
-            return
-        ax, ay, aw, ah = workareas[0]
-        _diag(f"workarea=({ax},{ay},{aw},{ah})")
-
-        class MINMAXINFO(ctypes.Structure):
-            _fields_ = [
-                ("ptReserved", wintypes.POINT),
-                ("ptMaxSize", wintypes.POINT),
-                ("ptMaxPosition", wintypes.POINT),
-                ("ptMinTrackSize", wintypes.POINT),
-                ("ptMaxTrackSize", wintypes.POINT),
-            ]
-
-        WNDPROC = ctypes.WINFUNCTYPE(
-            ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
-            wintypes.WPARAM, wintypes.LPARAM
-        )
-        orig_proc = user32.GetWindowLongPtrW(hwnd, GWLP_WNDPROC)
-        _diag(f"get_orig_proc ok={orig_proc}")
-
-        intercepted = {"count": 0}
-
-        def _new_proc(h, msg, w, l):
-            if msg == WM_GETMINMAXINFO:
-                try:
-                    pmmi = ctypes.cast(l, ctypes.POINTER(MINMAXINFO))
-                    pmmi.contents.ptMaxSize = wintypes.POINT(aw, ah)
-                    pmmi.contents.ptMaxPosition = wintypes.POINT(ax, ay)
-                    pmmi.contents.ptMaxTrackSize = wintypes.POINT(aw, ah)
-                    intercepted["count"] += 1
-                    return 0
-                except Exception:
-                    pass
-            return user32.CallWindowProcW(orig_proc, h, msg, w, l)
-
-        proc_obj = WNDPROC(_new_proc)
-        # 保引用防 GC（窗口销毁前 proc_obj 必须存活，否则回调野指针崩进程）
-        window._cs_maximize_hook = (proc_obj, orig_proc, intercepted)
-        user32.SetWindowLongPtrW(
-            hwnd, GWLP_WNDPROC, ctypes.cast(proc_obj, ctypes.c_void_p)
-        )
-        _diag(f"setwndproc ok ret_set")
-        # 重切一次让 WM_GETMINMAXINFO 读新值（最大化态下 ShowWindowAsync
-        # SW_RESTORE→SW_MAXIMIZE 触发消息重发）
-        user32.ShowWindowAsync(hwnd, SW_RESTORE)
-        user32.ShowWindowAsync(hwnd, SW_MAXIMIZE)
-        # 读回实际矩形确认生效
-        rc = wintypes.RECT()
-        user32.GetWindowRect(hwnd, ctypes.byref(rc))
-        _diag(
-            f"verify rect={rc.right - rc.left}x{rc.bottom - rc.top} "
-            f"@{rc.left},{rc.top} intercepted={intercepted['count']}"
-        )
-    except Exception as e:
-        _diag(f"EXC {type(e).__name__}: {e}")
-
-
-def _fix_frameless_size(window, target_w, target_h, state_dir=None, logger=None):
-    """修正 pywebview WinForms frameless 窗口尺寸缩水。
-
-    根因：pywebview winforms.py 先 ``self.Size = Size(w, h)``（此时窗口
-    有系统边框+标题栏），后 ``FormBorderStyle = None``（去边框）。WinForms
-    切换 FormBorderStyle 时保持客户区不变，边框消失后外框 = 客户区，
-    比设入值小了边框+标题栏的量（约 16px×39px，见 desktop.log 1529×761）。
-
-    修正：用 Win32 ``GetWindowPlacement`` / ``SetWindowPlacement`` 修正
-    ``rcNormalPosition`` 到目标物理尺寸（含 DPI 缩放）。当前最大化时只
-    更新还原矩形不改当前显示；当前普通态时窗口立即跳到正确尺寸。
-    任何失败静默降级（不阻断启动）。
-    """
-    if sys.platform != "win32":
-        return
-    _diag = lambda msg: log_error(f"[fixsize] {msg}", state_dir=state_dir, logger=logger) if (state_dir or logger) else None
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        user32 = ctypes.windll.user32
-
-        hwnd, _title = _find_main_hwnd_pid()
-        if not hwnd:
-            _diag("find_hwnd FAIL")
-            return
-
-        user32.GetDpiForWindow.argtypes = [wintypes.HWND]
-        user32.GetDpiForWindow.restype = wintypes.UINT
-        dpi = user32.GetDpiForWindow(hwnd)
-        scale = dpi / 96.0 if dpi else 1.0
-        phys_w = int(target_w * scale)
-        phys_h = int(target_h * scale)
-
-        class WINDOWPLACEMENT(ctypes.Structure):
-            _fields_ = [
-                ("length", wintypes.UINT),
-                ("flags", wintypes.UINT),
-                ("showCmd", wintypes.UINT),
-                ("ptMinPosition", wintypes.POINT),
-                ("ptMaxPosition", wintypes.POINT),
-                ("rcNormalPosition", wintypes.RECT),
-            ]
-
-        user32.GetWindowPlacement.argtypes = [
-            wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT)
-        ]
-        user32.GetWindowPlacement.restype = wintypes.BOOL
-        user32.SetWindowPlacement.argtypes = [
-            wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT)
-        ]
-        user32.SetWindowPlacement.restype = wintypes.BOOL
-
-        placement = WINDOWPLACEMENT()
-        placement.length = ctypes.sizeof(WINDOWPLACEMENT)
-        if not user32.GetWindowPlacement(hwnd, ctypes.byref(placement)):
-            _diag("GetWindowPlacement FAIL")
-            return
-
-        rc = placement.rcNormalPosition
-        cur_w = rc.right - rc.left
-        cur_h = rc.bottom - rc.top
-        if cur_w == phys_w and cur_h == phys_h:
-            _diag(f"already correct {phys_w}x{phys_h}")
-            return
-
-        workareas = default_workarea_provider()
-        if workareas:
-            ax, ay, aw, ah = workareas[0]
-            x = ax + max(0, (aw - phys_w) // 2)
-            y = ay + max(0, (ah - phys_h) // 2)
-        else:
-            x, y = rc.left, rc.top
-
-        placement.rcNormalPosition = wintypes.RECT(x, y, x + phys_w, y + phys_h)
-        user32.SetWindowPlacement(hwnd, ctypes.byref(placement))
-        _diag(f"fixed {cur_w}x{cur_h} -> {phys_w}x{phys_h} @ {x},{y}")
-    except Exception as e:
-        _diag(f"EXC {type(e).__name__}: {e}")
+# ---------------------------------------------------------------------------
+# 原生窗口控制：实现已迁至 packaging/window_controls.py（spec 042 R0）
+# ---------------------------------------------------------------------------
+# 句柄定位 / 窗口适配器安装（含最大化工作区钳制）/ 无边框尺寸修正三项能力由
+# 窗口控制域单一拥有；拉伸与移动引擎在窗口交互域。此处只保留调用与既有私有
+# 别名（兼容导入面），本文件不再定义 Win32 实现。
+_find_main_hwnd_pid = _wc.find_main_hwnd_pid
+_install_window_adapter = _wc.install_window_adapter
+_fix_frameless_size = _wc.fix_frameless_size
 
 
 def run_desktop_shell(deps):
@@ -900,11 +665,10 @@ def run_desktop_shell(deps):
     try:
         window = webview_module.create_window(**window_kwargs)
         _timing("create_window")
-        # 036 自绘标题栏：窗口控制原语依赖 window 对象，创建后注入 js_api。
-        # 必须注入到下划线属性（见 DesktopJsApi._window 注释）：公开属性会被
-        # pywebview 的 API 枚举递归爬取，是「打开卡死/顶栏不出」的根因。
-        if hasattr(js_api, "_window"):
-            js_api._window = window
+        # 创建后一次性注入 window/Tracker（下划线属性，避免被 API 枚举爬取）
+        _wi.wire_desktop_api(
+            js_api, window, tracker, diag=_wc.diag_fn(state_dir=state_dir, logger=logger)
+        )
         # pywebview 6.x 事件 API：window.events.closing += handler
         events = getattr(window, "events", None)
         if events is not None and hasattr(events, "closing"):
@@ -923,11 +687,18 @@ def run_desktop_shell(deps):
             # shown 事件（窗口显示后、UI 线程）执行才生效。
             if getattr(events, "shown", None) is not None:
                 def _on_shown():
-                    _install_maximize_clamp(
-                        window, state_dir=state_dir, logger=logger
+                    # 顶层唯一适配器（036 v2：WM_GETMINMAXINFO，按当前显示器
+                    # 工作区钳制 + 逐轴最小/最大跟踪）。workarea_provider 由
+                    # 调用方注入；安装失败日志由窗口控制域自己写。
+                    _install_window_adapter(
+                        window,
+                        workarea_provider=workarea_provider,
+                        state_dir=state_dir, logger=logger,
                     )
+                    # 036 v2：用本次实际加载的普通矩形（记忆或默认）修正尺寸，
+                    # 否则用户拉伸过的记忆会在每次启动被改回默认尺寸。
                     _fix_frameless_size(
-                        window, DEFAULT_WIDTH, DEFAULT_HEIGHT,
+                        window, width, height, x, y,
                         state_dir=state_dir, logger=logger
                     )
                     # [diag] 打开瞬间窗口状态（hook 装完、重切后读真值）

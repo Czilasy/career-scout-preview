@@ -100,7 +100,7 @@ class RepoHygieneTests(unittest.TestCase):
             "scratch.db",
             ".chrome-profiles/account_x",
             "logs/run.log",
-            "roadmap/REFERENCE_GET_JOBS.md",
+            "roadmap/BACKLOG.md",
             ".career-scout/webui.db",
             "webui/node_modules/pkg/index.js",
             "docs/private.md",
