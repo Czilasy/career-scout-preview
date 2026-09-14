@@ -23,7 +23,7 @@ re-export 全部既有符号（经 __getattr__ 动态代理，保持旧 import �
 CLI 行为不变（宪法 VI）。
 """
 
-__version__ = "1.9.1"
+__version__ = "1.10.0"
 
 import os
 import random
