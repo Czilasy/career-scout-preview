@@ -48,6 +48,7 @@ function makeDeps(overrides: Partial<TasksNeeds> = {}): TasksNeeds {
     clearLatestResult: vi.fn(async () => true),
     clearWorkflowState: vi.fn(),
     continueAiScreen: vi.fn(async () => {}),
+    emit: vi.fn(),
     enterScreenStep: vi.fn(),
     fetchMergedLatestResult: vi.fn(async () => null),
     finishPausedTask: vi.fn(async () => {}),
@@ -280,6 +281,61 @@ describe("useDiscoveryTasks.maybeAutoStartNewRound（026 B078）", () => {
 
     expect(deps.loadLatestResult).toHaveBeenCalled();
     expect(deps.clearLatestResult).not.toHaveBeenCalled();
+  });
+
+  it("043：已提醒过的未筛选轮不再自动接回（闸门）", async () => {
+    const state = makeState();
+    const deps = makeDeps({
+      fetchMergedLatestResult: vi.fn(async () => ({
+        merged: { ok: true, jobs: [] },
+        newer: {
+          platform: "boss" as const,
+          data: { status: "scraped_only", notice_sent: true, source_run_id: "run-1" },
+        },
+        platformStatuses: { boss: "scraped_only", zhilian: "succeeded" },
+      })),
+    });
+    const tasks = useDiscoveryTasks(state, deps);
+
+    await tasks.maybeAutoStartNewRound();
+
+    expect(deps.loadLatestResult).not.toHaveBeenCalled();
+    expect(apiRequestMock).not.toHaveBeenCalledWith(
+      "/api/run-notice/mark", expect.anything());
+  });
+
+  it("043：首次出现的未筛选轮标记提醒并推岛一行字", async () => {
+    const state = makeState();
+    apiRequestMock.mockImplementation(async (url: string) => {
+      if (String(url) === "/api/run-notice/mark") {
+        return {
+          ok: true, marked: true,
+          notice: { run_id: "run-1", message: "上次有 1 轮只抓取、未筛选（9月13日 · 39 个岗位），已为你接回" },
+        };
+      }
+      return {};
+    });
+    const emit = vi.fn();
+    const deps = makeDeps({
+      emit,
+      fetchMergedLatestResult: vi.fn(async () => ({
+        merged: { ok: true, jobs: [] },
+        newer: {
+          platform: "boss" as const,
+          data: { status: "scraped_only", notice_sent: false, source_run_id: "run-1" },
+        },
+        platformStatuses: { boss: "scraped_only", zhilian: "succeeded" },
+      })),
+    });
+    const tasks = useDiscoveryTasks(state, deps);
+
+    await tasks.maybeAutoStartNewRound();
+
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/api/run-notice/mark", expect.objectContaining({ method: "POST" }));
+    expect(emit).toHaveBeenCalledWith(
+      "island-notice", expect.objectContaining({ target: "results" }));
+    expect(deps.loadLatestResult).toHaveBeenCalled();
   });
 
   it.each(["completed_with_pending", "partial"])(

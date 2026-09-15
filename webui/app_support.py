@@ -481,4 +481,15 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
     ctx.close_paused_run_browser = _close_paused_run_browser
     ctx.has_active_pipeline_task = _has_active_pipeline_task
     ctx.project_browser_accounts = _project_browser_accounts
+    # 043：启动兜底（后台、best-effort）——存量回收 + 无主超限清理，先自动备份、清单落盘。
+    if not app.config.get("TESTING"):
+        def _run_cleanup_startup_sweep():
+            try:
+                from webui import run_cleanup
+                run_cleanup.run_startup_cleanup(store)
+            except Exception as sweep_exc:  # noqa: BLE001 - 启动兜底绝不阻断应用
+                _logger.warning("run cleanup startup sweep failed: %s", sweep_exc)
+        threading.Thread(
+            target=_run_cleanup_startup_sweep, name="run-cleanup-sweep", daemon=True,
+        ).start()
     return ctx

@@ -41,6 +41,7 @@ function makeState(overrides: Partial<DiscoveryState> = {}): DiscoveryState {
 function makeDeps(overrides: Partial<ExecutionNeeds> = {}): ExecutionNeeds {
   return Object.assign({
     clearWorkflowState: vi.fn(),
+    emit: vi.fn(),
     enrichPausedSnapshot: vi.fn(async () => {}),
     enterScreenStep: vi.fn(),
     enterSearchStep: vi.fn(),

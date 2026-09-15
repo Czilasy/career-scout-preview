@@ -503,6 +503,20 @@ class StoreWhiteboxMixin:
             row = conn.execute("SELECT * FROM whitebox_runs WHERE id=?", (str(run_id),)).fetchone()
             return dict(row)
 
+    def delete_whitebox_runs_for_owner(self, owner_kind: str, owner_id: str) -> int:
+        """043 整条进出：按 owner 删除白箱运行（units/events 由外键级联）。
+
+        owner_kind ∈ {scrape, screening, recrawl}；返回删除的运行数。
+        """
+        if not owner_id:
+            return 0
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM whitebox_runs WHERE owner_kind = ? AND owner_id = ?",
+                (str(owner_kind), str(owner_id)),
+            )
+        return int(cursor.rowcount or 0)
+
     def mark_whitebox_incomplete(self, run_id: str, *, stage: str = "unknown", reason: str = "write_failed") -> dict[str, Any]:
         return self.append_whitebox_event(run_id, {
             "idempotency_key": f"whitebox-incomplete:{stage}:{reason}",

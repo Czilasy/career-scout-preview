@@ -1428,6 +1428,8 @@ export interface DiscoveryEmit {
   (event: "job-feedback-changed", payload: { profileId: string; jobId: string }): void;
   (event: "round-status", payload: RoundStatusPayload | null): void;
   (event: "open-browser-accounts"): void;
+  // 043：未收尾流程的一次性提醒——上抛给 App 推入灵动岛通知池（一行字）。
+  (event: "island-notice", payload: { id: string; title: string; detail?: string; target?: "results" | "task" }): void;
 }
 
 export interface DiscoveryProps {

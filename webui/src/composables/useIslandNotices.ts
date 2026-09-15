@@ -24,7 +24,7 @@
 import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
 import type { CapsuleStatusPayload, DynamicIslandState } from "./useDiscoveryState";
 
-export type IslandNoticeKind = "completed" | "error" | "paused" | "interrupt";
+export type IslandNoticeKind = "completed" | "error" | "paused" | "interrupt" | "notice";
 
 export interface IslandNotice {
   id: string;
@@ -53,6 +53,8 @@ export interface IslandNoticesApi {
   markReadBatch(ids: readonly string[]): void;
   /** 037：打断沉入——carousel 转完一条后把该打断加入 notices（未读，进 panel）。 */
   sinkInterrupt(notice: Omit<IslandNotice, "at" | "read">): void;
+  /** 043：未收尾流程一次性提醒——显式推入一行未读通知（去重由调用方负责）。 */
+  pushNotice(notice: Omit<IslandNotice, "at" | "read" | "kind">): void;
   reset(): void;
 }
 
@@ -206,6 +208,11 @@ export function createIslandNotices(
     notices.value = [...notices.value, { ...notice, at: Date.now(), read: false }];
   }
 
+  /** 043：显式推入一条"一次性提醒"（append；kind 固定 "notice"，未读）。 */
+  function pushNotice(notice: Omit<IslandNotice, "at" | "read" | "kind">): void {
+    notices.value = [...notices.value, { ...notice, kind: "notice", at: Date.now(), read: false }];
+  }
+
   function reset(): void {
     prev = null;
     clearAll();
@@ -214,5 +221,5 @@ export function createIslandNotices(
     if (roundStatus.value !== null) roundStatus.value = null;
   }
 
-  return { notices, unreadCount, markAllRead, markRead, markReadBatch, sinkInterrupt, reset };
+  return { notices, unreadCount, markAllRead, markRead, markReadBatch, sinkInterrupt, pushNotice, reset };
 }

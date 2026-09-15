@@ -488,8 +488,6 @@ function setTrackRef(el: unknown): void {
       :aria-label="unread > 0 ? `灵动岛，${unread} 条未读提醒` : undefined"
       :animate="widthAnimate"
       :transition="widthSpring"
-      :while-hover="animOn ? { scale: 1.03 } : undefined"
-      :while-press="animOn ? { scale: 0.96 } : undefined"
       @click="onPillClick"
     >
       <!-- 037 红光层（attention live state，subtle glow） -->
@@ -706,7 +704,8 @@ function setTrackRef(el: unknown): void {
     background-color 0.18s ease,
     border-color 0.18s ease,
     color 0.18s ease,
-    box-shadow 0.18s ease;
+    box-shadow 0.18s ease,
+    transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .island-pill.is-idle {
   animation: island-idle-breathe 4s ease-in-out infinite;
@@ -716,6 +715,16 @@ function setTrackRef(el: unknown): void {
   color: var(--brand-ink);
   background: var(--brand-wash);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+}
+/* 按压缩放改由 CSS 托管，并配"内容层反补偿"：外壳微微缩（0.98），内容层
+   反向放大同比例（1/0.98≈1.0204）——全程净尺寸≈1，文字不被缩放渲染
+   （避免非整数倍缩放发虚，同 037 复审口径）；曲线放缓为 ease-out 滑梯，
+   不再有弹簧过冲与突跳。 */
+.island-pill:active {
+  transform: scale(0.98);
+}
+.island-pill:active .island-content-frame {
+  transform: scale(1.0204);
 }
 .island-pill:focus-visible {
   outline: 2px solid var(--brand);
@@ -760,6 +769,8 @@ function setTrackRef(el: unknown): void {
   gap: 9px;
   flex: 0 0 auto;
   padding-inline: 4px;
+  /* 与 pill 按压缩放同参数过渡：0.98 × 1.0204 全程≈1，文字稳定清晰。 */
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* 037 转盘轮播：viewport 与 track 分离。
@@ -1051,6 +1062,12 @@ function setTrackRef(el: unknown): void {
   .island-glow,
   .island-value.is-value-out {
     animation: none;
+  }
+  .island-pill:active {
+    transform: none;
+  }
+  .island-pill:active .island-content-frame {
+    transform: none;
   }
 }
 </style>

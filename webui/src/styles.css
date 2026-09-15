@@ -1419,6 +1419,11 @@ button:disabled {
   border: 1px solid var(--hair);
   border-radius: var(--radius-md);
   min-height: 52px;
+}/* 未筛选轮命令条主按钮：缩小一号，不撑满条带（与筛选卡头按钮同档） */.command-band .button.primary {
+  min-height: 32px;
+  padding: 0 13px;
+  font-size: 13px;
+  gap: 6px;
 }.command-note {
   font-size: 13px;
   color: var(--ink-3);

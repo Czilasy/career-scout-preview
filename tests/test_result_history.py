@@ -121,13 +121,14 @@ class ResultHistoryStoreTests(unittest.TestCase):
         self.assertEqual(self.store.load_latest_pipeline_result_for_platform("boss"), None)
         self.assertEqual(len(self.service.list_history("boss")), 1)
 
-    def test_delete_preserves_task_logs(self):
+    def test_delete_removes_task_logs_with_round(self):
+        """043：整条进出——删除轮连带其任务日志一起走（不再保留，取代 008/010 旧条款）。"""
         run_id = _save_round(self.store, "boss")
         self.store.append_task_event(run_id, "stage_start", {"stage": "ai_rough"})
 
         self.assertTrue(self.service.delete_round(run_id))
         self.assertFalse(self.store.history_round_exists(run_id))
-        self.assertEqual(len(self.store.list_task_events(run_id)), 1)
+        self.assertEqual(len(self.store.list_task_events(run_id)), 0)
 
     def test_history_statuses_are_three_way_only(self):
         """017-US3: 历史轮状态取值域收敛为 done/partial/scraped_only。"""

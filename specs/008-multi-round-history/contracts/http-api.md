@@ -121,7 +121,7 @@ Errors:
 ## POST /api/reset-latest-result（兼容语义调整）
 
 - 无 `run_id`：改为调用归档服务，返回 `archived_run_ids`，不再删除。
-- 有 `run_id`：改为调用保留任务日志的删除服务。
+- 有 `run_id`：改为调用保留任务日志的删除服务（**Spec 043 起改为整条清除服务：日志随流程删除**）。
 - 保留旧响应结构 `{ ok, cleared, run_id, platform }`，新增 `archived` 字段可选。
 
 ## 错误体

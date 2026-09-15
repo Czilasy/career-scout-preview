@@ -219,6 +219,8 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/src/composables/useProfileInputScene.ts` — 画像文字框高度现场：同轮同宽同内容接回、变化时重算回写（Spec041 返工）
 - `webui/src/composables/useDiscoveryIslandBridge.ts` — 灵动岛点击落点桥接：信号归一 → 落点执行（自 useDiscoveryState.ts 外迁，Spec041 返工）
 - `webui/src/composables/useDiscoveryLogViewer.ts` — 历史轮日志对话框现场：任务号开关 + 切画像清理（Spec041 返工）
+- `webui/run_notice.py` — 043 未收尾流程的一次性提醒：候选判定、提醒记号与水位、灵动岛提醒载荷
+- `webui/run_cleanup.py` — 043 流程清理服务：整条进出删除编排、无主账本兜底、定稿中间档清理、启动兜底（自动备份 + 清单落盘）
 
 ## 文件布局约束
 

@@ -739,6 +739,8 @@ class StoreRunsMixin:
             "task_input_digest": row["task_input_digest"] if "task_input_digest" in keys else None,
             "interruption_kind": row["interruption_kind"] if "interruption_kind" in keys else None,
             "archived_at": row["archived_at"] if "archived_at" in keys else None,
+            # 043：一次性提醒记号（migration_035 加的列）
+            "notice_sent_at": row["notice_sent_at"] if "notice_sent_at" in keys else None,
         }
 
     def append_search_event(self, run_id, event_type, payload=None):

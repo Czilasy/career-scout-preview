@@ -12,6 +12,7 @@ import sqlite3
 
 from flask import jsonify, request
 
+from webui import run_notice
 from webui.constants import LOG_TAIL_LINES
 from webui.error_registry import RECOVERABLE_SYSTEMIC_BLOCK_CODES
 from webui.task_status import (
@@ -452,12 +453,23 @@ def register_running_task_routes(app, ctx):
                     or completed_params.get("auto_screen_fields")
                     or completed_params.get("auto_screen_profile")):
                 continue
-            if ctx.store.latest_scraped_only_for_source(completed_row["id"]) is not None:
-                continue
             completed_scraped_count = ctx.store.count_scrape_run_jobs(completed_row["id"])
             if completed_scraped_count <= 0:
                 continue
             completed_run = ctx.store.get_screening_run(completed_row["id"]) or {}
+            # 043：未收尾流程只提醒一次——已保存的未筛选轮优先作为提醒目标
+            # （记号挂在轮上）；已提醒过、或比提醒水位更旧的流程保持沉默，
+            # 不再返回恢复项（岛不提醒、页面也不落）。
+            notice_target = (
+                ctx.store.latest_scraped_only_for_source(completed_row["id"]) or completed_run
+            )
+            if run_notice.is_notice_silent(
+                ctx.store,
+                notice_target,
+                str(completed_row["profile_id"] or "") or None,
+            ):
+                continue
+            run_notice.mark_notice_sent(ctx.store, str(notice_target.get("id") or ""))
             completed_integrity = _integrity_for("scrape", completed_row["id"])
             return jsonify({
                 "ok": True,
@@ -492,6 +504,8 @@ def register_running_task_routes(app, ctx):
                 "source_total": int(completed_row["source_count"] or 0),
                 "round_context": ctx.round_context_for_run(completed_run),
                 "integrity": completed_integrity,
+                # 043：本次恢复即"提醒一次"的载荷（灵动岛一行字）。
+                "notice": run_notice.build_notice_payload(notice_target, completed_scraped_count),
             })
         # 4. failed 抓取兜底：有已持久化岗位的任务刷新后可恢复显示真实数量。
         try:

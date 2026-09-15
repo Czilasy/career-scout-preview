@@ -153,6 +153,8 @@ async function restoreRunningTask() {
       auto_screen?: boolean;
       auto_screen_fields?: Record<string, unknown>;
       round_context?: Partial<RoundContext> | null;
+      // 043：未收尾流程"一次性提醒"载荷（本次恢复即提醒一次）。
+      notice?: { run_id?: string; date_label?: string; job_count?: number; message?: string } | null;
     }>(
       // Spec041：任务恢复必须限定在当前画像；没有画像参数会读回别人的任务。
       deps.props?.profileId
@@ -276,6 +278,14 @@ async function restoreRunningTask() {
       if (data.round_context) deps.roundFlow.restoreRoundContext(data.round_context);
       if (data.round_context) deps.restoreLocationsFromContext(data.round_context);
       restoredTaskHint.value = "检测到已完成的抓取任务，正在恢复结果";
+      // 043：本次恢复即"提醒一次"——把来历推给灵动岛（一行字）。
+      if (data.notice?.message) {
+        deps.emit("island-notice", {
+          id: `run-notice-${data.notice.run_id || data.task_id || ""}`,
+          title: data.notice.message,
+          target: "results",
+        });
+      }
       await deps.loadLatestResult();
       if (!isCurrentRestore()) return;
       await deps.saveScrapedOnlySnapshot();

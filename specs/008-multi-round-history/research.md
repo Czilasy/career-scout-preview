@@ -26,7 +26,7 @@
 - **Rationale**: 用户确认“失败、中途停止等，只要生成了 04 页岗位都算一轮”；仅靠查询无法找回从未落库的结果。
 - **Alternatives considered**: 只展示已落库快照；会漏掉失败前已生成岗位但未保存的轮次，与已确认口径不符。
 
-## Decision: 删除历史轮次保留任务日志与审计
+## Decision: 删除历史轮次保留任务日志与审计（**Spec 043 取代：日志随流程整条清除**）
 
 - **Decision**: 新删除方法只删除该 run 的 `screening_results`、`screening_pending_results`、`pipeline_checkpoints`、`scrape_run_jobs`、`scrape_page_progress` 与 `screening_runs`，不删除 `tasks`/`task_logs`，也不删除 `screening_source_attempts`、`jobs`、`profile_jobs`、`feedback_events`。
 - **Rationale**: 用户确认“只删轮次，保留审计”；现有 `clear_pipeline_result` 会删 `tasks` 并级联 `task_logs`，不能直接复用。

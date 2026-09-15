@@ -88,7 +88,7 @@ class TaskStoreTests(unittest.TestCase):
         self.assertIsNotNone(
             self.store.load_latest_pipeline_result_for_platform("boss"))
         self.assertTrue(
-            self.store.delete_history_result_preserving_logs(latest_id))
+            self.store.delete_run_closure(latest_id))
         # 删掉最新后 latest 应置空，而不是复活旧轮
         self.assertIsNone(
             self.store.load_latest_pipeline_result_for_platform("boss"))

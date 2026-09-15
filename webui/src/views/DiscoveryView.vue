@@ -109,6 +109,8 @@ const emit = defineEmits<{
   "round-status": [payload: RoundStatusPayload | null];
   // D7：岗位发现流程检测未登录，引导用户去账号面板打开浏览器窗口登录。
   "open-browser-accounts": [];
+  // 043：未收尾流程一次性提醒——App 推入灵动岛通知池（一行字）。
+  "island-notice": [payload: { id: string; title: string; detail?: string; target?: "results" | "task" }];
 }>();
 const state = useDiscoveryState(props, emit);
 const {
@@ -1018,9 +1020,6 @@ onMounted(() => {
           <div v-if="!historyMode && resultsBootstrapPending" class="latest-empty" data-testid="latest-result-loading">
             正在恢复上次的结果…
           </div>
-          <button v-if="!historyMode && isScrapedOnly && resultLoaded" class="button primary" type="button" data-testid="scraped-only-confirm-filters" @click="enterScreenStep()">
-            确认筛选条件
-          </button>
           <div class="result-tabs" role="tablist" aria-label="AI 筛选结果分类">
             <button
               v-for="tab in resultTabs"
@@ -1032,6 +1031,9 @@ onMounted(() => {
               @click="activeCategory = tab.id"
             ><span class="vtab-dot" aria-hidden="true"></span>{{ tab.label }}<span class="vtab-count">{{ tab.count }}</span></button>
           </div>
+          <button v-if="!historyMode && isScrapedOnly && resultLoaded" class="button primary" type="button" data-testid="scraped-only-confirm-filters" @click="enterScreenStep()">
+            去筛选
+          </button>
           <span v-if="!isScrapedOnly" class="command-note" aria-hidden="true">判定依据：你的简历关键词 · 两阶段判断</span>
         </div>
         <ContinuePlatformGuide v-if="!historyMode && roundFlow.continueGuide" :guide="roundFlow.continueGuide" @choose="roundFlow.chooseContinuePlatform" @cancel="roundFlow.cancelContinueGuide" />

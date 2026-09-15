@@ -196,8 +196,9 @@ class ResultHistoryService:
         return self.store.archive_all_current_results(profile_id=profile_id)
 
     def delete_round(self, run_id: str, profile_id: str | None = None) -> bool:
-        return self.store.delete_history_result_preserving_logs(
-            run_id, profile_id=profile_id)
+        """043：整条进出——删除轮连带其根账本/派生记录/白箱/日志一起走。"""
+        from webui import run_cleanup
+        return run_cleanup.delete_run(self.store, run_id, profile_id=profile_id)
 
     def prune_retention(self, limit: int = 30) -> list[str]:
         return self.store.prune_result_history(limit)

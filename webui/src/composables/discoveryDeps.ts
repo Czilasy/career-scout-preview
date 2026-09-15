@@ -175,6 +175,7 @@ export type SearchNeeds = Pick<
 export type ExecutionNeeds = Pick<
   DiscoveryDeps,
   | "clearWorkflowState"
+  | "emit"
   | "enrichPausedSnapshot"
   | "enterScreenStep"
   | "enterSearchStep"
@@ -204,6 +205,7 @@ export type TasksNeeds = Pick<
   DiscoveryDeps,
   | "cancelScrape"
   | "clearFinishedState"
+  | "emit"
   | "clearLatestResult"
   | "clearWorkflowState"
   | "continueAiScreen"

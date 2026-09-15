@@ -1000,6 +1000,32 @@ async function maybeAutoStartNewRound(): Promise<void> {
       await resetWorkflow();
       return;
     }
+    // 043：未收尾轮（只抓取未筛选）的"一次性提醒"闸门——
+    // 已提醒过：不自动接回（岛不提醒、页面也不落）；首次：标记并推岛一行字。
+    const newerData = (fetched.newer?.data ?? {}) as {
+      status?: string;
+      notice_sent?: boolean;
+      source_run_id?: string;
+    };
+    if (String(newerData.status || "") === "scraped_only") {
+      if (newerData.notice_sent) return;
+      const noticeRunId = String(newerData.source_run_id || "");
+      try {
+        const marked = await apiRequest<{
+          marked?: boolean;
+          notice?: { run_id?: string; message?: string } | null;
+        }>("/api/run-notice/mark", { method: "POST", json: { run_id: noticeRunId } });
+        if (marked?.marked && marked.notice?.message) {
+          deps.emit("island-notice", {
+            id: `run-notice-${marked.notice.run_id || noticeRunId}`,
+            title: marked.notice.message,
+            target: "results",
+          });
+        }
+      } catch {
+        // 标记失败不阻断接回：后端幂等，下次启动会再判一次。
+      }
+    }
     // 未完成态（暂停/中断/已抓未筛选/status 缺失）→ 恢复现场（原 loadLatestResult）
     await deps.loadLatestResult();
   } catch {

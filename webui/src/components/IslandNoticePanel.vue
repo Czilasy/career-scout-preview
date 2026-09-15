@@ -23,7 +23,7 @@
 // ---------------------------------------------------------------------------
 import { computed } from "vue";
 import { Motion, useReducedMotion } from "motion-v";
-import { AlertTriangle, Bell, CheckCircle2, Pause } from "@lucide/vue";
+import { AlertTriangle, Bell, CheckCircle2, Info, Pause } from "@lucide/vue";
 import type { DynamicIslandState } from "../composables/useDiscoveryState";
 import type { IslandNotice } from "../composables/useIslandNotices";
 
@@ -39,7 +39,8 @@ const emit = defineEmits<{
 
 // 037：interrupt 在 paused 与 completed 之间——打断类（投递提醒/NoticeBar
 // warning/error）属操作告警，比终态成功事件更需用户先看到，故排在 completed 前。
-const KIND_ORDER: Record<string, number> = { error: 0, paused: 1, interrupt: 2, completed: 3 };
+// 043：notice（未收尾流程一次性提醒）同为"值得先看"的提示，排在 completed 前。
+const KIND_ORDER: Record<string, number> = { error: 0, paused: 1, interrupt: 2, notice: 3, completed: 4 };
 
 const reduced = useReducedMotion();
 const animOn = computed(() => !reduced.value);
@@ -59,6 +60,7 @@ function iconFor(kind: IslandNotice["kind"]) {
   if (kind === "error") return AlertTriangle;
   if (kind === "paused") return Pause;
   if (kind === "interrupt") return Bell;
+  if (kind === "notice") return Info;
   return CheckCircle2;
 }
 
@@ -184,6 +186,10 @@ function onRowClick(notice: IslandNotice) {
 }
 .notice-icon.notice-completed {
   background: var(--match, #12905f);
+}
+/* 043：一次性提醒行图标用品牌色，与成功/告警区分。 */
+.notice-icon.notice-notice {
+  background: var(--brand, #3b82f6);
 }
 /* 037：interrupt 图标按 tone 染色（warning 琥珀 / error 红）。无 tone 时退灰。 */
 .notice-icon.notice-interrupt {

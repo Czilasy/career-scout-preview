@@ -42,6 +42,19 @@ function handleRoundStatus(payload: RoundStatusPayload | null) {
   roundStatus.value = payload as CapsuleStatusPayload | null;
 }
 
+// 043：未收尾流程的一次性提醒——Discovery 层上抛，推入灵动岛通知池（未读一行字）。
+const islandNoticeSeen = new Set<string>();
+function handleIslandNotice(payload: { id: string; title: string; detail?: string; target?: "results" | "task" }) {
+  if (!payload?.id || islandNoticeSeen.has(payload.id)) return;
+  islandNoticeSeen.add(payload.id);
+  islandNotices.pushNotice({
+    id: payload.id,
+    title: payload.title,
+    detail: payload.detail,
+    target: payload.target ?? "results",
+  });
+}
+
 // 037 复审 P2-8：岛 navigate 分流——"reminders"（投递提醒打断行）开提醒抽屉；
 // requestCapsuleNavigation 不认识它（useDiscoveryState 禁改），分流在 App 层做。
 function handleIslandNavigate(target: CapsuleTarget) {
@@ -619,6 +632,7 @@ watch(currentProfileId, (profileId) => {
   reminderDrawerOpen.value = false;
   islandNotices.reset();
   islandCarousel.reset();
+  islandNoticeSeen.clear();
   historyPendingInterrupts.length = 0;
 });
 
@@ -864,6 +878,7 @@ function handleIslandExpand() {
         @profile-created="acceptCreatedProfile"
         @job-feedback-changed="handleJobFeedbackChanged"
         @round-status="handleRoundStatus"
+        @island-notice="handleIslandNotice"
         @open-browser-accounts="browserAccountsOpen = true"
       />
     </div>

@@ -224,6 +224,36 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
     // 未筛选轮不得出现重抓胶囊（isScrapedOnly 渲染条件回归守卫）
     expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
   });
+  it("043 页面秩序：待筛选标签在左、去筛选按钮在右", async () => {
+    const { wrapper, fetchMock } = await completedScrape(3);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/scrape-result-save")) {
+        return response({
+          ok: true, saved: true, run_id: "run-order",
+          result: {
+            ok: true, jobs: jobs(3), dropped: [], total_scraped: 3,
+            total_kept: 0, total_matched: 0, total_dropped: 0, profile_summary: "",
+          },
+        });
+      }
+      if (url.includes("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      return response({});
+    });
+    await wrapper.get('[data-testid="view-scraped-only"]').trigger("click");
+    await flushPromises();
+
+    const html = wrapper.get(".command-band").element.innerHTML;
+    const tabAt = html.indexOf("result-tabs");
+    const buttonAt = html.indexOf("scraped-only-confirm-filters");
+    expect(tabAt).toBeGreaterThanOrEqual(0);
+    expect(buttonAt).toBeGreaterThanOrEqual(0);
+    expect(tabAt).toBeLessThan(buttonAt);
+    expect(wrapper.get('[data-testid="scraped-only-confirm-filters"]').text())
+      .toContain("去筛选");
+  });
+
   it("0 岗位：不调用保存接口，04 页显示 0", async () => {
     const { wrapper, fetchMock } = await completedScrape(0);
     await wrapper.get('[data-testid="view-scraped-only"]').trigger("click");

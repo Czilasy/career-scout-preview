@@ -73,6 +73,17 @@ class StoreTasksMixin:
             )
         return seq
 
+    def delete_task_with_logs(self, task_id) -> int:
+        """043 整条进出：删除任务行与其全部日志（日志随任务同生共死，不单独保留）。"""
+        if not task_id:
+            return 0
+        with self._connection() as conn:
+            logs = conn.execute(
+                "DELETE FROM task_logs WHERE task_id = ?", (str(task_id),),
+            )
+            conn.execute("DELETE FROM tasks WHERE id = ?", (str(task_id),))
+        return int(logs.rowcount or 0)
+
     def get_logs(self, task_id, after=0):
         with self._connection() as connection:
             exists = connection.execute(

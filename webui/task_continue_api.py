@@ -878,6 +878,9 @@ def register_task_continue_routes(app, ctx):
         if scrape_task_id and scrape_task_id != run_id:
             ctx.clear_auto_screen(scrape_task_id)
         ctx.prune_history_best_effort()
+        # 043：整条进出——结束保存后的定稿清理 + 无主兜底（服务内部 best-effort）。
+        from webui import run_cleanup
+        run_cleanup.prune_after_finalize(ctx.store, str(snapshot_run_id or run_id))
         append_task_event_best_effort(
             ctx.store, run_id, "finish", {
                 "snapshot_run_id": snapshot_run_id,

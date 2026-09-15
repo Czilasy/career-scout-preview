@@ -111,6 +111,18 @@ class StoreMigrationsV1Mixin:
                 latest = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
             if int(latest["v"] if latest is not None else 0) >= 33:
                 self._migration_034()
+        if current < 35:
+            # 同 033/034：冻结版测试库不得被推着往前走，只有库已实际到 34 才补提醒记号列。
+            with self._connection() as conn:
+                latest = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
+            if int(latest["v"] if latest is not None else 0) >= 34:
+                self._migration_035()
+        if current < 36:
+            # 同 033/034/035：冻结版测试库不得被推着往前走，只有库已实际到 35 才补持久提醒水位表。
+            with self._connection() as conn:
+                latest = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
+            if int(latest["v"] if latest is not None else 0) >= 35:
+                self._migration_036()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 

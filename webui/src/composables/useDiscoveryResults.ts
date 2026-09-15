@@ -300,6 +300,8 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
       scrape_task_id?: string;
       round_context?: Partial<RoundContext> | null;
       integrity?: PipelineResult["integrity"];
+      // 043：该轮是否已消费过"一次性提醒"（启动恢复闸门依据）。
+      notice_sent?: boolean;
     }>(`/api/latest-pipeline-result${query}`);
     if (requestEpoch !== workflowEpoch.value) return null;
     if (interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return null;

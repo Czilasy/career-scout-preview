@@ -14,6 +14,7 @@ import time
 
 from flask import jsonify, request
 
+from webui import run_notice
 from webui.constants import LOG_TAIL_LINES, _MSG_TASK_NOT_FOUND
 from webui.pipeline_exec_status import user_visible_failure_reason
 from webui.result_rounds import save_scraped_only_round
@@ -364,8 +365,8 @@ def register_results_routes(app, ctx):
         run_id = payload.get("run_id", "")
         integrity = _integrity_for_run(
             ctx.store, str(run_id), str(payload.get("scrape_task_id") or ""))
-        round_context = _round_context_for_run(
-            ctx.store.get_screening_run(run_id) if run_id else None)
+        latest_run_row = ctx.store.get_screening_run(run_id) if run_id else None
+        round_context = _round_context_for_run(latest_run_row)
         # T409: 汇总 source outcomes
         source_summary, source_outcomes = _build_source_summary_and_outcomes(run_id)
 
@@ -445,6 +446,8 @@ def register_results_routes(app, ctx):
             "script_params": payload.get("script_params", {}),
             "round_context": round_context,
             "execution_config": payload.get("execution_config", {}),
+            # 043：该轮是否已消费过"一次性提醒"（前端启动恢复据此决定是否落页）。
+            "notice_sent": bool(str((latest_run_row or {}).get("notice_sent_at") or "")),
             "source_summary": source_summary,
             "source_outcomes": source_outcomes,
             "source_evidence_available": True,
@@ -461,6 +464,33 @@ def register_results_routes(app, ctx):
                 "profile_facts": result.get("profile_facts"),
             },
         })
+
+    @app.route("/api/run-notice/mark", methods=["POST"])
+    def run_notice_mark():
+        """043：把一枚未收尾流程标记为"提醒已发出"（前端首次接回时调用）。
+
+        幂等：已标记过返回 marked=false 且不带提醒载荷（不得重复提醒）。
+        """
+        body = request.get_json(silent=True) or {}
+        run_id = str(body.get("run_id") or "").strip()
+        if not run_id:
+            return jsonify({
+                "ok": False, "error": "missing_run_id", "message": "缺少 run_id",
+            }), 400
+        try:
+            run = ctx.store.get_screening_run(run_id)
+        except ctx.operational_errors:
+            run = None
+        if run is None:
+            return jsonify({
+                "ok": False, "error": "run_not_found", "message": "流程不存在",
+            }), 404
+        marked = run_notice.mark_notice_sent(ctx.store, run_id)
+        notice = None
+        if marked:
+            notice = run_notice.build_notice_payload(
+                run, int(run.get("source_count") or 0))
+        return jsonify({"ok": True, "marked": bool(marked), "notice": notice})
 
     @app.route("/api/pipeline-result/export.csv")
     def export_pipeline_result_csv():
