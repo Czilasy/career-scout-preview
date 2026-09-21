@@ -9,6 +9,8 @@ const props = defineProps<{
   modelValue: boolean;
   /** static 模式：常驻展开，卡头不可点击、不显示折叠箭头（如步骤 2 双栏卡）。 */
   static?: boolean;
+  /** 将操作插入标题内容中，避免操作按钮贴在卡片最外侧。 */
+  actionsInHeader?: boolean;
   /** Spec041：可选的步骤页现场身份与卡片键。 */
   sceneIdentity?: SceneIdentity;
   sceneCardKey?: string;
@@ -80,8 +82,29 @@ onBeforeUnmount(persistCardScroll);
 
 <template>
   <div class="collapsible-card content-card" :class="{ open: modelValue || static }">
-    <div class="collapsible-header-row">
+    <div class="collapsible-header-row" :class="{ 'has-header-actions': actionsInHeader }">
+      <template v-if="actionsInHeader">
+        <component
+          :is="static ? 'div' : 'button'"
+          :type="static ? undefined : 'button'"
+          class="collapsible-header"
+          :class="{ 'is-static': static }"
+          :aria-expanded="static ? undefined : modelValue"
+          @click="toggle"
+        >
+          <span class="collapsible-prefix"><slot name="prefix" /></span>
+          <span class="collapsible-title">{{ title }}</span>
+          <span class="collapsible-header-extra">
+            <slot name="summary" />
+            <ChevronDown v-if="!static" :size="16" class="collapsible-chevron" aria-hidden="true" />
+          </span>
+        </component>
+        <div class="collapsible-header-actions" @click.stop>
+          <slot name="actions" />
+        </div>
+      </template>
       <component
+        v-else
         :is="static ? 'div' : 'button'"
         :type="static ? undefined : 'button'"
         class="collapsible-header"
@@ -96,7 +119,7 @@ onBeforeUnmount(persistCardScroll);
           <ChevronDown v-if="!static" :size="16" class="collapsible-chevron" aria-hidden="true" />
         </span>
       </component>
-      <slot name="actions" />
+      <slot v-if="!actionsInHeader" name="actions" />
     </div>
     <div class="collapsible-body" :class="{ open: modelValue || static }">
       <div class="collapsible-inner" ref="innerEl" @scroll="persistCardScroll">

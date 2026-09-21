@@ -123,6 +123,12 @@ class StoreMigrationsV1Mixin:
                 latest = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
             if int(latest["v"] if latest is not None else 0) >= 35:
                 self._migration_036()
+        if current < 37:
+            # 同 033-036：冻结版测试库不得被推着往前走，只有库已实际到 36 才建通用搜索配置包表。
+            with self._connection() as conn:
+                latest = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
+            if int(latest["v"] if latest is not None else 0) >= 36:
+                self._migration_037()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 

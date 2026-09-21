@@ -23,6 +23,8 @@ import ScreenRoundActions from "../components/ScreenRoundActions.vue";
 import ScreenRecrawlProgress from "../components/ScreenRecrawlProgress.vue";
 import PendingRecrawlCapsule from "../components/PendingRecrawlCapsule.vue";
 import TaskProgress from "../components/TaskProgress.vue";
+import SavedSearchPackagePicker from "../components/SavedSearchPackagePicker.vue";
+import SavedSearchPackageSaveActions from "../components/SavedSearchPackageSaveActions.vue";
 import { useScreenRoundFlow } from "../composables/useScreenRoundFlow";
 import {
   attachRoundFlow,
@@ -32,7 +34,7 @@ import {
 import { useModeWarnings } from "../composables/useModeWarnings";
 import { useNarrowSearchLayout } from "../composables/useNarrowSearchLayout";
 import { withoutRecrawl } from "../screenFlow";
-import type { PipelineResult, RoundStatusPayload } from "../discovery";
+import type { RoundStatusPayload } from "../discovery";
 import type {
   AdvancedSettingsState,
   CandidateProfile,
@@ -59,11 +61,11 @@ import { useDiscoverySceneIdentity } from "../composables/useDiscoverySceneIdent
 import { useProfileInputScene } from "../composables/useProfileInputScene";
 import { useDiscoveryIslandBridge } from "../composables/useDiscoveryIslandBridge";
 import { useDiscoveryLogViewer } from "../composables/useDiscoveryLogViewer";
+import { useSearchPackages } from "../composables/useSearchPackages";
 
 type StepId = "upload" | "search" | "screen" | "results";
 type ResultCategory = "matched" | "unmatched" | "uncertain" | "dropped";
 type FieldLabel = [string, unknown, string | Record<string, string>];
-
 interface AnalyzeResponse {
   ok: boolean;
   fields: Record<string, unknown>;
@@ -73,32 +75,6 @@ interface AnalyzeResponse {
   semantic?: Record<string, string[]>;
 }
 
-interface TaskSnapshot {
-  status: "running" | "done" | "failed" | "paused" | "cancelled" | string;
-  progress?: Record<string, unknown>;
-  logs?: string[];
-  error?: string;
-  result?: PipelineResult;
-  started_at?: number;
-  finished_at?: number;
-  // 切片7：统一状态接口字段（FR-037/SC-006）
-  stage?: string;
-  success_count?: number;
-  fail_count?: number;
-  unstarted_count?: number;
-  total?: number;
-  kept_count?: number;
-  dropped_count?: number;
-  pending_count?: number;
-  source_total?: number;
-  pause_info?: { error_code?: string; error_reason?: string } | null;
-  execution_config?: Record<string, unknown> | null;
-  scraped_count?: number;
-  // T510：任务自身平台，供 TaskProgress 展示真实平台徽章（http-api.md L201）
-  platform?: Platform;
-  /** 一键链路标记：抓取任务完成后前端自动接续 AI 筛选。 */
-  auto_screen?: boolean;
-}
 const props = defineProps<{ profileId: string }>();
 const emit = defineEmits<{
   notify: [notice: Notice];
@@ -418,6 +394,11 @@ restoreSaved02State();
 // （依赖上面解构出的 executionSelection / scopePreview，故在此调用）。
 const modeWarnings = useModeWarnings(executionSelection, scopePreview);
 
+// Spec 044 B100：常用搜索配置包。只做接线——快照取自现有第二页 refs，
+// 落库、读取校验与一次性回填都在 useSearchPackages 内完成；
+// 这里不新增保存触发点（进入第二页、分析完成、开始搜索都不会保存）。
+const searchPackages = useSearchPackages({ keywords, selectedKeywords, customKeyword, cityText, customCity, profileSummary, profileFacts }, { persistDraft: () => state.saveSearchDraftFor(draftPlatform.value), restoreDraft: () => state.saveSearchDraftFor(draftPlatform.value), restoreStep: () => { activeStep.value = "upload"; }, enterSearchStep, notify }, { profileId: () => props.profileId, roundKey: () => sceneIdentity.value.runEpoch, analysisKey: () => state.resumeAnalysisPhase.value, fileKey: () => selectedFile.value ? `${selectedFile.value.name}:${selectedFile.value.size}:${selectedFile.value.lastModified}` : "" });
+
 const roundFlow = reactive(useScreenRoundFlow({
   refs: {
     filterValues,
@@ -707,21 +688,27 @@ onMounted(() => {
             <Sparkles v-else :size="18" aria-hidden="true" />
             {{ uploadBusy ? "分析中…" : resumeError ? "失败，点击重试" : "上传并分析" }}
           </button>
-          <button
-            class="button ghost wide-button"
-            type="button"
-            @click="analysisReady = true; enterSearchStep()"
-          >
-            跳过简历，直接手动搜索
-          </button>
+          <div class="upload-shortcuts" data-testid="upload-shortcuts">
+            <button
+              class="button ghost wide-button"
+              type="button"
+              @click="analysisReady = true; enterSearchStep()"
+            >
+              跳过简历，直接手动搜索
+            </button>
+            <!-- Spec 044 B100：从已保存的常用配置直接进入第二页（不重传简历、不重新分析）。 -->
+            <SavedSearchPackagePicker v-bind="searchPackages.pickerProps.value" v-on="searchPackages.pickerEvents" />
+          </div>
         </div>
       </section>
 
       <section v-show="activeStep === 'search'" class="workflow-stack search-layout">
-        <CollapsibleCard title="哪些词用于广泛抓取？" v-model="searchPanelsOpen" :scene-identity="sceneIdentity" scene-card-key="search" :class="{ locked: scopeLocked }">
+        <CollapsibleCard title="哪些词用于广泛抓取？" v-model="searchPanelsOpen" :actions-in-header="true" :scene-identity="sceneIdentity" scene-card-key="search" :class="{ locked: scopeLocked }">
           <template #prefix>
             <Search :size="17" aria-hidden="true" />
           </template>
+          <!-- Spec 044 B100：只在用户点击时保存，任何编辑都不触发保存。 -->
+          <template #actions><SavedSearchPackageSaveActions v-bind="searchPackages.saveProps.value" v-on="searchPackages.saveEvents" /></template>
           <template #summary>
             <span v-if="scopeLocked" class="lock-chip" role="status">{{ scrapeBusy || recrawlBusy ? '抓取中 · 范围已锁定' : screenBusy ? '筛选中 · 范围已锁定' : '范围已锁定' }}</span>
             <span class="selection-summary">{{ searchSummary }}</span>

@@ -331,6 +331,7 @@ def create_app(config=None):
             or path.startswith("/api/results")
             or path.startswith("/api/search-runs")
             or path.startswith("/api/profile-jobs")
+            or path.startswith("/api/search-packages")
             or path.startswith("/api/cleanup-preview")
             or path.startswith("/api/browser-accounts")
             or path.startswith("/api/search-progress")
@@ -497,6 +498,8 @@ def create_app(config=None):
     register_log_routes(app, ctx)
     from webui.browser_registry_api import register_browser_registry_routes
     register_browser_registry_routes(app, ctx)
+    from webui.search_packages_api import register_search_package_routes
+    register_search_package_routes(app, ctx)
 
     def _run_pipeline_task(
         task_id, script_params, execution_config=None, frozen_scope=None,

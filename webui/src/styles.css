@@ -748,6 +748,15 @@ button:disabled {
   accent-color: var(--brand-strong);
 }.wide-button {
   width: 100%;
+}.upload-shortcuts {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+}.upload-shortcuts .wide-button {
+  width: auto;
+  min-width: 0;
 }.selection-summary {
   flex: 0 0 auto;
   min-height: 30px;
@@ -1109,11 +1118,23 @@ button:disabled {
   width: 100%;
 }.collapsible-header-row .collapsible-header {
   flex: 1;
+}.collapsible-header-row.has-header-actions {
+  position: relative;
+}.collapsible-header-row.has-header-actions .collapsible-header-actions {
+  position: absolute;
+  top: 50%;
+  left: clamp(190px, 32%, 260px);
+  z-index: 2;
+  transform: translateY(-50%);
 }.adv-save-btn {
   margin-right: 10px;
   padding: 4px 10px;
   font-size: 12px;
   white-space: nowrap;
+}.collapsible-header-actions {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
 }.collapsible-card {
   padding: 0;
   overflow: hidden;
@@ -2329,10 +2350,10 @@ button:disabled {
   display: grid;
   place-items: center;
   padding: 20px;
-  background: rgb(10 16 20 / 45%);
+  background: rgb(0 0 0 / 24%);
 }
 :root[data-theme="dark"] .dialog-backdrop {
-  background: rgb(0 0 0 / 62%);
+  background: rgb(0 0 0 / 24%);
 }
 /* 岗位轨迹浮窗：居中弹窗，生命周期卡片嵌入后去掉自身外壳，避免盒套盒。 */
 .dialog-panel.lifecycle-dialog {

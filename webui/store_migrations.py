@@ -38,4 +38,4 @@ class StoreMigrationsMixin(
     StoreMigrationsV2Mixin,
     StoreMigrationsV1Mixin,
 ):
-    """迁移 mixin 组装；版本段 001-035/036 物理归组。"""
+    """迁移 mixin 组装；版本段 001-035/036/037 物理归组。"""

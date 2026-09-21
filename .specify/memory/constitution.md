@@ -221,6 +221,12 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/src/composables/useDiscoveryLogViewer.ts` — 历史轮日志对话框现场：任务号开关 + 切画像清理（Spec041 返工）
 - `webui/run_notice.py` — 043 未收尾流程的一次性提醒：候选判定、提醒记号与水位、灵动岛提醒载荷
 - `webui/run_cleanup.py` — 043 流程清理服务：整条进出删除编排、无主账本兜底、定稿中间档清理、启动兜底（自动备份 + 清单落盘）
+- `webui/store_search_packages.py` — 044 通用搜索配置包数据访问域 mixin：CRUD、参数化 SQL 与 JSON 编解码、损坏快照拒绝（不校验、不修补）
+- `webui/search_packages.py` — 044 配置包领域服务：快照归一化、完整性/版本校验、默认命名与稳定错误码；只调用 store_search_packages
+- `webui/search_packages_api.py` — 044 配置包路由域：REST 端点与安全错误映射，注册入口 register_search_package_routes(app, ctx)
+- `webui/src/composables/useSearchPackages.ts` — 044 配置包前端领域：列表/选择回填/保存另存/改名删除与原子应用；只经 apiRequest 访问后端
+- `webui/src/components/SavedSearchPackagePicker.vue` — 044 第一页配置包小入口与选择框（选择、重命名、二次确认删除）；只发事件
+- `webui/src/components/SavedSearchPackageSaveActions.vue` — 044 第二页保存/另存为与可编辑默认名称；只发事件
 
 ## 文件布局约束
 

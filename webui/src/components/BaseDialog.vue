@@ -9,6 +9,8 @@ const props = defineProps<{
   size?: "xs" | "sm" | "md" | "lg" | "account";
   /** 打开时初始聚焦元素的 CSS 选择器；缺省聚焦面板内第一个可聚焦元素。 */
   initialFocus?: string;
+  /** 需要脱离父级定位上下文时，将弹层挂到 body。 */
+  teleport?: boolean;
 }>();
 
 const emit = defineEmits<{ close: [] }>();
@@ -72,35 +74,37 @@ onBeforeUnmount(() => document.body.classList.remove("dialog-open"));
 </script>
 
 <template>
-  <Transition name="dialog">
-    <div v-if="open" class="dialog-backdrop" @mousedown.self="close">
-    <section
-      ref="panel"
-      class="dialog-panel"
-      :class="`dialog-${size || 'md'}`"
-      role="dialog"
-      aria-modal="true"
-      :aria-labelledby="`${$attrs.id || 'dialog'}-title`"
-      :aria-describedby="description ? `${$attrs.id || 'dialog'}-description` : undefined"
-      tabindex="-1"
-      @keydown="handleKeydown"
-    >
-      <header class="dialog-header">
-        <div>
-          <h2 :id="`${$attrs.id || 'dialog'}-title`">{{ title }}</h2>
-          <p v-if="description" :id="`${$attrs.id || 'dialog'}-description`">{{ description }}</p>
-        </div>
-        <button class="icon-button" type="button" :aria-label="`关闭${title}`" @click="close">
-          <X :size="20" />
-        </button>
-      </header>
-      <div class="dialog-body">
-        <slot />
+  <Teleport to="body" :disabled="!teleport">
+    <Transition name="dialog">
+      <div v-if="open" class="dialog-backdrop" v-bind="$attrs" @mousedown.self="close">
+        <section
+          ref="panel"
+          class="dialog-panel"
+          :class="`dialog-${size || 'md'}`"
+          role="dialog"
+          aria-modal="true"
+          :aria-labelledby="`${$attrs.id || 'dialog'}-title`"
+          :aria-describedby="description ? `${$attrs.id || 'dialog'}-description` : undefined"
+          tabindex="-1"
+          @keydown="handleKeydown"
+        >
+          <header class="dialog-header">
+            <div>
+              <h2 :id="`${$attrs.id || 'dialog'}-title`">{{ title }}</h2>
+              <p v-if="description" :id="`${$attrs.id || 'dialog'}-description`">{{ description }}</p>
+            </div>
+            <button class="icon-button" type="button" :aria-label="`关闭${title}`" @click="close">
+              <X :size="20" />
+            </button>
+          </header>
+          <div class="dialog-body">
+            <slot />
+          </div>
+          <footer v-if="$slots.footer" class="dialog-footer">
+            <slot name="footer" />
+          </footer>
+        </section>
       </div>
-      <footer v-if="$slots.footer" class="dialog-footer">
-        <slot name="footer" />
-      </footer>
-    </section>
-    </div>
-  </Transition>
+    </Transition>
+  </Teleport>
 </template>

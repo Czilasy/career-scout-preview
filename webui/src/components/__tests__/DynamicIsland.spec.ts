@@ -1059,6 +1059,91 @@ describe("DynamicIsland 037 组件级 carousel + 宽度 spring + 数字弹动", 
     wrapper.unmount();
   });
 
+  it("B099：进入分析中按新内容重测宽度，离开后继续正常测量", async () => {
+    // jsdom 没有布局：按相位给主 lane 不同自然宽，观察宽度是否随内容键重测。
+    let laneWidth = 24; // idle："BOSS"
+    const offsetWidth = vi
+      .spyOn(HTMLElement.prototype, "offsetWidth", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains("island-lane-main") ? laneWidth : 0;
+      });
+    try {
+      const wrapper = mountIsland(makeStatus({ state: "idle", platform: "boss" }));
+      await nextTick();
+      const pill = wrapper.get(".island-pill");
+      // idle：自然宽 24 + 光晕 4×2 + 内边距 36 + 边框 2
+      expect(Number(pill.attributes("data-pill-width"))).toBe(70);
+
+      // 进入分析中：内容从"BOSS"变成"分析中"，必须立刻重测。
+      laneWidth = 60;
+      await updateStatus(wrapper, makeStatus({
+        state: "analyzing", platform: "boss", progress: { done: 0 },
+      }));
+      await nextTick();
+      await nextTick();
+      expect(wrapper.get('[data-testid="island-analyzing-value"]').text()).toContain("分析中");
+      expect(Number(pill.attributes("data-pill-width"))).toBe(106);
+
+      // 分析结束切到抓取：仍按新内容正常测量。
+      laneWidth = 90;
+      await updateStatus(wrapper, makeStatus({
+        state: "running", platform: "boss",
+        progress: { phase: "scraping", done: 12, total: 40 },
+      }));
+      await nextTick();
+      await nextTick();
+      expect(Number(pill.attributes("data-pill-width"))).toBe(136);
+      wrapper.unmount();
+    } finally {
+      offsetWidth.mockRestore();
+    }
+  });
+
+  it("B099：分析中状态点有静态可见颜色，且与抓取/JD/精筛可区分", async () => {
+    const wrapper = mountIsland(makeStatus({
+      state: "analyzing", platform: "boss", progress: { done: 1 },
+    }));
+    await nextTick();
+    expect(wrapper.find(".island-live.phase-analyzing").exists()).toBe(true);
+
+    const source = readFileSync(resolve(process.cwd(), "src/components/DynamicIsland.vue"), "utf8");
+    const rule = source.match(/\.island-live\.phase-analyzing \{[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(rule).toContain("background:");
+    const analyzeColor = rule.match(/background:\s*([^;]+);/)?.[1]?.trim() ?? "";
+    const otherColors = ["phase-scraping", "phase-jd", "phase-screening"].map((phase) => {
+      const other = source.match(new RegExp(`\\.island-live\\.${phase} \\{[\\s\\S]*?\\n\\}`))?.[0] ?? "";
+      return other.match(/background:\s*([^;]+);/)?.[1]?.trim() ?? "";
+    });
+    expect(analyzeColor).toBeTruthy();
+    for (const color of otherColors) {
+      expect(color).toBeTruthy();
+      expect(analyzeColor).not.toBe(color);
+    }
+    wrapper.unmount();
+  });
+
+  it("B099：减少动态模式下状态点仍靠静态颜色可见", async () => {
+    (globalThis as unknown as { __setReducedMotionMatchMedia: (v: boolean) => void })
+      .__setReducedMotionMatchMedia(true);
+    const wrapper = mountIsland(makeStatus({
+      state: "analyzing", platform: "boss", progress: { done: 2 },
+    }));
+    await nextTick();
+
+    // 圆点仍在 DOM 中且带分析中色号 class。
+    expect(wrapper.find(".island-live.phase-analyzing").exists()).toBe(true);
+
+    const source = readFileSync(resolve(process.cwd(), "src/components/DynamicIsland.vue"), "utf8");
+    const reducedBlock = source.match(/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+    // 减少动态只关动画，不得隐藏状态点。
+    expect(reducedBlock).toContain(".island-live");
+    expect(reducedBlock).not.toContain("display: none");
+    expect(reducedBlock).not.toContain("visibility: hidden");
+    const rule = source.match(/\.island-live\.phase-analyzing \{[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(rule).toContain("background:");
+    wrapper.unmount();
+  });
+
   it("reduce-motion 下 carousel 状态机仍工作（push → sink → 回 lane 0）", async () => {
     // setup.ts 默认 reduced=true，无需手动设置
     vi.useFakeTimers();

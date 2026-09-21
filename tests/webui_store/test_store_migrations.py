@@ -997,3 +997,112 @@ class Migration032ClearHistoryTests(unittest.TestCase):
             datetime.fromisoformat(after),
             datetime.fromisoformat(before),
         )
+
+
+class Migration037SearchPackagesTests(unittest.TestCase):
+    """Spec 044 T003: 迁移 037 建立通用搜索配置包表。
+
+    - 新库与旧库都必须得到 `search_packages` 表、九个字段与列表索引；
+    - 表中不得出现 `platform`、`profile_id` 或任何第三页筛选字段；
+    - 迁移幂等：重复构造只登记一次版本 37。
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(
+            prefix=_PROCESS_TMP_PREFIX, ignore_cleanup_errors=True,
+        )
+        self.db_path = pathlib.Path(self.temp.name) / "state" / "webui.db"
+        self._cleanup_shared_backup_dir()
+
+    def tearDown(self):
+        self._cleanup_shared_backup_dir()
+        self.temp.cleanup()
+
+    @staticmethod
+    def _cleanup_shared_backup_dir():
+        dummy = TaskStore.__new__(TaskStore)
+        backup_dir = TaskStore._migration_backup_dir(dummy)
+        if backup_dir.exists():
+            for path in backup_dir.iterdir():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    def _build_v36_database(self):
+        with patch.object(TaskStore, "_migration_037", return_value=None):
+            store = TaskStore(self.db_path)
+        self.assertEqual(store.schema_version(), 36)
+        return store
+
+    def _table_columns(self, store) -> set:
+        with store._connection() as conn:
+            return {
+                row["name"] for row in conn.execute("PRAGMA table_info(search_packages)")
+            }
+
+    def test_new_database_has_search_packages_table_with_required_columns(self):
+        store = TaskStore(self.db_path)
+        with store._connection() as conn:
+            tables = {
+                row["name"] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        self.assertIn("search_packages", tables)
+        self.assertGreaterEqual(store.schema_version(), 37)
+        self.assertEqual(
+            self._table_columns(store),
+            {
+                "id", "name", "payload_version", "keywords_json", "city_json",
+                "profile_summary", "profile_facts_json", "created_at", "updated_at",
+            },
+        )
+
+    def test_search_packages_has_no_platform_or_filter_columns(self):
+        store = TaskStore(self.db_path)
+        columns = self._table_columns(store)
+        for forbidden in (
+            "platform", "profile_id", "filter_values_json", "filters_json",
+            "city_code", "district_code", "business_code",
+        ):
+            self.assertNotIn(forbidden, columns, f"配置包表不得包含 {forbidden}")
+
+    def test_search_packages_has_updated_at_index(self):
+        store = TaskStore(self.db_path)
+        with store._connection() as conn:
+            index_sql = " ".join(
+                row["sql"] or "" for row in conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index' "
+                    "AND tbl_name='search_packages'"
+                )
+            ).lower()
+        self.assertIn("updated_at", index_sql)
+        self.assertIn("created_at", index_sql)
+
+    def test_existing_database_upgrades_to_search_packages(self):
+        legacy = self._build_v36_database()
+        with legacy._connection() as conn:
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='search_packages'"
+            ).fetchone()
+        self.assertIsNone(exists, "冻结的 v36 库不应已有配置包表")
+
+        reopened = TaskStore(self.db_path)
+        self.assertGreaterEqual(reopened.schema_version(), 37)
+        self.assertEqual(
+            self._table_columns(reopened),
+            {
+                "id", "name", "payload_version", "keywords_json", "city_json",
+                "profile_summary", "profile_facts_json", "created_at", "updated_at",
+            },
+        )
+
+    def test_migration_037_is_idempotent(self):
+        TaskStore(self.db_path)
+        reopened = TaskStore(self.db_path)
+        with reopened._connection() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 37"
+            ).fetchone()[0]
+        self.assertEqual(count, 1)

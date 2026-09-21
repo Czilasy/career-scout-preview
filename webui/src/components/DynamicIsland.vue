@@ -233,6 +233,11 @@ const contentKey = computed(() => {
     case "jd":
     case "screening":
       return `run:${runningLabel.value}`;
+    // Spec 044 B099：分析中此前落进 default（idle 口径），从空闲切进分析中时
+    // 内容键不变 → 不重测宽度，胶囊沿用上一状态的宽度（表现为半条空白胶囊、
+    // 文案顶边）。给它独立内容键：进入和离开都会触发测量。
+    case "analyzing":
+      return `analyzing:${capsule.value.platform}`;
     case "completed":
       return `done:${isScrapedPhase.value ? "s" : "j"}:${liveCounts.value?.matched ?? 0}:${liveCounts.value?.pending ?? 0}`;
     case "attention":
@@ -879,6 +884,13 @@ function setTrackRef(el: unknown): void {
 .island-live.phase-screening {
   background: #8b5cf6;
   box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
+}
+/* Spec 044 B099：简历分析中的状态点（贝壳粉，与抓取蓝 / JD 青 / 精筛紫都可辨）。
+   静态颜色写在这里，不依赖呼吸动画才可见：减少动态模式只关动画（见文末
+   prefers-reduced-motion），圆点仍以本色显示。 */
+.island-live.phase-analyzing {
+  background: #f472b6;
+  box-shadow: 0 0 0 3px rgba(244, 114, 182, 0.24);
 }
 
 /* 037 completed 彩色芯片 */

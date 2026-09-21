@@ -446,6 +446,59 @@ export interface Notice {
   tone: "info" | "success" | "warning" | "error";
 }
 
+// ---------------------------------------------------------------------------
+// 常用搜索配置包（Spec 044；data-model.md / contracts/http-api.md）
+// 平台无关：不得出现 platform、筛选条件或第三页字段。
+// ---------------------------------------------------------------------------
+
+/** 配置包里的关键词快照：候选、已选与输入框中未提交的文本。 */
+export interface SearchPackageKeywords {
+  candidates: Array<{ word: string; recommended: boolean }>;
+  selected: string[];
+  custom: string;
+}
+
+/** 配置包里的城市快照：通用城市文本与输入框中未提交的文本。 */
+export interface SearchPackageCity {
+  text: string;
+  custom: string;
+}
+
+/** 配置包里的画像快照：画像文本 + 无需重新分析即可恢复的画像事实。 */
+export interface SearchPackageProfile {
+  summary: string;
+  facts: Record<string, unknown>;
+}
+
+/** 列表项投影（GET /api/search-packages）。 */
+export interface SearchPackageSummary {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 完整配置包（GET /api/search-packages/{id}、POST 的返回体）。 */
+export interface SearchPackage {
+  id: string;
+  name: string;
+  payloadVersion: number;
+  keywords: SearchPackageKeywords;
+  city: SearchPackageCity;
+  profile: SearchPackageProfile;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 保存配置包的请求体。 */
+export interface SearchPackagePayload {
+  name: string;
+  payloadVersion: number;
+  keywords: SearchPackageKeywords;
+  city: SearchPackageCity;
+  profile: SearchPackageProfile;
+}
+
 export type TaskSize = "small" | "medium" | "large";
 export type ExecutionSelection = "stable" | "balanced" | "extreme" | "custom";
 export type SystemExecutionMode = Exclude<ExecutionSelection, "custom">;
