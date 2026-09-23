@@ -155,3 +155,6 @@ webui/dist/**/*.map
 webui/mirror_host.txt
 # 本地运行数据/测试产物（AGENTS.md：测试产物禁止进仓库）
 tmp/
+
+# LearnMap 学习工作区（本地个人学习材料，不入公开仓库）
+.learnmap/
