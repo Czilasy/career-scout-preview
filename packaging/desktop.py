@@ -294,6 +294,12 @@ def _default_messagebox(title, text):
     """跨平台消息框：Windows 用 ``MessageBoxW``，macOS 用 ``osascript``
     原生对话框；平台机制不可用时回退 print。"""
     if sys.platform == "win32":
+        # 045 B102：Windows 原生 OK/Cancel 按钮文案固定为“确定/取消”，
+        # 不满足「结束并保存 / 取消」按钮文案要求，改用 TaskDialog
+        # 自定义按钮；TaskDialog 不可用（旧系统/清单缺失）才回退。
+        result = _win_task_dialog_confirm(title, text)
+        if result is not None:
+            return result
         try:
             import ctypes
 
@@ -326,6 +332,58 @@ def _default_messagebox(title, text):
             return "cancel"
     print(f"[{title}] {text}")
     return "cancel"
+
+
+def _win_task_dialog_confirm(title, text):
+    """Windows 关闭确认：tkinter 自绘两按钮「结束并保存 / 取消」。
+
+    原生 MessageBoxW 的 OK 按钮文案固定为“确定”，不满足产品文案；
+    TaskDialog 需要 comctl32 v6 激活上下文，控制台进程默认没有。
+    tkinter 是标准库，按钮文案完全受控；返回 "ok" / "cancel"。
+    """
+    import queue
+    import tkinter as tk
+
+    result_q: queue.Queue[str] = queue.Queue()
+
+    def _choose(value: str) -> None:
+        result_q.put(value)
+        root.destroy()
+
+    try:
+        root = tk.Tk()
+    except Exception:
+        return None
+    root.title(title)
+    root.attributes("-topmost", True)
+    root.resizable(False, False)
+    root.protocol("WM_DELETE_WINDOW", lambda: _choose("cancel"))
+    frame = tk.Frame(root, padx=24, pady=18)
+    frame.pack()
+    tk.Label(frame, text=text, wraplength=360, justify="left").pack(
+        anchor="w", pady=(0, 16)
+    )
+    btn_row = tk.Frame(frame)
+    btn_row.pack(fill="x")
+    tk.Button(
+        btn_row, text="取消", width=12,
+        command=lambda: _choose("cancel"),
+    ).pack(side="right", padx=(8, 0))
+    tk.Button(
+        btn_row, text="结束并保存", width=14,
+        command=lambda: _choose("ok"),
+    ).pack(side="right")
+    # 固定合理尺寸并居中显示（pack 后取真实尺寸）
+    root.update_idletasks()
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"+{(sw - 420) // 2}+{(sh - 220) // 2}")
+    root.minsize(420, 200)
+    root.after(15000, lambda: _choose("cancel") if not result_q.empty() else None)
+    root.mainloop()
+    try:
+        return result_q.get_nowait()
+    except queue.Empty:
+        return "cancel"
 
 
 def _run_flask_server(app, port):
@@ -697,7 +755,7 @@ def run_desktop_shell(deps):
             ) == "ok",
         )
         if not should_close:
-            return
+            return False  # 045 B102：取消必须返回 False，pywebview 才会取消关闭事件
         try:
             # [diag] 关窗诊断日志（2026-09-02 最大化时序问题排查）：snapshot
             # 前记录原生窗口态 + tracker 状态，snapshot 后记录落盘结果，用于
