@@ -30,10 +30,13 @@ T035 接线点（冻结合同 ``specs/003-desktop-exe/contracts/desktop-shell.md
 通过 ``run_desktop_shell(deps)`` 注入，便于纯逻辑单测；``main()`` 组装默认依赖。
 """
 
+import http.cookiejar
+import json
 import os
 import sys
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -63,6 +66,12 @@ try:  # 包导入（unittest/PyInstaller 模块分析）
     from packaging import window_state as _ws
 except ImportError:  # 脚本直跑（python packaging/desktop.py）时的同目录回退
     import window_state as _ws  # type: ignore
+
+# 045 B102：关闭前未完成流程保存决策域（宿主/HTTP/确认可注入）。
+try:
+    from packaging import desktop_close as _dc
+except ImportError:  # 脚本直跑时的同目录回退
+    import desktop_close as _dc  # type: ignore
 
 # 窗口控制域（036 自绘标题栏 / 窗口适配器）与窗口交互域（036 v2 拉伸/移动）
 try:
@@ -246,6 +255,11 @@ def wait_for_backend_ready(port, timeout=BACKEND_READY_TIMEOUT, http_get=None,
 # ---------------------------------------------------------------------------
 # 抓取取消（T039 / 合同 §6）
 # ---------------------------------------------------------------------------
+def decide_close(host, *, confirm):
+    """045 B102：模块级导出，测试与宿主统一使用 desktop_close.decide_close。"""
+    return _dc.decide_close(host, confirm=confirm)
+
+
 def cancel_running_tasks(app):
     """触发所有运行中任务的取消事件。
 
@@ -283,8 +297,11 @@ def _default_messagebox(title, text):
         try:
             import ctypes
 
-            ctypes.windll.user32.MessageBoxW(0, text, title, 0x00000000)
-            return
+            # MB_OKCANCEL = 0x01；IDOK = 1，IDCANCEL = 2。
+            result = ctypes.windll.user32.MessageBoxW(
+                0, text, title, 0x00000001
+            )
+            return "cancel" if result == 2 else "ok"
         except (OSError, AttributeError):
             pass
     elif sys.platform == "darwin":
@@ -293,21 +310,22 @@ def _default_messagebox(title, text):
 
             safe_title = title.replace("\\", "\\\\").replace('"', '\\"')
             safe_text = text.replace("\\", "\\\\").replace('"', '\\"')
-            subprocess.run(
+            result = subprocess.run(
                 [
                     "osascript",
                     "-e",
                     f'display dialog "{safe_text}" with title "{safe_title}"'
-                    ' buttons {"好"} default button "好"',
+                    ' buttons {"取消", "结束并保存"} default button "结束并保存"',
                 ],
                 check=False,
                 capture_output=True,
                 timeout=120,
             )
-            return
+            return "cancel" if result.returncode != 0 else "ok"
         except Exception:
-            pass
+            return "cancel"
     print(f"[{title}] {text}")
+    return "cancel"
 
 
 def _run_flask_server(app, port):
@@ -539,6 +557,22 @@ def run_desktop_shell(deps):
     server_thread.start()
     _timing("create_app")
 
+    # 045 B102：共享 CookieJar + 持久 opener；桌面壳关闭保存 HTTP 调用
+    # 必须携带 /api/session 颁发的 boss_local_session Cookie，否则 403。
+    _cookie_jar = http.cookiejar.CookieJar()
+    _shared_opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(_cookie_jar)
+    )
+
+    def _acquire_session():
+        """GET /api/session 获取会话 Cookie（幂等；失败不阻断启动）。"""
+        try:
+            _shared_opener.open(
+                f"http://127.0.0.1:{port}/api/session", timeout=3
+            )
+        except Exception:
+            pass
+
     # 4. 就绪轮询
     if not wait_for_backend_ready(
         port, timeout=ready_timeout, http_get=http_get
@@ -551,6 +585,7 @@ def run_desktop_shell(deps):
         )
         return 1
     _timing("backend_ready")
+    _acquire_session()  # 045 B102：获取会话 Cookie 供关闭保存 HTTP 调用使用
 
     # 5. 窗口状态（schema 3：普通矩形 + maximized 标记；无记忆 = 首开最大化）
     width, height, x, y, start_maximized = load_window_state(
@@ -610,7 +645,59 @@ def run_desktop_shell(deps):
     # （传入会直接抛 TypeError），winforms 后端会自动从 EXE 资源提取图标
     # （即 spec 里 icon=career_scout.ico 的指南针），无需显式传入。
 
+    def _local_api_request(path, *, method="GET", payload=None, timeout=3):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}",
+            data=(json.dumps(payload or {}).encode("utf-8") if method != "GET" else None),
+            method=method,
+        )
+        with _shared_opener.open(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _latest_running_task_for_close():
+        try:
+            return _local_api_request("/api/latest-running-task")
+        except Exception:
+            return None
+
+    def _finish_run_for_close(run_id):
+        try:
+            return _local_api_request(
+                f"/api/task/finish/{run_id}", method="POST", timeout=20,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _save_window_state_for_close():
+        try:
+            save_w, save_h, save_x, save_y, was_maximized = tracker.snapshot_for_save(
+                getattr(window, "width", None),
+                getattr(window, "height", None),
+                getattr(window, "x", None),
+                getattr(window, "y", None),
+            )
+            save_window_state(
+                save_w, save_h, save_x, save_y,
+                state_dir=state_dir, maximized=was_maximized,
+            )
+        except Exception:
+            pass
+
+    class _DesktopCloseHost:
+        latest_running_task = staticmethod(_latest_running_task_for_close)
+        finish_run = staticmethod(_finish_run_for_close)
+        save_window_state = staticmethod(_save_window_state_for_close)
+
     def _on_closing():
+        should_close = _dc.decide_close(
+            _DesktopCloseHost(),
+            confirm=lambda: messagebox(
+                _dc.CLOSE_CONFIRM_TITLE,
+                _dc.CLOSE_CONFIRM_TEXT,
+            ) == "ok",
+        )
+        if not should_close:
+            return
         try:
             # [diag] 关窗诊断日志（2026-09-02 最大化时序问题排查）：snapshot
             # 前记录原生窗口态 + tracker 状态，snapshot 后记录落盘结果，用于

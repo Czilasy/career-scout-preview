@@ -216,60 +216,91 @@ def register_running_task_routes(app, ctx):
                 str(execution_params.get("scrape_task_id") or "") or prow["id"]
             )
             paused_scraped_count = ctx.store.count_scrape_run_jobs(paused_source_task_id)
-            return jsonify({
-                "ok": True,
-                "has_task": True,
-                "task_id": prow["id"],
-                "kind": paused_kind,
-                # Every row selected above is resume-eligible.  Systemic
-                # source/AI blocks must remain visibly resumable after a
-                # refresh, including rows written as failed by old workers.
-                "status": "paused",
-                "stage": prow["current_stage"],
-                "progress": {
-                    "processed": prow["processed_count"],
-                    "total": prow["source_count"],
-                    "pending": prow["pending_count"],
-                    "match": prow["match_count"],
-                    "mismatch": prow["mismatch_count"],
-                    "dropped": prow["total_dropped"],
-                    "message": paused_error_reason,
-                },
-                "logs": [],
-                "error": "" if user_paused else paused_error_reason,
-                "pause_info": {
-                    "error_code": prow["error_code"],
-                    "error_reason": paused_error_reason,
-                },
-                "backend_version": prow["backend_version"],
-                "current_version": ctx.backend_version,
-                "version_match": (prow["backend_version"] == ctx.backend_version),
-                "started_at": _iso_epoch_ms(paused_run.get("started_at")),
-                "finished_at": _iso_epoch_ms(paused_run.get("finished_at")),
-                "resumable": True,
-                "source": "database",
-                "scrape_task_id": execution_params.get("scrape_task_id"),
-                "scrape_completed": _scrape_completed_for_run(execution_params),
-                "auto_screen": bool(execution_params.get("auto_screen")),
-                "auto_screen_fields": execution_params.get("auto_screen_fields") or {},
-                "auto_screen_profile": str(execution_params.get("auto_screen_profile") or ""),
-                "profile_summary": str(execution_params.get("profile_summary") or ""),
-                "profile_facts": execution_params.get("profile_facts"),
-                "source_run_id": execution_params.get("source_run_id"),
-                "checkpoint_stage": prow["current_stage"],
-                # T409 契约 http-api.md L200-202：DB paused 从 screening_runs
-                # 读取 platform/task_input_digest；source 字段只表示状态数据
-                # 来源，不能承载招聘平台。
-                "platform": paused_run.get("platform"),
-                "task_input_digest": paused_run.get("task_input_digest"),
-                "scraped_count": paused_scraped_count,
-                "source_total": int(prow["source_count"] or 0),
-                "round_context": ctx.round_context_for_run(paused_run),
-                "integrity": _integrity_for(
-                    paused_kind if paused_kind in {"scrape", "recrawl"} else "screening",
-                    prow["id"],
-                ),
-            })
+            # 已保存的流程不再作为恢复/提醒候选（同来源或自身已有历史轮）。
+            if (
+                ctx.store.latest_scraped_only_for_source(paused_source_task_id)
+                is not None
+                or ctx.store.history_round_exists(paused_source_task_id)
+            ):
+                prow = None
+            if prow is not None:
+                # 045 B103：一次性提醒只面向有岗位的未保存残留；0 岗位任务
+                # 仍返回供 UI 续跑，但不弹提醒、关闭时由桌面层静默处理。
+                _notice_target = (
+                    ctx.store.latest_scraped_only_for_source(paused_source_task_id)
+                    or paused_run
+                )
+                _notice = None
+                if (
+                    paused_scraped_count > 0
+                    and not run_notice.is_notice_silent(
+                        ctx.store,
+                        _notice_target,
+                        str(paused_run.get("profile_id") or "") or None,
+                    )
+                ):
+                    run_notice.mark_notice_sent(
+                        ctx.store, str(_notice_target.get("id") or "")
+                    )
+                    _notice = run_notice.build_notice_payload(
+                        _notice_target, paused_scraped_count
+                    )
+                return jsonify({
+                    "ok": True,
+                    "has_task": True,
+                    "task_id": prow["id"],
+                    "kind": paused_kind,
+                    # Every row selected above is resume-eligible.  Systemic
+                    # source/AI blocks must remain visibly resumable after a
+                    # refresh, including rows written as failed by old workers.
+                    "status": "paused",
+                    "stage": prow["current_stage"],
+                    "progress": {
+                        "processed": prow["processed_count"],
+                        "total": prow["source_count"],
+                        "pending": prow["pending_count"],
+                        "match": prow["match_count"],
+                        "mismatch": prow["mismatch_count"],
+                        "dropped": prow["total_dropped"],
+                        "message": paused_error_reason,
+                    },
+                    "logs": [],
+                    "error": "" if user_paused else paused_error_reason,
+                    "pause_info": {
+                        "error_code": prow["error_code"],
+                        "error_reason": paused_error_reason,
+                    },
+                    "backend_version": prow["backend_version"],
+                    "current_version": ctx.backend_version,
+                    "version_match": (prow["backend_version"] == ctx.backend_version),
+                    "started_at": _iso_epoch_ms(paused_run.get("started_at")),
+                    "finished_at": _iso_epoch_ms(paused_run.get("finished_at")),
+                    "resumable": True,
+                    "source": "database",
+                    "scrape_task_id": execution_params.get("scrape_task_id"),
+                    "scrape_completed": _scrape_completed_for_run(execution_params),
+                    "auto_screen": bool(execution_params.get("auto_screen")),
+                    "auto_screen_fields": execution_params.get("auto_screen_fields") or {},
+                    "auto_screen_profile": str(execution_params.get("auto_screen_profile") or ""),
+                    "profile_summary": str(execution_params.get("profile_summary") or ""),
+                    "profile_facts": execution_params.get("profile_facts"),
+                    "source_run_id": execution_params.get("source_run_id"),
+                    "checkpoint_stage": prow["current_stage"],
+                    # T409 契约 http-api.md L200-202：DB paused 从 screening_runs
+                    # 读取 platform/task_input_digest；source 字段只表示状态数据
+                    # 来源，不能承载招聘平台。
+                    "platform": paused_run.get("platform"),
+                    "task_input_digest": paused_run.get("task_input_digest"),
+                    "scraped_count": paused_scraped_count,
+                    "job_count": paused_scraped_count,
+                    "source_total": int(prow["source_count"] or 0),
+                    "round_context": ctx.round_context_for_run(paused_run),
+                    "integrity": _integrity_for(
+                        paused_kind if paused_kind in {"scrape", "recrawl"} else "screening",
+                        prow["id"],
+                    ),
+                    "notice": _notice,
+                })
         # 3. DB 中被进程重启打断的筛选。重启后工作线程已死，
         # 不能假装还在跑——如实告诉前端有个可续跑的中断任务。
         try:
