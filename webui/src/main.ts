@@ -1,5 +1,6 @@
 import { createApp } from "vue";
 import App from "./App.vue";
+import CloseConfirmHost from "./components/CloseConfirmHost.vue";
 import "./styles.css";
 import "./styles/theme.css";
 
@@ -104,3 +105,10 @@ function initTooltips() {
 
 createApp(App).mount("#app");
 initTooltips();
+
+// 045 v2：关闭确认宿主以独立 Vue 实例挂在 body 上，不进任何页面组件
+// （App.vue 已过规模预警线）。浏览器模式下宿主不安装任何关闭入口，
+// 网页版不做任何关闭拦截（FR-016）。
+const closeHostEl = document.createElement("div");
+document.body.appendChild(closeHostEl);
+createApp(CloseConfirmHost).mount(closeHostEl);

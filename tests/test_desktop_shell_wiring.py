@@ -422,22 +422,32 @@ class WindowControlJsApiTests(unittest.TestCase):
             js_api.window_is_maximized(), {"ok": False, "error": "no_window"}
         )
 
-    def test_window_close_reuses_quit_handler(self):
-        """window_close → 复用 quit_handler 优雅退出链路（等价关闭按钮）。"""
+    def test_window_close_uses_close_handler(self):
+        """045 v2：window_close → 走两段式确认链路，与系统关闭键同一入口。"""
         called = []
         js_api = desktop.DesktopJsApi()
         js_api._window = object()
-        js_api.quit_handler = lambda: called.append("quit")
+        js_api.close_handler = lambda: called.append("close")
         result = js_api.window_close()
         self.assertEqual(result, {"ok": True})
-        self.assertEqual(called, ["quit"])
+        self.assertEqual(called, ["close"])
+
+    def test_window_close_does_not_touch_quit_handler(self):
+        """045 v2 FR-017：quit_handler 只服务更新重启的静默退出。"""
+        called = []
+        js_api = desktop.DesktopJsApi()
+        js_api._window = object()
+        js_api.close_handler = lambda: called.append("close")
+        js_api.quit_handler = lambda: called.append("quit")
+        js_api.window_close()
+        self.assertEqual(called, ["close"])
 
     def test_window_close_without_handler_returns_error(self):
         js_api = desktop.DesktopJsApi()
         js_api._window = object()
-        js_api.quit_handler = None
+        js_api.close_handler = None
         self.assertEqual(
-            js_api.window_close(), {"ok": False, "error": "no_quit_handler"}
+            js_api.window_close(), {"ok": False, "error": "no_close_handler"}
         )
 
 

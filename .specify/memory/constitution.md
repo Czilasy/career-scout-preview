@@ -174,7 +174,9 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/src/components/PauseBatchChoiceDialog.vue` — 批中暂停二选一弹窗：立即停止（默认聚焦回车触发）/ 等这批抓完、平实提示、当前批进度（025）
 - `webui/recruiter_activity.py` — 招聘者活跃判定域：两平台活跃事实归一化（Boss 文本值域映射/智联时间戳）、第 7 类档位判定与判定说明模板、未知 caveat 助手（028）
 - `scripts/zhilian/detail_fields.py` — 智联详情 staff 字段提取：lastOnlineTime 毫秒时间戳与状态文本的 JS 常量与合并纯函数（028）
-- `packaging/desktop_close.py` — 045 桌面关闭生命周期域：关闭前未完成流程查询、零岗位静默规则、确认后 `/api/task/finish` 落轮等待；宿主只注入 HTTP/确认/窗口状态动作
+- `packaging/desktop_close.py` — 045 桌面关闭生命周期域：关闭场景判定、两段式确认编排（closing 取消 → 前端弹框 → 回调收尾）、关闭守卫、运行中先暂停后落轮、更新重启静默收尾、宿主动作集合 CloseHost；宿主只注入 HTTP/窗口/前端通知动作（045 v2 更新）
+- `webui/src/composables/useCloseConfirm.ts` — 045 v2 关闭确认前端编排：壳侧 Promise 入口状态、场景呈现、等待态与防重入；浏览器模式不安装
+- `webui/src/components/CloseConfirmHost.vue` — 045 v2 关闭确认宿主：由 main.ts 独立 Vue 实例挂 body，桌面模式注册壳侧入口与就绪标记，渲染 kind=close 确认框
 - `packaging/window_state.py` — 窗口状态域：desktop_window.json schema 3 读写/旧版升级/工作区钳制、WindowStateTracker 普通矩形追踪、工作区枚举与窗口事件接线适配（029，b082 分支）
 - `scripts/boss/browser_registry.py` — 浏览器注册表域：8 家 Chromium 浏览器配置/探测/选择持久化（browser_selection.json）/手动路径校验/CDP 内核判定（029，b082 分支）
 - `webui/browser_registry_api.py` — 浏览器注册表路由域：探测清单/保存选择/路径校验端点（029，b082 分支）

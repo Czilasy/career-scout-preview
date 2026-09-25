@@ -264,3 +264,104 @@ class UnfinishedFinishApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertIsNone(response.get_json().get("snapshot_run_id"))
         self.assertEqual(self.store.list_history_rounds(), [])
+
+
+class RunningJobCountTests(unittest.TestCase):
+    """045 v2 FR-015：运行中的流程也必须给出已落盘岗位数。
+
+    v1 的内存 running 分支不带岗位数字段，关闭判定据此一律视为零岗位而
+    静默关闭——最该拦的场景反而没拦。本类锁定补字段后的口径。
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+        self.ctx = self.app.config["PIPELINE_CONTEXT"]
+
+    def _seed_db_run(self, run_id, count):
+        jobs = [
+            {
+                "job_id": f"j{index}", "platform_job_id": f"j{index}",
+                "title": f"岗位{index}",
+                "source_url": f"https://zhipin.example/j{index}.html",
+            }
+            for index in range(count)
+        ]
+        self.store.create_screening_run(
+            run_id,
+            source_count=max(count, 1),
+            profile_id="profile-a",
+            execution_params={
+                "platform": "boss",
+                "script_params": {"keyword": "Python"},
+            },
+        )
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape",
+        )
+        if count:
+            self.store.save_scrape_combo_result(
+                run_id, "python|shanghai", jobs, ["python|shanghai"],
+            )
+
+    def _seed_live_task(self, run_id, *, kind="scrape", source_task_id=""):
+        self.ctx.tasks[run_id] = {
+            "status": "running",
+            "kind": kind,
+            "progress": {"message": "抓取中"},
+            "stage": "scrape",
+            "logs": [],
+            "error": None,
+            "started_at": None,
+            "finished_at": None,
+            "platform": "boss",
+            "task_input_digest": "",
+            "profile_id": "profile-a",
+            "auto_screen": False,
+            "source_task_id": source_task_id,
+            "finalizing": False,
+        }
+
+    def test_running_scrape_reports_job_count(self):
+        self._seed_db_run("v2-scrape", 3)
+        self._seed_live_task("v2-scrape")
+        data = self.client.get(
+            "/api/latest-running-task?profile_id=profile-a"
+        ).get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["task_id"], "v2-scrape")
+        self.assertEqual(data.get("job_count"), 3)
+        self.assertEqual(data.get("scraped_count"), 3)
+
+    def test_running_screen_uses_source_scrape_count(self):
+        self._seed_db_run("v2-source", 2)
+        self._seed_db_run("v2-screen", 0)
+        self._seed_live_task(
+            "v2-screen", kind="ai_screen", source_task_id="v2-source",
+        )
+        data = self.client.get(
+            "/api/latest-running-task?profile_id=profile-a"
+        ).get_json()
+        self.assertEqual(data["task_id"], "v2-screen")
+        self.assertEqual(data.get("job_count"), 2)
+
+    def test_running_zero_jobs_reports_zero(self):
+        self._seed_db_run("v2-empty", 0)
+        self._seed_live_task("v2-empty")
+        data = self.client.get(
+            "/api/latest-running-task?profile_id=profile-a"
+        ).get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data.get("job_count"), 0)

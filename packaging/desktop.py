@@ -255,11 +255,6 @@ def wait_for_backend_ready(port, timeout=BACKEND_READY_TIMEOUT, http_get=None,
 # ---------------------------------------------------------------------------
 # 抓取取消（T039 / 合同 §6）
 # ---------------------------------------------------------------------------
-def decide_close(host, *, confirm):
-    """045 B102：模块级导出，测试与宿主统一使用 desktop_close.decide_close。"""
-    return _dc.decide_close(host, confirm=confirm)
-
-
 def cancel_running_tasks(app):
     """触发所有运行中任务的取消事件。
 
@@ -291,23 +286,19 @@ def cancel_running_tasks(app):
 # 默认 MessageBox
 # ---------------------------------------------------------------------------
 def _default_messagebox(title, text):
-    """跨平台消息框：Windows 用 ``MessageBoxW``，macOS 用 ``osascript``
-    原生对话框；平台机制不可用时回退 print。"""
+    """跨平台原生消息框：只服务于启动期错误与单实例提示。
+
+    045 v2：关闭确认已改由前端自绘组件承担，本函数不再承担任何关闭确认
+    职责——v1 曾为此在 Windows 上用 tkinter 自绘双按钮、在 macOS 上用
+    AppleScript 双按钮，两套实现都与应用主题不符，已整体移除。
+    """
     if sys.platform == "win32":
-        # 045 B102：Windows 原生 OK/Cancel 按钮文案固定为“确定/取消”，
-        # 不满足「结束并保存 / 取消」按钮文案要求，改用 TaskDialog
-        # 自定义按钮；TaskDialog 不可用（旧系统/清单缺失）才回退。
-        result = _win_task_dialog_confirm(title, text)
-        if result is not None:
-            return result
         try:
             import ctypes
 
-            # MB_OKCANCEL = 0x01；IDOK = 1，IDCANCEL = 2。
-            result = ctypes.windll.user32.MessageBoxW(
-                0, text, title, 0x00000001
-            )
-            return "cancel" if result == 2 else "ok"
+            # MB_OK = 0x00：提示类消息只需要一个确定按钮，不需要返回值。
+            ctypes.windll.user32.MessageBoxW(0, text, title, 0x00000000)
+            return
         except (OSError, AttributeError):
             pass
     elif sys.platform == "darwin":
@@ -316,74 +307,21 @@ def _default_messagebox(title, text):
 
             safe_title = title.replace("\\", "\\\\").replace('"', '\\"')
             safe_text = text.replace("\\", "\\\\").replace('"', '\\"')
-            result = subprocess.run(
+            subprocess.run(
                 [
                     "osascript",
                     "-e",
                     f'display dialog "{safe_text}" with title "{safe_title}"'
-                    ' buttons {"取消", "结束并保存"} default button "结束并保存"',
+                    ' buttons {"确定"} default button "确定"',
                 ],
                 check=False,
                 capture_output=True,
                 timeout=120,
             )
-            return "cancel" if result.returncode != 0 else "ok"
+            return
         except Exception:
-            return "cancel"
+            pass
     print(f"[{title}] {text}")
-    return "cancel"
-
-
-def _win_task_dialog_confirm(title, text):
-    """Windows 关闭确认：tkinter 自绘两按钮「结束并保存 / 取消」。
-
-    原生 MessageBoxW 的 OK 按钮文案固定为“确定”，不满足产品文案；
-    TaskDialog 需要 comctl32 v6 激活上下文，控制台进程默认没有。
-    tkinter 是标准库，按钮文案完全受控；返回 "ok" / "cancel"。
-    """
-    import queue
-    import tkinter as tk
-
-    result_q: queue.Queue[str] = queue.Queue()
-
-    def _choose(value: str) -> None:
-        result_q.put(value)
-        root.destroy()
-
-    try:
-        root = tk.Tk()
-    except Exception:
-        return None
-    root.title(title)
-    root.attributes("-topmost", True)
-    root.resizable(False, False)
-    root.protocol("WM_DELETE_WINDOW", lambda: _choose("cancel"))
-    frame = tk.Frame(root, padx=24, pady=18)
-    frame.pack()
-    tk.Label(frame, text=text, wraplength=360, justify="left").pack(
-        anchor="w", pady=(0, 16)
-    )
-    btn_row = tk.Frame(frame)
-    btn_row.pack(fill="x")
-    tk.Button(
-        btn_row, text="取消", width=12,
-        command=lambda: _choose("cancel"),
-    ).pack(side="right", padx=(8, 0))
-    tk.Button(
-        btn_row, text="结束并保存", width=14,
-        command=lambda: _choose("ok"),
-    ).pack(side="right")
-    # 固定合理尺寸并居中显示（pack 后取真实尺寸）
-    root.update_idletasks()
-    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-    root.geometry(f"+{(sw - 420) // 2}+{(sh - 220) // 2}")
-    root.minsize(420, 200)
-    root.after(15000, lambda: _choose("cancel") if not result_q.empty() else None)
-    root.mainloop()
-    try:
-        return result_q.get_nowait()
-    except queue.Empty:
-        return "cancel"
 
 
 def _run_flask_server(app, port):
@@ -433,10 +371,20 @@ class DesktopJsApi(_wi.DesktopWindowInteractionApi):
     """
 
     def __init__(self):
-        # run_desktop_shell 创建窗口后注入（保存状态 + 取消任务 + 关窗）
+        # 045 v2：自绘标题栏关闭键走两段式确认（等同系统关闭键）
+        self.close_handler = None
+        # 045 v2：应用内更新重启走静默退出，不弹确认（FR-017）
         self.quit_handler = None
+        # 045 v2：前端确认入口注册标志；页面挂载完成后由前端置位，
+        # 未就绪时关闭直接放行，避免用户关不掉窗口。
+        self.close_ready = False
         # 窗口创建后由 wire_desktop_api 注入（下划线属性，不被 API 枚举爬取）
         self._window = None
+
+    def register_close_ready(self):
+        """前端关闭确认入口已挂载，此后关闭才走确认流程。"""
+        self.close_ready = True
+        return {"ok": True}
 
     def window_minimize(self):
         win = self._window
@@ -458,15 +406,18 @@ class DesktopJsApi(_wi.DesktopWindowInteractionApi):
         return {"ok": True, "maximized": bool(_wc.is_maximized(win))}
 
     def window_close(self):
-        """关闭按钮：复用 quit_app 的既有优雅退出链路（等价关闭按钮）。"""
-        handler = getattr(self, "quit_handler", None)
+        """关闭按钮：走与系统关闭键相同的两段式确认（045 v2）。
+
+        需要确认时什么都不做，由前端弹框并把结果回传给桥；放行时才退出。
+        """
+        handler = getattr(self, "close_handler", None)
         if callable(handler):
             try:
                 handler()
                 return {"ok": True}
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
-        return {"ok": False, "error": "no_quit_handler"}
+        return {"ok": False, "error": "no_close_handler"}
 
     def open_external(self, url=""):
         target = str(url or "").strip() or EXTERNAL_REPO_URL
@@ -728,35 +679,6 @@ def run_desktop_shell(deps):
 
     def _save_window_state_for_close():
         try:
-            save_w, save_h, save_x, save_y, was_maximized = tracker.snapshot_for_save(
-                getattr(window, "width", None),
-                getattr(window, "height", None),
-                getattr(window, "x", None),
-                getattr(window, "y", None),
-            )
-            save_window_state(
-                save_w, save_h, save_x, save_y,
-                state_dir=state_dir, maximized=was_maximized,
-            )
-        except Exception:
-            pass
-
-    class _DesktopCloseHost:
-        latest_running_task = staticmethod(_latest_running_task_for_close)
-        finish_run = staticmethod(_finish_run_for_close)
-        save_window_state = staticmethod(_save_window_state_for_close)
-
-    def _on_closing():
-        should_close = _dc.decide_close(
-            _DesktopCloseHost(),
-            confirm=lambda: messagebox(
-                _dc.CLOSE_CONFIRM_TITLE,
-                _dc.CLOSE_CONFIRM_TEXT,
-            ) == "ok",
-        )
-        if not should_close:
-            return False  # 045 B102：取消必须返回 False，pywebview 才会取消关闭事件
-        try:
             # [diag] 关窗诊断日志（2026-09-02 最大化时序问题排查）：snapshot
             # 前记录原生窗口态 + tracker 状态，snapshot 后记录落盘结果，用于
             # 校验「最大化关窗 → 落盘普通矩形」链路是否按 029 契约工作。
@@ -793,22 +715,79 @@ def run_desktop_shell(deps):
             except Exception:
                 pass
             save_window_state(
-                save_w,
-                save_h,
-                save_x,
-                save_y,
-                state_dir=state_dir,
-                maximized=was_maximized,
+                save_w, save_h, save_x, save_y,
+                state_dir=state_dir, maximized=was_maximized,
             )
         except Exception:
             pass
+
+    def _pause_run_for_close(run_id):
+        """045 v2：运行中关闭先立即停止，不等当前这一批抓完。"""
+        try:
+            return _local_api_request(
+                f"/api/task/pause/{run_id}", method="POST",
+                payload={"mode": "immediate"}, timeout=20,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _log_close(message):
+        log_error(f"[close] {message}", state_dir=state_dir, logger=logger)
+
+    def _pause_run_for_close(run_id):
+        """045 v2：运行中关闭先立即停止，不等当前这一批抓完。"""
+        try:
+            return _local_api_request(
+                f"/api/task/pause/{run_id}", method="POST",
+                payload={"mode": "immediate"}, timeout=20,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _cancel_tasks_for_close():
         try:
             cancel_running_tasks(app)
         except Exception:
             pass
 
+
+    def _finalize_close():
+        """放行关闭后的收尾：落盘窗口状态并取消运行中任务（实现在关闭域）。"""
+        _close_bridge.finalize_close()
+
+    def _on_closing():
+        """窗口关闭事件。
+
+        045 v2 两段式：需要确认时返回 False 取消本次关闭，由前端弹出确认框
+        并把用户决定回传给桥；桥放行后再执行收尾。
+        """
+        if not getattr(js_api, "close_ready", False):
+            # 页面尚未加载完：不打扰用户，走原有兜底（任务取消后轮落
+            # paused，下次启动仍可接回）。
+            log_error(
+                "[close] 前端确认入口未就绪，直接关闭",
+                state_dir=state_dir, logger=logger,
+            )
+            _finalize_close()
+            return True
+        if not _close_bridge.on_closing():
+            return False
+        _finalize_close()
+        return True
+
     try:
         window = webview_module.create_window(**window_kwargs)
+        # 045 v2：窗口就绪后才组装关闭域宿主与桥（宿主需要 window 对象）。
+        _close_host = _dc.CloseHost(
+            latest_running_task=_latest_running_task_for_close,
+            pause_run=_pause_run_for_close,
+            finish_run=_finish_run_for_close,
+            save_window_state=_save_window_state_for_close,
+            cancel_tasks=_cancel_tasks_for_close,
+            log=_log_close,
+            window=window,
+        )
+        _close_bridge = _dc.CloseConfirmBridge(_close_host)
         _timing("create_window")
         # 创建后一次性注入 window/Tracker（下划线属性，避免被 API 枚举爬取）
         _wi.wire_desktop_api(
@@ -881,21 +860,38 @@ def run_desktop_shell(deps):
                 state_dir=state_dir, logger=logger,
             )
 
-        def _quit_and_cleanup():
-            """js_api.quit_app 的优雅退出：复用 closing 同样的清理逻辑。"""
+        def _close_from_titlebar():
+            """自绘标题栏关闭键：与系统关闭键走同一套两段式确认。
+
+            放行才退出；需要确认时由前端弹框，用户点「立即结束」后桥会
+            自行关窗，这里不做任何事。
+            """
             try:
-                _on_closing()
+                if _on_closing():
+                    os._exit(0)
+            except Exception:
+                os._exit(0)
+
+        def _quit_and_cleanup():
+            """应用内更新重启的静默退出：不弹关闭确认（FR-017）。
+
+            用户已经点过「立即更新」，再问一次既多余，又会卡住等待主进程
+            退出的替换脚本；这里只做静默落轮与清理。
+            """
+            try:
+                _close_bridge.finish_silently()
             except Exception:
                 pass
-            # 关闭按钮延迟修复（036 真机反馈「点 X 没反应」）：清理动作
-            # （保存窗口状态 + 取消任务）为毫秒级同步操作，完成后立即退出
-            # 进程，点 X 即关，不再人为延迟。前端 window_close 的 await 拿
-            # 不到返回值会静默（callWindow catch），无需等待回传。
+            try:
+                _finalize_close()
+            except Exception:
+                pass
             # 注：不调用 destroy，webview.start() 不会因本路径返回（WinForms
             # 事件循环不结束），必须由本处 os._exit 退出，替换脚本才能等到
             # 主进程 PID 消失并接棒替换。
             os._exit(0)
 
+        js_api.close_handler = _close_from_titlebar
         js_api.quit_handler = _quit_and_cleanup
         webview_module.start()
     except Exception as exc:

@@ -138,4 +138,70 @@ describe("PauseBatchChoiceDialog（025 B076 批中二选一，迷你档）", () 
     expect(wrapper.text()).not.toContain("第 2 批 / 共 4 批");
     expect(wrapper.get('[data-testid="pause-immediate"]').text()).toContain("马上存");
   });
+
+  describe("045 v2 关闭确认场景（kind=close）", () => {
+    it("只给一个动作键，不出现等待类选项", async () => {
+      const wrapper = mountDialog({ open: true, kind: "close" });
+      await nextTick();
+      expect(wrapper.find('[data-testid="pause-immediate"]').exists()).toBe(true);
+      expect(wrapper.get('[data-testid="pause-immediate"]').text()).toContain("立即结束");
+      expect(wrapper.find('[data-testid="pause-graceful"]').exists()).toBe(false);
+    });
+
+    it("说明任务正在进行中，并告知可先暂停", async () => {
+      const wrapper = mountDialog({ open: true, kind: "close" });
+      await nextTick();
+      const text = wrapper.text();
+      expect(text).toContain("还有任务正在进行中");
+      expect(text).toContain("这一批会丢弃");
+      expect(text).toContain("先暂停");
+    });
+
+    it("等待中动作键禁用并出现旋转指示", async () => {
+      const wrapper = mountDialog({ open: true, kind: "close", busy: true });
+      await nextTick();
+      const button = wrapper.get('[data-testid="pause-immediate"]');
+      expect(button.attributes("disabled")).toBeDefined();
+      expect(wrapper.find(".spin").exists()).toBe(true);
+    });
+
+    it("等待中仍可取消：右上关闭键保持可用", async () => {
+      const wrapper = mountDialog({ open: true, kind: "close", busy: true });
+      await nextTick();
+      const closeButton = wrapper.get(".dialog-header .icon-button");
+      expect(closeButton.attributes("disabled")).toBeUndefined();
+    });
+
+    it("选立即结束会发出 immediate", async () => {
+      const wrapper = mountDialog({ open: true, kind: "close" });
+      await nextTick();
+      await wrapper.get('[data-testid="pause-immediate"]').trigger("click");
+      expect(wrapper.emitted("choose")?.[0]).toEqual(["immediate"]);
+    });
+
+    it("等待中点击动作键不再发出事件", async () => {
+      const wrapper = mountDialog({ open: true, kind: "close", busy: true });
+      await nextTick();
+      await wrapper.get('[data-testid="pause-immediate"]').trigger("click");
+      expect(wrapper.emitted("choose")).toBeUndefined();
+    });
+  });
+
+  describe("045 v2 未运行关窗场景（kind=close_save）", () => {
+    it("沿用 v1 口径：结束并保存 / 取消，无等待类选项", async () => {
+      const wrapper = mountDialog({ open: true, kind: "close_save" });
+      await nextTick();
+      expect(wrapper.get('[data-testid="pause-immediate"]').text()).toContain("结束并保存");
+      expect(wrapper.find('[data-testid="pause-graceful"]').exists()).toBe(false);
+      expect(wrapper.text()).toContain("结束并保存结果");
+      expect(wrapper.text()).toContain("进历史");
+    });
+
+    it("无损动作走稳妥色，而不是危险色", async () => {
+      const wrapper = mountDialog({ open: true, kind: "close_save" });
+      await nextTick();
+      expect(wrapper.get('[data-testid="pause-immediate"]').classes()).toContain("is-graceful");
+      expect(wrapper.get('[data-testid="pause-immediate"]').classes()).not.toContain("is-immediate");
+    });
+  });
 });

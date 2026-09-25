@@ -120,12 +120,30 @@ def register_running_task_routes(app, ctx):
                 except ctx.operational_errors:
                     _mem_run = {}
                 if task["status"] in ("running", "queued"):
+                    # 045 v2 FR-015：运行中也必须给出已落盘岗位数，否则关闭判定
+                    # 会把它当成零岗位而静默关闭——最该拦的场景反而没拦。
+                    # 口径与 DB 兜底分支一致：AI 筛选取源抓取 run，其余取自身。
+                    _count_run_id = (
+                        str(task.get("source_task_id") or "")
+                        if task.get("kind") == "ai_screen"
+                        else task_id
+                    )
+                    try:
+                        _live_job_count = (
+                            ctx.store.count_scrape_run_jobs(_count_run_id)
+                            if _count_run_id
+                            else 0
+                        )
+                    except ctx.operational_errors:
+                        _live_job_count = 0
                     return jsonify({
                         "ok": True,
                         "has_task": True,
                         "task_id": task_id,
                         "kind": task.get("kind", ""),
                         "status": task["status"],
+                        "job_count": _live_job_count,
+                        "scraped_count": _live_job_count,
                         "progress": task["progress"],
                         "stage": task.get("stage") or (task.get("progress") or {}).get("stage", ""),
                         "logs": list(task["logs"][-LOG_TAIL_LINES:]),
