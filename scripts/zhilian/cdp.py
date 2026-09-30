@@ -90,6 +90,30 @@ def _http_json(port: int, path: str, *, method: str = "GET") -> Any:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _http_close(port: int, path: str) -> None:
+    """Call a CDP cleanup endpoint without assuming a JSON response."""
+    url = f"http://127.0.0.1:{port}{path}"
+    req = urllib.request.Request(url, method="PUT")
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        body = resp.read() or b""
+        status = getattr(resp, "status", getattr(resp, "code", "unknown"))
+        headers = getattr(resp, "headers", None)
+        content_type = "unknown"
+        if headers is not None:
+            try:
+                content_type = headers.get_content_type() or content_type
+            except Exception:
+                try:
+                    content_type = headers.get("Content-Type") or content_type
+                except Exception:
+                    content_type = "unknown"
+                    _logger.debug("CDP close Content-Type 读取失败，按 unknown 处理")
+        _logger.debug(
+            f"CDP close response status={status} content_type={content_type} "
+            f"body_len={len(body)}"
+        )
+
+
 def _is_zhilian_page_url(url: str | None) -> bool:
     """Return whether a browser page belongs to the Zhilian domain."""
 
@@ -221,10 +245,9 @@ def _create_background_tab(port: int) -> tuple[Any, str]:
 def _close_background_tab(port: int, target_id: str) -> None:
     """关闭池 tab（HTTP 端点；page 级 WS 会话无 Target 域命令）。"""
     try:
-        _http_json(
+        _http_close(
             port,
             f"/json/close/{urllib.parse.quote(target_id, safe='')}",
-            method="PUT",
         )
     except Exception:
         _logger.debug("后台标签关闭请求失败（best-effort 忽略）", exc_info=True)

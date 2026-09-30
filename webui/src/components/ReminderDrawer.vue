@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------------------
 import { nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { cleanJobLocation } from "../location";
+import { platformLabel } from "../discovery";
 import { LoaderCircle, X } from "@lucide/vue";
 import {
   JOB_REMINDER_LIST_LIMIT_MAX,
@@ -182,10 +183,6 @@ async function runAdvice(item: JobReminderItem): Promise<void> {
 function openUrl(item: JobReminderItem): string {
   if (!item.can_open) return "";
   return safeCanonicalUrl(item.platform, item.canonical_url) ?? "";
-}
-
-function platformLabel(platform: JobReminderItem["platform"]): string {
-  return platform === "boss" ? "BOSS" : "智联";
 }
 
 function adviceActionLabel(action: JobAdvice["action"]): string {

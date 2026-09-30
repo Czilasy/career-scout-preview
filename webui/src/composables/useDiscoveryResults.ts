@@ -53,13 +53,29 @@ import {
   shouldConfirmNationalScope,
 } from "../discovery";
 import { setThemePlatform } from "../composables/useTheme";
-import type { MergedLatestResult } from "./useDiscoveryState";
-import { liveTaskStep, type StepId } from "./useDiscoveryState";
+import type { MergedLatestResult, FlowTaskLine } from "./useDiscoveryState";
+import { hasLiveTaskState as hasLiveTaskStateInTrunk, liveTaskStep, type StepId } from "./useDiscoveryState";
 import { useDiscoverySceneState } from "./useDiscoverySceneState";
 import type { SceneIdentity } from "../types";
 
-export function useDiscoveryResults(state: DiscoveryState, deps: ResultsNeeds) {
+type CurrentFlowResultsFetcher = (flowId: string) => Promise<{
+  flow_id?: string;
+  selection?: string;
+  status?: string;
+  tracks?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+} | null>;
+type CurrentFlowSelection = Ref<string | null | undefined>;
+
+export function useDiscoveryResults(
+  state: DiscoveryState,
+  deps: ResultsNeeds,
+  currentFlowId?: Ref<string | null | undefined>,
+  fetchFlowResults?: CurrentFlowResultsFetcher,
+  currentFlowSelection?: CurrentFlowSelection,
+) {
   const { activeCategory, activeStep, analysisReady, archiveHistoryLatest, currentRoundStatus, draftPlatform, exportBusy, feedbackBusyIds, groups, hideHistory, historyBackToLatest, historyMode, historyOpen, historyRound, interruptedRunId, isScrapedOnly, jdBusyIds, lifecycleDialogJob, lifecycleDialogOpen, locationDraft, pausedRunId, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, profileFacts, profileId, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, rejectedIds, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resultsBootstrapPending, returningFromHistory, resumeAnalysisLandOnReturn, resumeAnalysisPhase, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, screenTaskId, showHistory, unfinishedWorkflowRestored, workflowEpoch } = state;
+  const navigateStep = (step: string, options?: Parameters<DiscoveryState["navigateStep"]>[1]) => state.navigateStep(step, options);
   const sceneStore = useDiscoverySceneState();
 
   function currentSceneIdentity(): SceneIdentity {
@@ -84,30 +100,65 @@ export function useDiscoveryResults(state: DiscoveryState, deps: ResultsNeeds) {
   // specs/001 .../contracts/platform-schema.md「最近结果加载」）。
   // setDraftPlatform 在草稿已是该平台时直接返回，不会清任何现场。
   let draftAlignedToResult = false;
+  // A Flow result request can outlive a mode/profile switch without changing
+  // the legacy workflow epoch.  Keep a request-local epoch for this boundary.
+  let flowResultRequestEpoch = 0;
+  // 流程结果读取失败的提示按流程去重：自动重试不重复说话，成功读取后重置。
+  let flowResultFailureNotice = "";
+
+  function readCurrentFlowId(): string {
+    return String(currentFlowId?.value || "").trim();
+  }
+
+  function readCurrentFlowSelection(): string {
+    return String(currentFlowSelection?.value || "").trim();
+  }
+
+  function flowRequestStillCurrent(
+    requestEpoch: number,
+    requestedFlowId: string,
+    requestedSelection: string,
+  ): boolean {
+    if (requestEpoch !== flowResultRequestEpoch) return false;
+    if (readCurrentFlowId() !== requestedFlowId) return false;
+    return !currentFlowSelection || readCurrentFlowSelection() === requestedSelection;
+  }
 
 
-function setPipelineResult(result: PipelineResult) {
+function setPipelineResult(result: PipelineResult, opts?: { preservePresentation?: boolean }) {
   if (historyMode.value) return;
   pipelineResult.value = result;
   // 后端权威优先；即时 finish 响应或旧快照缺 platform 时按结果级平台回填。
   const platform = (result as PipelineResult & { platform?: string }).platform || "";
   if (platform) {
-    if (platform === "boss" || platform === "zhilian") {
+    const flowSelection = String((result as PipelineResult & { flow_selection?: string }).flow_selection || "");
+    const inParallelFlow = flowSelection ? flowSelection === "all" : Boolean(String(currentFlowId?.value || "").trim());
+    if (inParallelFlow) {
+      // A Flow result is a merged all-platform projection; the first track
+      // must not brand the page while the other track is still arriving.
+      setThemePlatform("all");
+    } else if (platform === "boss" || platform === "zhilian") {
       // 结果主题必须跟随当前结果快照，不读取新任务草稿平台。
       platformState.setResultPlatform(platform);
       setThemePlatform(platform);
     }
-    for (const list of [result.jobs, result.dropped]) {
-      if (!Array.isArray(list)) continue;
-      for (const job of list) {
-        if (job && typeof job === "object" && !(job as JobItem).platform) {
-          (job as JobItem).platform = platform as JobItem["platform"];
+    // Flow results already carry the Track-scoped platform from the backend.
+    // Only legacy single-platform projections get the result-level fallback;
+    // never infer a platform for an all-platform Flow from its first Track.
+    if (!inParallelFlow) {
+      for (const list of [result.jobs, result.dropped]) {
+        if (!Array.isArray(list)) continue;
+        for (const job of list) {
+          if (job && typeof job === "object" && !(job as JobItem).platform) {
+            (job as JobItem).platform = platform as JobItem["platform"];
+          }
         }
       }
     }
   }
   // specs/004：新 run 结果替换完成 → 递增 resultEpoch，通知 JobWorkspace 重置筛选/排序。
-  resultEpoch.value += 1;
+  // Flow 同轮合流是原地追加，不重建岗位列表，因此不递增。
+  if (!opts?.preservePresentation) resultEpoch.value += 1;
   const sourceRunId = (result as Record<string, unknown>).source_run_id;
   if (typeof sourceRunId === "string") pipelineResultRunId.value = sourceRunId;
   analysisReady.value = true;
@@ -117,34 +168,45 @@ function setPipelineResult(result: PipelineResult) {
   // 启动恢复流程被活任务拦下（busy 门 / maybeAutoStartNewRound 提前返回）时，
   // 这个标记原本没有任何清除点，会一直挡住岗位列表（要刷新一次才恢复）。
   resultsBootstrapPending.value = false;
-  const groups = partitionPipelineResult(result);
-  let nextCategory: "matched" | "uncertain" | "unmatched" | "dropped" = "dropped";
-  if (groups.matched.length) nextCategory = "matched";
-  else if (groups.uncertain.length) nextCategory = "uncertain";
-  else if (groups.unmatched.length) nextCategory = "unmatched";
-  activeCategory.value = nextCategory;
-}
-
-
-function hasLiveTaskState(): boolean {
-  if (pausedRunId.value || interruptedRunId.value) return true;
-  const liveStatuses = new Set(["running", "queued", "paused", "failed", "interrupted"]);
-  for (const snap of [screenSnapshot.value, scrapeSnapshot.value, recrawlSnapshot.value]) {
-    if (snap && liveStatuses.has(String(snap.status))) return true;
+  if (!opts?.preservePresentation) {
+    const groups = partitionPipelineResult(result);
+    let nextCategory: "matched" | "uncertain" | "unmatched" | "dropped" = "dropped";
+    if (groups.matched.length) nextCategory = "matched";
+    else if (groups.uncertain.length) nextCategory = "uncertain";
+    else if (groups.unmatched.length) nextCategory = "unmatched";
+    activeCategory.value = nextCategory;
   }
-  return false;
 }
 
 
-async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean }) {
+// 判活（问题 A「此刻有没有活体 worker」）只有一份口径，落在树干
+// useDiscoveryState.hasLiveTaskState：它认 Flow 的活体轨道（页面已投影时），也认暂停与
+// 运行中的任务快照。结果层不再自带一套状态白名单，否则「全部」在跑、领先平台已出结果时
+// 这里会判成「没有活任务」，首屏对齐清掉本轮现场。
+// 这里只补树干未覆盖的一个事实：本轮任务被中断、等待用户接回。
+// 注意：「这一轮还没结束」（落点 / 回到最新）不是这里问的问题，用 liveTaskStep(state)。
+function hasLiveTaskState(): boolean {
+  return hasLiveTaskStateInTrunk(state) || Boolean(interruptedRunId.value);
+}
+
+
+async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean; preservePresentation?: boolean }) {
   // B068：刷新接回未完成轮次时，04 尚未出现，旧结果不能覆盖 02/03 的当前状态。
   if (unfinishedWorkflowRestored.value && !resultsPageSeen.value) return;
   // 暂停/中断任务未结束，不得把暂停时保存的安全网快照当作结果加载，
   // 否则 resultLoaded 被误置 true、04 结果页对用户开放造成「任务还在跑」误解。
   if (interruptedRunId.value || pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
   const requestEpoch = workflowEpoch.value;
-  const fetched = await fetchMergedLatestResult();
+  const flowRequestEpoch = ++flowResultRequestEpoch;
+  const requestedFlowId = readCurrentFlowId();
+  const requestedSelection = readCurrentFlowSelection();
+  const fetched = requestedFlowId
+    ? await fetchCurrentFlowResult(requestedFlowId, () => flowRequestStillCurrent(
+      flowRequestEpoch, requestedFlowId, requestedSelection,
+    ))
+    : await fetchMergedLatestResult();
   if (requestEpoch !== workflowEpoch.value) return;
+  if (!flowRequestStillCurrent(flowRequestEpoch, requestedFlowId, requestedSelection)) return;
   if (!fetched) return;
   const { newer } = fetched;
   if (hasLiveTaskState() && newer.data.scrape_task_id && scrapeTaskId.value && newer.data.scrape_task_id !== scrapeTaskId.value) return;
@@ -155,7 +217,7 @@ async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean }) {
 
 async function applyFetchedLatestResult(
   fetched: MergedLatestResult,
-  opts?: { skipTerminalSnapshot?: boolean },
+  opts?: { skipTerminalSnapshot?: boolean; preservePresentation?: boolean },
   live = hasLiveTaskState(),
 ) {
   const { merged, newer } = fetched;
@@ -175,7 +237,28 @@ async function applyFetchedLatestResult(
     }
   }
   pipelineResultRunId.value = newer.data.source_run_id || "";
-  setPipelineResult(merged);
+  if (opts?.preservePresentation) {
+    const previous = pipelineResult.value;
+    if (previous) {
+      const previousJobs = Array.isArray(previous.jobs) ? previous.jobs : [];
+      const nextJobs = Array.isArray(merged.jobs) ? merged.jobs : [];
+      const identity = (job: JobItem): string => {
+        const platform = String(job.platform || "");
+        const platformJobId = job.platform_job_id || job.job_id || job.id || job.canonical_url || "";
+        return `${platform}:${String(platformJobId)}`;
+      };
+      const seen = new Set<string>();
+      merged.jobs = [...previousJobs, ...nextJobs].filter((job) => {
+        const key = identity(job);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+    setPipelineResult(merged, { preservePresentation: true });
+  } else {
+    setPipelineResult(merged);
+  }
   // B038：最新轮可能是"已抓取，未筛选"，原样透传驱动展示模式。
   currentRoundStatus.value = newer.data.status === "scraped_only" ? "scraped_only" : "screened";
   if (isScrapedOnly.value) activeCategory.value = "matched";
@@ -188,12 +271,24 @@ async function applyFetchedLatestResult(
     if (newer.data.round_context) deps.roundFlow.restoreRoundContext(newer.data.round_context);
   }
   if (pausedRunId.value) return;
+  // 任务仍在跑（含 Flow 的两条平台线）时，02/03 画面归实时进度所有：
+  // 这里不得再合成「上次抓取已完成」式终态快照把它顶掉。
+  if (live) return;
   // 重抓任务恢复：结果已加载供 04 查看，但 03 页应显示重抓自身进度，
   // 不伪造"上次已完成"快照。
   if (opts?.skipTerminalSnapshot) return;
   const snapshotStatus = (newer.data.status === "completed_with_pending" || newer.data.status === "partial")
     ? "completed_with_pending"
     : "completed";
+  const flowTracks = Array.isArray((merged as PipelineResult & { flow_tracks?: unknown[] }).flow_tracks)
+    ? (merged as PipelineResult & { flow_tracks?: Array<Record<string, unknown>> }).flow_tracks || []
+    : [];
+  const isFailedTrack = (track: Record<string, unknown>): boolean => ["failed", "unavailable", "interrupted"].includes(String(track.status || "")) || track.unfinished_ai_screening === true;
+  const failedFlowTrack = flowTracks.find((track) => isFailedTrack(track) && !["scrape", "search", "pending"].includes(String(track.stage || "")))
+    || flowTracks.find(isFailedTrack);
+  const failedStage = String(failedFlowTrack?.stage || "");
+  const screenFailure = Boolean(failedFlowTrack && !["scrape", "search", "pending"].includes(failedStage));
+  const failureMessage = String(failedFlowTrack?.message || failedFlowTrack?.reason || failedFlowTrack?.error || "AI 筛选未完成");
   scrapeSnapshot.value = {
     status: snapshotStatus, stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
     started_at: newer.data.started_at,
@@ -201,10 +296,12 @@ async function applyFetchedLatestResult(
     integrity: newer.data.integrity || merged.integrity || null,
   };
   screenSnapshot.value = {
-    status: snapshotStatus, stage: "done", progress: { message: "上次 AI 筛选已完成" }, logs: [],
+    status: screenFailure ? "failed" : snapshotStatus, stage: screenFailure ? failedStage || "screen" : "done",
+    progress: { message: screenFailure ? failureMessage : "上次 AI 筛选已完成" }, logs: [],
     started_at: newer.data.started_at,
     finished_at: newer.data.finished_at,
     integrity: newer.data.integrity || merged.integrity || null,
+    ...(screenFailure ? { error: failureMessage, reason: failureMessage } : {}),
   };
   const execConfig = newer.data.execution_config || {};
   scrapeSnapshot.value.execution_config = execConfig;
@@ -234,47 +331,96 @@ async function applyFetchedLatestResult(
   // 启动恢复、从历史/灵动岛跳回最新、以后新增的任何入口都经本函数，
   // 禁止再按入口各打一份补丁（缺补丁的入口会退回「已完成 0」）。
   if (!live && !opts?.skipTerminalSnapshot) {
-    await syncRestoredRoundCounts(
-      String(newer.data.scrape_task_id || ""),
-      String(newer.data.source_run_id || ""),
-    );
+    // 合并结果（一个轮次挂多条平台任务线）按全部任务线汇总计数；单线结果仍从
+    // newer.data 自带的任务编号取，两条加载路径都一定给得出结果轮编号：旧接口
+    // 顶层没有 screen_run_id，只能用 source_run_id。少一个来源就会在这里静默
+    // 跳过，刷新恢复后筛选面板退回「已完成 0」。
+    const lines = fetched.flowTaskLines?.length
+      ? fetched.flowTaskLines
+      : [restoredRoundLine(newer.data)];
+    await syncRestoredRoundCounts(lines);
   }
 }
 
+
+/** 单线结果（旧接口与非 Flow 路径）的任务线身份。 */
+function restoredRoundLine(data: MergedLatestResult["newer"]["data"]): FlowTaskLine {
+  return {
+    scrapeRunId: String(data.scrape_task_id || ""),
+    screenRunId: String(
+      (data as typeof data & { screen_run_id?: string }).screen_run_id
+      || data.source_run_id
+      || "",
+    ),
+  };
+}
+
 // 039：按该轮真实任务快照补齐面板计数与失败留痕；取不到时保持合成值，不阻塞首屏。
-async function syncRestoredRoundCounts(scrapeRunId: string, screenRunId: string) {
+// 计数口径只有一份：一个轮次挂几条任务线就把这几条线加起来，绝不允许用任何一条
+// 单平台线的快照覆盖合并轮次（否则第 3 步面板与第 4 步真实岗位数对不上）。
+async function syncRestoredRoundCounts(lines: FlowTaskLine[]) {
   const epoch = workflowEpoch.value;
-  const targets: Array<[typeof scrapeSnapshot, string]> = [
-    [scrapeSnapshot, scrapeRunId],
+  // Flow 切换不动 workflowEpoch，所以写回必须自己认流程身份这条已有的事实。
+  const flowId = readCurrentFlowId();
+  const targets: Array<[typeof scrapeSnapshot, string[]]> = [
+    [scrapeSnapshot, lines.map((line) => line.scrapeRunId).filter(Boolean)],
   ];
   // 纯抓取轮没有筛选任务。这里的第二个编号只是结果轮编号，不能拿它
   // 去读取一份旧的筛选快照，否则会把“已完成 0 / N”覆盖成旧的 2 / 2。
   if (currentRoundStatus.value !== "scraped_only") {
-    targets.push([screenSnapshot, screenRunId && screenRunId !== scrapeRunId ? screenRunId : ""]);
+    targets.push([screenSnapshot, lines
+      .map((line) => (line.screenRunId && line.screenRunId !== line.scrapeRunId ? line.screenRunId : ""))
+      .filter(Boolean)]);
   }
-  for (const [target, runId] of targets) {
-    if (!runId || !target.value) continue;
-    let state: Partial<ApiTaskSnapshot>;
-    try {
-      // Spec041 返工：任务状态查询带当前画像，后端按归属校验。
-      state = await apiRequest<Partial<ApiTaskSnapshot>>(
-        `/api/task-state/${encodeURIComponent(runId)}`
-        + (profileId.value ? `?profile_id=${encodeURIComponent(profileId.value)}` : ""));
-    } catch {
-      continue; // 取不到真实快照时保持合成值，不阻塞首屏
+  for (const [target, runIds] of targets) {
+    if (!runIds.length || !target.value) continue;
+    const states: Partial<ApiTaskSnapshot>[] = [];
+    let incomplete = false;
+    for (const runId of runIds) {
+      let taskState: Partial<ApiTaskSnapshot> | null | undefined;
+      try {
+        // Spec041 返工：任务状态查询带当前画像，后端按归属校验。
+        taskState = await apiRequest<Partial<ApiTaskSnapshot>>(
+          `/api/task-state/${encodeURIComponent(runId)}`
+          + (profileId.value ? `?profile_id=${encodeURIComponent(profileId.value)}` : ""));
+      } catch {
+        incomplete = true; // 任一条线取不到就整体保持合成值，不发布半个汇总
+        break;
+      }
+      // 期间切轮/开新一轮或换到另一条流程：迟到的快照不许落进当前现场。
+      if (epoch !== workflowEpoch.value || readCurrentFlowId() !== flowId) return;
+      if (!taskState || typeof taskState !== "object") {
+        incomplete = true; // 空响应同样保持合成值
+        break;
+      }
+      states.push(taskState);
     }
-    if (epoch !== workflowEpoch.value) return; // 期间切轮/开新一轮：不覆盖
+    if (incomplete || !states.length) continue;
+    // 写回时取当前那份快照对象：请求期间实时进度可能已经换成新的快照。
     const snap = target.value;
     if (!snap) continue;
-    const total = Number(state.total || 0);
+    const sum = (pick: (state: Partial<ApiTaskSnapshot>) => number) => states.reduce(
+      (total, state) => total + Number(pick(state) || 0),
+      0,
+    );
+    const total = sum((state) => Number(state.total || 0));
     if (total > 0) snap.total = total;
-    snap.success_count = Number(state.success_count || 0);
-    snap.fail_count = Number(state.fail_count || 0);
-    snap.unstarted_count = Number(state.unstarted_count || 0);
-    snap.pending_count = Number(state.pending_count || 0);
-    if (state.source_total != null) snap.source_total = Number(state.source_total || 0);
-    if (state.scraped_count != null) snap.scraped_count = Number(state.scraped_count || 0);
-    if (state.combo_issues) snap.combo_issues = state.combo_issues;
+    snap.success_count = sum((state) => Number(state.success_count || 0));
+    snap.fail_count = sum((state) => Number(state.fail_count || 0));
+    snap.unstarted_count = sum((state) => Number(state.unstarted_count || 0));
+    snap.pending_count = sum((state) => Number(state.pending_count || 0));
+    const sourceTotals = states.filter((state) => state.source_total != null);
+    if (sourceTotals.length) {
+      snap.source_total = sum((state) => Number(state.source_total || 0));
+    }
+    const scrapedCounts = states.filter((state) => state.scraped_count != null);
+    if (scrapedCounts.length) {
+      snap.scraped_count = sum((state) => Number(state.scraped_count || 0));
+    }
+    const comboIssues = states.flatMap(
+      (state) => (Array.isArray(state.combo_issues) ? state.combo_issues : []),
+    );
+    if (comboIssues.length) snap.combo_issues = comboIssues;
   }
 }
 
@@ -284,6 +430,8 @@ async function syncRestoredRoundCounts(scrapeRunId: string, screenRunId: string)
 
 async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
   try {
+    const flowId = String(currentFlowId?.value || "").trim();
+    if (flowId) return await fetchCurrentFlowResult(flowId, () => readCurrentFlowId() === flowId);
     const requestEpoch = workflowEpoch.value;
     const query = deps.props.profileId
       ? `?profile_id=${encodeURIComponent(deps.props.profileId)}`
@@ -383,10 +531,151 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
   }
 }
 
+/** Read the active B096 Flow projection without falling back to global latest results. */
+async function fetchCurrentFlowResult(
+  flowId: string,
+  isStillCurrent: () => boolean,
+): Promise<MergedLatestResult | null> {
+  let payload: Awaited<ReturnType<NonNullable<CurrentFlowResultsFetcher>>> | null | undefined = null;
+  try {
+    payload = fetchFlowResults
+      ? await fetchFlowResults(flowId)
+      : (await apiRequest<{
+        ok?: boolean;
+        results?: {
+          flow_id?: string;
+          selection?: string;
+          status?: string;
+          tracks?: Array<Record<string, unknown>>;
+          jobs?: JobItem[];
+          screened_count?: number;
+        };
+      }>(
+        `/api/flows/${encodeURIComponent(flowId)}/results?profile_id=${encodeURIComponent(deps.props.profileId)}`,
+      )).results;
+  } catch {
+    // 与旧轮次恢复同一口径：读不到就说话，不能让用户对着一张空结果页自己猜。
+    // 同一条流程的自动重试只说一次，换流程重新提示；错误态不留在页面里。
+    if (flowResultFailureNotice !== flowId) {
+      flowResultFailureNotice = flowId;
+      deps.notify("这次的结果没能载入，请稍后重试", "warning");
+    }
+    return null;
+  }
+  if (flowResultFailureNotice === flowId) flowResultFailureNotice = "";
+  if (!payload) return null;
+  // The endpoint is scoped by the requested Flow.  A response for another
+  // Flow is stale even when its shape is otherwise valid.
+  if (String(payload.flow_id || "").trim() !== flowId) return null;
+  const tracks = Array.isArray(payload.tracks) ? payload.tracks : [];
+  // 先算后验再提交：本轮的结果来源先在本地聚合，等调用方确认这条响应仍然新鲜
+  // 才落进 state。迟到的 Flow 响应可以把结果整条丢掉，却不能顺手把上一流程的
+  // run 写成「当前来源」——「重抓待确认」就按它定位 source_run_id。
+  const nextResultRunIds = { boss: "", zhilian: "" };
+  const parts = tracks.filter((track) => track.platform === "boss" || track.platform === "zhilian").map((track, index) => {
+    const platform = track.platform as "boss" | "zhilian";
+    const jobs = Array.isArray(track.jobs) ? track.jobs as JobItem[] : [];
+    const dropped = Array.isArray(track.dropped) ? track.dropped as JobItem[] : [];
+    const resultRunId = String(track.result_run_id || "");
+    // Each platform owns its result source.  Keep the result id separate from
+    // scrape/screen task ids so feedback and recrawl never fall back to a
+    // neighboring Flow's latest run.
+    nextResultRunIds[platform] = resultRunId;
+    const sourceRunId = resultRunId || String(track.screen_run_id || track.scrape_run_id || "");
+    for (const list of [jobs, dropped]) {
+      for (const job of list) {
+        if (job && typeof job === "object") job._result_run_id = sourceRunId;
+      }
+    }
+    return {
+      platform,
+      track,
+      index,
+      data: {
+        source_run_id: sourceRunId,
+        scrape_task_id: String(track.scrape_run_id || ""),
+        screen_run_id: String(track.screen_run_id || ""),
+        status: String(track.status || payload.status || ""),
+        result: {
+          jobs,
+          dropped,
+          total_scraped: jobs.length + dropped.length,
+          total_kept: jobs.length,
+          total_matched: jobs.filter((job) => job.verdict === "match").length,
+          total_dropped: dropped.length,
+          platform,
+          flow_track: track,
+        } as PipelineResult & { flow_track: Record<string, unknown> },
+      },
+    };
+  });
+  const merged: PipelineResult & { flow_id?: string; flow_selection?: string; flow_tracks?: Array<Record<string, unknown>> } = {
+    platform: parts[0]?.platform || state.draftPlatform.value,
+    flow_selection: payload.selection,
+    jobs: parts.flatMap((part) => part.data.result?.jobs || []),
+    dropped: parts.flatMap((part) => part.data.result?.dropped || []),
+    total_scraped: parts.reduce((count, part) => count + Number(part.data.result?.total_scraped || 0), 0),
+    total_kept: parts.reduce((count, part) => count + Number(part.data.result?.total_kept || 0), 0),
+    total_matched: parts.reduce((count, part) => count + Number(part.data.result?.total_matched || 0), 0),
+    total_dropped: parts.reduce((count, part) => count + Number(part.data.result?.total_dropped || 0), 0),
+    flow_id: flowId,
+    flow_tracks: tracks,
+  };
+  const timestamp = (value: unknown): number => {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && value.trim()) return numeric;
+      const parsed = Date.parse(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return 0;
+  };
+  const metadataPart = [...parts]
+    .filter((part) => Boolean(part.data.result?.jobs?.length || part.data.result?.dropped?.length || part.track.result_run_id))
+    .sort((left, right) => {
+      const resultPriority = Number(Boolean(right.track.result_run_id)) - Number(Boolean(left.track.result_run_id));
+      if (resultPriority) return resultPriority;
+      const leftTrack = left.track as Record<string, unknown>;
+      const rightTrack = right.track as Record<string, unknown>;
+      const leftFinished = timestamp(leftTrack.finished_at ?? leftTrack.completed_at ?? leftTrack.updated_at);
+      const rightFinished = timestamp(rightTrack.finished_at ?? rightTrack.completed_at ?? rightTrack.updated_at);
+      return rightFinished - leftFinished || right.index - left.index;
+    })[0] || parts[0];
+  if (metadataPart) merged.platform = metadataPart.platform;
+  // 本轮全部任务线：合并结果的计数按这些线一起汇总，不挑任何单平台那一条。
+  const flowTaskLines: FlowTaskLine[] = parts.map((part) => ({
+    scrapeRunId: String(part.track.scrape_run_id || ""),
+    screenRunId: String(part.track.screen_run_id || part.track.result_run_id || ""),
+  }));
+  // 提交点：只有仍然新鲜的响应才允许改写结果来源；过期响应整条留给调用方丢弃。
+  if (isStillCurrent()) resultRunIds.value = nextResultRunIds;
+  if (!metadataPart) {
+    return {
+      merged,
+      newer: {
+        platform: merged.platform!,
+        data: { status: payload.status, result: { jobs: [], dropped: [] } },
+      },
+      flowTaskLines,
+    };
+  }
+  return {
+    merged,
+    newer: { platform: metadataPart.platform, data: metadataPart.data },
+    platformStatuses: Object.fromEntries(parts.map((part) => [part.platform, part.data.status || ""])),
+    flowTaskLines,
+  };
+}
+
 
 async function clearLatestResult() {
   try {
-    await archiveHistoryLatest();
+    const flowId = String(currentFlowId?.value || "").trim();
+    // Legacy result projections have no owned Flow to archive.  Leave that
+    // read-only history in place; only a real current Flow may trigger the
+    // scoped archive endpoint.
+    if (flowId) await archiveHistoryLatest(flowId);
     return true;
   } catch (error) {
     deps.notify(userFacingMessage(error, "归档旧结果失败，已停止开始新一轮"), "error");
@@ -460,7 +749,12 @@ function enterHistoryRound(detail: HistoryRoundDetail) {
   // 只改"结果平台 + 品牌色"用于展示；草稿平台保持当前轮自己的值（不改写）。
   platformState.setResultPlatform(detail.platform);
   setThemePlatform(detail.platform);
-  activeStep.value = "results";
+  // 用户主动点开某一轮是一次显式导航：手动持有期不得把它拦在原地，否则历史
+  // 数据已装载、页面却停在旧步骤，而「回到最新」入口只在结果页渲染 —— 用户
+  // 既看不到刚点开的轮次也退不出。Flow 投影的持有期保护不受影响：历史模式
+  // 下除结果页外的导航仍被 navigateStep 的历史守卫拒绝。
+  state.setNavigationManualHold(false);
+  navigateStep("results", { source: "system" });
   // B038：历史轮原始状态透传，scraped_only 轮进入"待筛选"展示模式。
   currentRoundStatus.value = detail.status;
   if (isScrapedOnly.value) activeCategory.value = "matched";
@@ -513,17 +807,17 @@ async function returnToLatest(): Promise<StepId | null> {
     resultEpoch.value += 1;
     currentRoundStatus.value = "";
     // 没有可恢复结果时也要回到当前轮平台，不能把历史轮的品牌色留在新轮页面。
-    setThemePlatform(restorePlatform);
+    setThemePlatform(currentFlowId?.value ? "all" : restorePlatform);
 
     if (liveStep) {
       scrapeCompleted.value = liveStep === "screen";
-      activeStep.value = liveStep;
+      navigateStep(liveStep, { source: "system" });
       return liveStep;
     }
     // 分析中/失败时，拉到的可能还是旧轮结果；分析状态优先，不能误进第四页。
     if (fetched && (resumePhase === "idle" || resumePhase === "succeeded")) {
       await applyFetchedLatestResult(fetched);
-      activeStep.value = "results";
+      navigateStep("results", { source: "system" });
       return "results";
     }
 
@@ -533,7 +827,7 @@ async function returnToLatest(): Promise<StepId | null> {
     if (resumePhase !== "idle") {
       resumeAnalysisLandOnReturn.value?.();
       const step: StepId = resumePhase === "succeeded" ? "search" : "upload";
-      activeStep.value = step;
+      navigateStep(step, { source: "system" });
       return step;
     }
 
@@ -541,7 +835,7 @@ async function returnToLatest(): Promise<StepId | null> {
     // 不把一个空的 04 当成“最新结果”（当前轮没有结果时落真实进度页）。
     analysisReady.value = false;
     scrapeCompleted.value = false;
-    activeStep.value = "upload";
+    navigateStep("upload", { source: "system" });
     return "upload";
   } finally {
     returningFromHistory.value = false;

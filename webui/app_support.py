@@ -9,6 +9,7 @@ from webui import ai as ai_service
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from pathlib import Path
 from flask import jsonify
 from webui.constants import _MSG_USER_FINISHED, _MSG_USER_STOPPED_SCRAPE, _MSG_USER_STOPPED_SCREEN, _OPERATIONAL_ERRORS
@@ -22,13 +23,92 @@ from webui.task_runner_support import _theme_path
 from webui.logging_setup import get_logger
 _logger = get_logger(__name__)
 
+
+class PlatformExecutionCapacity:
+    """One serial execution lane per supported platform.
+
+    Existing single-platform callers keep using the legacy executor. The
+    parallel Flow coordinator submits through this capacity so BOSS and
+    Zhilian can overlap while same-platform jobs remain serialized.
+    """
+
+    _PLATFORMS = frozenset(("boss", "zhilian"))
+
+    def __init__(
+        self,
+        platforms: tuple[str, ...] = ("boss", "zhilian"),
+        *,
+        thread_name_prefix: str = "platform-pipeline",
+    ):
+        normalized = tuple(str(platform).strip().lower() for platform in platforms)
+        if not normalized or not set(normalized) <= self._PLATFORMS:
+            raise ValueError("platform capacity only supports boss and zhilian")
+        self._executors = {
+            platform: ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"{thread_name_prefix}-{platform}",
+            )
+            for platform in dict.fromkeys(normalized)
+        }
+        self._lane_lock = threading.RLock()
+        self._lane_threads: dict[int, str] = {}
+
+    def submit(self, platform: str, fn, /, *args, **kwargs):
+        platform = str(platform or "").strip().lower()
+        try:
+            executor = self._executors[platform]
+        except KeyError as exc:
+            raise ValueError("platform capacity only supports boss and zhilian") from exc
+        # A scrape worker can finish its browser phase by handing off AI and
+        # then waiting for that child.  Running a same-lane re-entrant handoff
+        # inline keeps the resource lock serial while avoiding a worker waiting
+        # on its own one-slot executor.  Cross-platform submissions still use
+        # their independent lane and run concurrently.
+        current_thread = threading.get_ident()
+        with self._lane_lock:
+            reentrant = self._lane_threads.get(current_thread) == platform
+        if reentrant:
+            completed = Future()
+            try:
+                completed.set_result(fn(*args, **kwargs))
+            except BaseException as exc:  # Future preserves the submit contract.
+                completed.set_exception(exc)
+            return completed
+
+        def run_on_lane():
+            thread_id = threading.get_ident()
+            with self._lane_lock:
+                self._lane_threads[thread_id] = platform
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                with self._lane_lock:
+                    if self._lane_threads.get(thread_id) == platform:
+                        self._lane_threads.pop(thread_id, None)
+
+        return executor.submit(run_on_lane)
+
+    def shutdown(self, *, wait=True, cancel_futures=False):
+        for executor in self._executors.values():
+            executor.shutdown(wait=wait, cancel_futures=cancel_futures)
+
+
 def build_app_support(app, store, runner, workbench_runner, job_feedback_service, history_service, resume_service, _prune_history_best_effort, _load_legacy_advanced_settings, _save_legacy_advanced_settings, _make_cdp_source, scope_previews, _runtime_mode, source_class):
     _pipeline_tasks = {}
     _pipeline_lock = threading.RLock()
     _resume_claims = set()
     _pipeline_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='boss-pipeline')
+    _platform_executor = PlatformExecutionCapacity()
+    # Scrape and AI share the same per-platform lanes.  A scrape worker may
+    # enqueue its AI child while still unwinding; ``submit`` is asynchronous,
+    # so the queued child cannot deadlock its parent.  Sharing the lane keeps
+    # the frozen browser/profile resource mutually exclusive for one platform
+    # while BOSS and Zhilian remain independently concurrent.
+    _ai_platform_executor = _platform_executor
     app.config['PIPELINE_TASKS'] = _pipeline_tasks
     app.config['PIPELINE_EXECUTOR'] = _pipeline_executor
+    app.config['PLATFORM_EXECUTION_CAPACITY'] = _platform_executor
+    app.config['AI_PLATFORM_EXECUTION_CAPACITY'] = _ai_platform_executor
     from webui.pipeline_exec import TuningRoundRunner
 
     def _tuning_ai_settings():
@@ -156,6 +236,12 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
         """
         with _pipeline_lock:
             task = _pipeline_tasks.get(task_id)
+            # A paused worker can race with a continuation that has already
+            # replaced the task object for the same run id.  In that window
+            # the old worker must not register a timer against the active
+            # replacement, or its callback would delete the live task.
+            if task is not None and task.get("status") in ("queued", "running"):
+                return
 
         def _cleanup():
             with _pipeline_lock:
@@ -475,7 +561,7 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
     _browser_lock, _browser_busy, _latest_paused_run_for_browser_close, _close_paused_run_browser, _has_active_pipeline_task, _project_browser_accounts = build_browser_support(store, _pipeline_tasks, _pipeline_lock, _account_for_run, _activate_run_browser)
     from webui.pipeline_guard import PipelineGuard
     _pipeline_guard = PipelineGuard(write_run=_write_run_unless_finished, store=store, tasks=_pipeline_tasks, lock=_pipeline_lock, record_pause_failure=_record_pause_failure, release_worker_resume_claims=_release_worker_resume_claims)
-    ctx = PipelineContext(app=app, store=store, tasks=_pipeline_tasks, lock=_pipeline_lock, resume_claims=_resume_claims, executor=_pipeline_executor, write_run=_write_run_unless_finished, make_cdp_source=_make_cdp_source, tuning_round_runner=_tuning_round_runner, source_class=source_class, theme_path=_theme_path, is_user_finished=_is_user_finished, release_worker_resume_claims=_release_worker_resume_claims, record_pause_failure=_record_pause_failure, account_for_run=_account_for_run, activate_task_browser=_activate_task_browser, clear_auto_screen=_clear_auto_screen, schedule_pipeline_task_cleanup=_schedule_pipeline_task_cleanup, persist_jd_job_failures=_persist_jd_job_failures, load_legacy_advanced_settings=_load_legacy_advanced_settings, event_stage_names=_EVENT_STAGE_NAMES, screen_stage_messages=_SCREEN_STAGE_MESSAGES, operational_errors=_OPERATIONAL_ERRORS, msg_user_finished=_MSG_USER_FINISHED, msg_user_stopped_scrape=_MSG_USER_STOPPED_SCRAPE, msg_user_stopped_screen=_MSG_USER_STOPPED_SCREEN, recrawl_overall_percent=_recrawl_overall_percent, screen_overall_percent=_screen_overall_percent, prune_history_best_effort=_prune_history_best_effort, runtime_mode=_runtime_mode, run_tuning_manifest_child=_run_tuning_manifest_child, save_legacy_advanced_settings=_save_legacy_advanced_settings, invalidate_login_cache=_invalidate_login_cache, activate_run_browser=_activate_run_browser, scope_previews=scope_previews, check_resume_block=_check_resume_block, check_tuning_lease_conflict=_check_tuning_lease_conflict, claim_pipeline_task_id=_claim_pipeline_task_id, release_pipeline_claim=_release_pipeline_claim, register_pipeline_task=_register_pipeline_task, claim_recrawl_start=_claim_recrawl_start, claim_resume=_claim_resume, release_resume_claim=_release_resume_claim, ensure_scrape_source=_ensure_scrape_source, consume_auto_screen=_consume_auto_screen, runner=runner, workbench_runner=workbench_runner, job_feedback_service=job_feedback_service, history_service=history_service, resume_service=resume_service, pipeline_guard=_pipeline_guard)
+    ctx = PipelineContext(app=app, store=store, tasks=_pipeline_tasks, lock=_pipeline_lock, resume_claims=_resume_claims, executor=_pipeline_executor, platform_executor=_platform_executor, ai_platform_executor=_ai_platform_executor, write_run=_write_run_unless_finished, make_cdp_source=_make_cdp_source, tuning_round_runner=_tuning_round_runner, source_class=source_class, theme_path=_theme_path, is_user_finished=_is_user_finished, release_worker_resume_claims=_release_worker_resume_claims, record_pause_failure=_record_pause_failure, account_for_run=_account_for_run, activate_task_browser=_activate_task_browser, clear_auto_screen=_clear_auto_screen, schedule_pipeline_task_cleanup=_schedule_pipeline_task_cleanup, persist_jd_job_failures=_persist_jd_job_failures, load_legacy_advanced_settings=_load_legacy_advanced_settings, event_stage_names=_EVENT_STAGE_NAMES, screen_stage_messages=_SCREEN_STAGE_MESSAGES, operational_errors=_OPERATIONAL_ERRORS, msg_user_finished=_MSG_USER_FINISHED, msg_user_stopped_scrape=_MSG_USER_STOPPED_SCRAPE, msg_user_stopped_screen=_MSG_USER_STOPPED_SCREEN, recrawl_overall_percent=_recrawl_overall_percent, screen_overall_percent=_screen_overall_percent, prune_history_best_effort=_prune_history_best_effort, runtime_mode=_runtime_mode, run_tuning_manifest_child=_run_tuning_manifest_child, save_legacy_advanced_settings=_save_legacy_advanced_settings, invalidate_login_cache=_invalidate_login_cache, activate_run_browser=_activate_run_browser, scope_previews=scope_previews, check_resume_block=_check_resume_block, check_tuning_lease_conflict=_check_tuning_lease_conflict, claim_pipeline_task_id=_claim_pipeline_task_id, release_pipeline_claim=_release_pipeline_claim, register_pipeline_task=_register_pipeline_task, claim_recrawl_start=_claim_recrawl_start, claim_resume=_claim_resume, release_resume_claim=_release_resume_claim, ensure_scrape_source=_ensure_scrape_source, consume_auto_screen=_consume_auto_screen, runner=runner, workbench_runner=workbench_runner, job_feedback_service=job_feedback_service, history_service=history_service, resume_service=resume_service, pipeline_guard=_pipeline_guard)
     ctx.browser_lock = _browser_lock
     ctx.browser_busy = _browser_busy
     ctx.close_paused_run_browser = _close_paused_run_browser

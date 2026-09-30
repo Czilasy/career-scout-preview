@@ -23,7 +23,8 @@ const THEME_API = "/api/theme";
 
 /** 全局单例：所有 useTheme() 调用共享同一份状态。 */
 const mode = ref<ThemeMode>("light");
-const platform = ref<Platform>("boss");
+const platform = ref<Platform | "all">("boss");
+let lastBrandedPlatform: Platform = "boss";
 let initialized = false;
 // 用户手动切换过主题后，启动期的后端回读结果不再覆盖（避免竞态覆盖用户选择）。
 let userInteracted = false;
@@ -99,11 +100,17 @@ export function toggleTheme(next?: ThemeMode): ThemeMode {
   return mode.value;
 }
 
-/** 设置当前平台品牌色（不传则保持）。 */
-export function setThemePlatform(next: Platform): void {
+/** 设置当前主题平台作用域；all 优先，清除后回到最近单平台品牌。 */
+export function setThemePlatform(next: Platform | "all"): void {
   initFromStorage();
   platform.value = next;
+  if (next !== "all") lastBrandedPlatform = next;
   applyAttributes();
+}
+
+/** 清除 all 作用域，恢复最近一次单平台品牌。 */
+export function clearAllThemeScope(): void {
+  setThemePlatform(lastBrandedPlatform);
 }
 
 export function useTheme() {
@@ -124,5 +131,6 @@ export function useTheme() {
     platform: computed(() => platform.value),
     toggleTheme,
     setThemePlatform,
+    clearAllThemeScope,
   };
 }

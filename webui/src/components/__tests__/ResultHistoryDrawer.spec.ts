@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { mount } from "@vue/test-utils";
 import ResultHistoryDrawer from "../ResultHistoryDrawer.vue";
-import type { HistoryRoundItem } from "../../composables/resultHistory";
+import type { FlowHistoryItem, HistoryRoundItem } from "../../composables/resultHistory";
 import type { HistoryRoundDetail } from "../../composables/resultHistory";
 
 function item(overrides: Partial<HistoryRoundItem> = {}): HistoryRoundItem {
@@ -60,14 +60,286 @@ describe("ResultHistoryDrawer", () => {
     expect(wrapper.get('[data-testid="history-platform-tab-zhilian"]').text()).toContain("1");
     const rows = wrapper.findAll('[data-testid="history-round-row"]');
     expect(rows).toHaveLength(3);
-    expect(rows[0].attributes("role")).toBeUndefined();
-    expect(rows[0].attributes("tabindex")).toBeUndefined();
     expect(rows[0].text()).toContain("完成");
     expect(rows[1].text()).toContain("部分结果");
     // 017-US3: "失败但有 N 个岗位" 文案永久消失；未知状态不渲染标签
     expect(rows[2].text()).not.toContain("失败但有");
     expect(wrapper.get('[data-run-id="h3"] .history-round-status').text()).toBe("");
     expect(wrapper.findAll('[data-testid="history-latest-badge"]')).toHaveLength(2);
+  });
+
+  it("renders one outer Flow card with two platform tracks", () => {
+    const flow: FlowHistoryItem = {
+      flow_id: "flow-history",
+      profile_id: "profile-flow",
+      selection: "all",
+      status: "failed",
+      created_at: "2026-08-11 10:00:00",
+      updated_at: "2026-08-11 10:05:00",
+      legacy: false,
+      screened_count: 1,
+      tracks: [
+        { platform: "boss", status: "done", result_run_id: "boss-result", jobs: [{ job_id: "b1" }], screened_count: 1 },
+        { platform: "zhilian", status: "failed", jobs: [], message: "未完成 AI 筛选", screened_count: 0 },
+      ],
+    };
+    const wrapper = mountDrawer({ items: [], flowItems: [flow] });
+
+    expect(wrapper.find('[data-testid="history-flow-card"]').exists()).toBe(true);
+    expect(wrapper.findAll('[data-testid="history-flow-track"]')).toHaveLength(2);
+    expect(wrapper.text()).toContain("未完成 AI 筛选");
+  });
+
+  it("only opens a Flow track when a result snapshot id exists", async () => {
+    const flow: FlowHistoryItem = {
+      flow_id: "flow-track-identities",
+      profile_id: "profile-flow",
+      selection: "all",
+      status: "failed",
+      created_at: "2026-08-11 10:00:00",
+      updated_at: "2026-08-11 10:05:00",
+      legacy: false,
+      screened_count: 0,
+      tracks: [
+        {
+          platform: "boss",
+          status: "failed",
+          screen_run_id: "screen-only",
+          scrape_run_id: "scrape-only",
+          jobs: [],
+          screened_count: 0,
+        },
+        {
+          platform: "zhilian",
+          status: "done",
+          result_run_id: "result-snapshot",
+          screen_run_id: "screen-with-result",
+          jobs: [{ job_id: "z1" }],
+          screened_count: 1,
+        },
+      ],
+    };
+    const wrapper = mountDrawer({ items: [], flowItems: [flow] });
+
+    // 详情入口只认结果轮；抓取任务线在、日志入口就必须在（见下方删除轮回归）。
+    expect(wrapper.find(
+      '[data-testid="history-flow-track"][data-platform="boss"] button.history-flow-track-button',
+    ).exists()).toBe(false);
+    expect(wrapper.get('[data-testid="history-flow-track"][data-platform="boss"] .history-flow-track-button--static').text()).toContain("失败");
+    await wrapper.get('[data-testid="history-flow-track"][data-platform="zhilian"] button').trigger("click");
+    expect(wrapper.emitted("open-round")).toEqual([["result-snapshot"]]);
+  });
+
+  // 删除结果轮 = DELETE FROM screening_runs：外键把 flow_tracks.result_run_id 清成
+  // NULL，流程行与抓取任务线都还在。三个入口各自依据自己的事实判定，不得一起
+  // 消失（日志仍要能看、没有可删轮次就不再给删除），状态列更不得继续谎称「完成」。
+  it("keeps the log entry and stops claiming 完成 after a Flow track's result round is deleted", async () => {
+    const flow: FlowHistoryItem = {
+      flow_id: "flow-after-delete",
+      profile_id: "profile-after-delete",
+      selection: "all",
+      status: "done",
+      created_at: "2026-08-12 09:00:00",
+      updated_at: "2026-08-12 09:20:00",
+      legacy: false,
+      tracks: [
+        { platform: "boss", status: "done", result_run_id: null, scrape_run_id: "boss-scrape", jobs: [], dropped: [] },
+        { platform: "zhilian", status: "done", result_run_id: null, scrape_run_id: "zhilian-scrape", jobs: [], dropped: [] },
+      ],
+    };
+    const wrapper = mountDrawer({ items: [], flowItems: [flow] });
+
+    const card = wrapper.get('[data-testid="history-flow-card"]');
+    // 两条轨道都没有结果轮：整卡不出现任何「完成」字样。
+    expect(card.text()).not.toContain("完成");
+    expect(card.get(".history-round-status").text()).toBe("无结果");
+
+    const cases = [
+      ["boss", "boss-scrape"],
+      ["zhilian", "zhilian-scrape"],
+    ] as const;
+    for (const [platform, scrapeTaskId] of cases) {
+      const track = wrapper.get(`[data-testid="history-flow-track"][data-platform="${platform}"]`);
+      expect(track.get('[data-testid="history-flow-track-status"]').text()).toBe("无结果");
+      expect(track.find('[data-testid="history-log-trigger"]').exists()).toBe(true);
+      await track.get('[data-testid="history-log-trigger"]').trigger("click");
+      expect(wrapper.emitted("view-log")?.at(-1)).toEqual([expect.objectContaining({
+        scrape_task_id: scrapeTaskId,
+      })]);
+      // 没有可删轮次 → 不给删除入口；详情入口仍只认 result_run_id。
+      expect(track.find('[data-testid="history-delete-trigger"]').exists()).toBe(false);
+      expect(track.find("button.history-flow-track-button").exists()).toBe(false);
+    }
+  });
+
+  // 结果轮被删、但抓取台账还在的轨道：如实说明「已抓取，未筛选」，不得说完成。
+  it("labels a Flow track without a result round but with scraped jobs as unscreened", () => {
+    const flow: FlowHistoryItem = {
+      flow_id: "flow-deleted-but-scraped",
+      profile_id: "profile-deleted-but-scraped",
+      selection: "boss",
+      status: "done",
+      created_at: "2026-08-12 09:00:00",
+      updated_at: "2026-08-12 09:20:00",
+      legacy: false,
+      tracks: [{
+        platform: "boss", status: "done", result_run_id: null, scrape_run_id: "boss-scrape",
+        jobs: [{ job_id: "b1" }], dropped: [], message: "未完成 AI 筛选",
+      }],
+    };
+    const wrapper = mountDrawer({ items: [], flowItems: [flow] });
+    const card = wrapper.get('[data-testid="history-flow-card"]');
+    expect(card.get(".history-round-status").text()).toBe("已抓取，未筛选");
+    expect(card.get('[data-testid="history-flow-track-status"]').text()).toBe("已抓取，未筛选");
+    expect(card.find('[data-testid="history-log-trigger"]').exists()).toBe(true);
+  });
+
+  // 界面文案口径属树干统一规则：后端状态枚举不得以任何形式出现在界面上。
+  it("maps every Flow status the drawer can receive to Chinese copy without echoing enums", () => {
+    const cases: Array<[string, string]> = [
+      ["interrupted", "已中断"],
+      ["stopped", "已停止"],
+      ["cancelled", "已停止"],
+      ["queued", "排队中"],
+      ["running", "进行中"],
+      ["paused", "已暂停"],
+      ["failed", "失败"],
+      ["empty", "无结果"],
+      ["unknown", "状态未知"],
+      ["some_future_machine_value", "状态未知"],
+    ];
+    const flows: FlowHistoryItem[] = cases.map(([status]) => ({
+      flow_id: `flow-status-${status}`,
+      profile_id: "profile-status",
+      selection: "boss",
+      status,
+      created_at: "2026-08-12 09:00:00",
+      updated_at: "2026-08-12 09:20:00",
+      legacy: false,
+      tracks: [{
+        platform: "boss", status, result_run_id: `result-${status}`,
+        scrape_run_id: `scrape-${status}`, jobs: [{ job_id: "j1" }], dropped: [],
+      }],
+    }));
+    const wrapper = mountDrawer({ items: [], flowItems: flows });
+    const cards = wrapper.findAll('[data-testid="history-flow-card"]');
+    expect(cards).toHaveLength(cases.length);
+    for (const [status, label] of cases) {
+      const card = wrapper.get(`[data-testid="history-flow-card"][data-flow-id="flow-status-${status}"]`);
+      expect(card.text().toLowerCase()).not.toContain(status);
+      expect(card.get(".history-round-status").text()).toBe(label);
+      expect(card.get('[data-testid="history-flow-track-status"]').text()).toBe(label);
+    }
+  });
+
+  // B096 返修：后端把每一条旧结果轮都合成成一个 legacy Flow，flowItems 恒非空。
+  // Flow 卡片视图不得因此顶掉平铺轮次视图——043 的「删除轮次」「查看运行日志」
+  // 与计数明细必须留在旧轮上（回归：旧能力整块在界面上消失、父级接线成死线）。
+  it("keeps legacy rounds on the flat round list with delete and log entries", async () => {
+    const legacyFlow: FlowHistoryItem = {
+      flow_id: "h1",
+      profile_id: "profile-legacy",
+      selection: "boss",
+      status: "done",
+      created_at: "2026-08-11 10:00:00",
+      updated_at: "2026-08-11 10:05:00",
+      legacy: true,
+      tracks: [{ platform: "boss", status: "done", result_run_id: "h1", screen_run_id: "h1", jobs: [] }],
+    };
+    const wrapper = mountDrawer({
+      items: [
+        item({ run_id: "h1", scrape_task_id: "scrape-h1" }),
+        item({ run_id: "h2", status: "partial", is_latest: false, scrape_task_id: "scrape-h2" }),
+      ],
+      flowItems: [legacyFlow],
+    });
+
+    expect(wrapper.findAll('[data-testid="history-flow-card"]')).toHaveLength(0);
+    const rows = wrapper.findAll('[data-testid="history-round-row"]');
+    expect(rows).toHaveLength(2);
+    expect(wrapper.get('[data-run-id="h1"] [data-testid="history-round-total"]').text()).toContain("共 10 个岗位");
+    expect(wrapper.get('[data-run-id="h1"] [data-testid="history-round-meta"]').text()).toContain("匹配 3");
+    expect(wrapper.get('[data-run-id="h1"] .history-round-keyword').text()).toContain("Python 后端");
+    expect(wrapper.get(".history-drawer-total").text()).toContain("共 2 轮");
+
+    await wrapper.get('[data-run-id="h1"] [data-testid="history-log-trigger"]').trigger("click");
+    expect(wrapper.emitted("view-log")).toEqual([[expect.objectContaining({ run_id: "h1" })]]);
+    await wrapper.get('[data-run-id="h2"] [data-testid="history-delete-trigger"]').trigger("click");
+    expect(wrapper.emitted("confirm-delete")).toEqual([[expect.objectContaining({ run_id: "h2" })]]);
+  });
+
+  // Flow 卡片只承载有 durable flow 身份的真实 Flow；旧轮继续走平铺列表，
+  // 两种视图共存且不重复展示同一个结果轮。
+  it("shows real Flow cards beside legacy round rows without duplicating flow-owned rounds", () => {
+    const realFlow: FlowHistoryItem = {
+      flow_id: "flow-1",
+      profile_id: "profile-mixed",
+      selection: "all",
+      status: "done",
+      created_at: "2026-08-12 09:00:00",
+      updated_at: "2026-08-12 09:20:00",
+      legacy: false,
+      tracks: [
+        { platform: "boss", status: "done", result_run_id: "flow-round", scrape_run_id: "flow-scrape", jobs: [{ job_id: "b1" }] },
+        { platform: "zhilian", status: "done", result_run_id: "flow-round-z", jobs: [] },
+      ],
+    };
+    const wrapper = mountDrawer({
+      items: [
+        item({ run_id: "flow-round", scrape_task_id: "flow-scrape", is_latest: false }),
+        item({ run_id: "legacy-round", scrape_task_id: "scrape-legacy" }),
+      ],
+      flowItems: [realFlow],
+    });
+
+    expect(wrapper.findAll('[data-testid="history-flow-card"]')).toHaveLength(1);
+    // Flow 卡片也要给出这一轮的时间：平铺行不再覆盖这些轮次后，时间是
+    // 用户分辨「哪一轮是刚才那次」的唯一线索。
+    expect(wrapper.get('[data-testid="history-flow-card"]').text()).toContain("2026-08-12 09:20");
+    const rows = wrapper.findAll('[data-testid="history-round-row"]');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].attributes("data-run-id")).toBe("legacy-round");
+    expect(wrapper.text()).toContain("共 1 个流程");
+    expect(wrapper.text()).toContain("共 1 轮");
+  });
+
+  // 真实 Flow 的结果轮同样是可删除、可看日志的轮次：卡片内必须保留等价入口，
+  // 不能因为换成分层卡片就把 043 的能力弱化掉。
+  it("keeps delete and log entries on a Flow track that owns a result round", async () => {
+    const realFlow: FlowHistoryItem = {
+      flow_id: "flow-actions",
+      profile_id: "profile-actions",
+      selection: "all",
+      status: "done",
+      created_at: "2026-08-12 09:00:00",
+      updated_at: "2026-08-12 09:20:00",
+      legacy: false,
+      tracks: [
+        {
+          platform: "boss", status: "done", result_run_id: "flow-result",
+          scrape_run_id: "flow-scrape", jobs: [{ job_id: "b1" }],
+        },
+      ],
+    };
+    const wrapper = mountDrawer({ items: [], flowItems: [realFlow] });
+
+    const track = wrapper.get('[data-testid="history-flow-track"][data-platform="boss"]');
+    await track.get('[data-testid="history-log-trigger"]').trigger("click");
+    expect(wrapper.emitted("view-log")).toEqual([[expect.objectContaining({
+      run_id: "flow-result", scrape_task_id: "flow-scrape",
+    })]]);
+
+    await track.get('[data-testid="history-delete-trigger"]').trigger("click");
+    expect(wrapper.emitted("confirm-delete")).toEqual([[expect.objectContaining({ run_id: "flow-result" })]]);
+
+    const confirming = mountDrawer({
+      items: [],
+      flowItems: [realFlow],
+      deleteTarget: { run_id: "flow-result", platform: "boss" } as HistoryRoundItem,
+    });
+    await confirming.get('[data-testid="history-delete-confirm-yes"]').trigger("click");
+    expect(confirming.emitted("delete-round")).toEqual([[expect.objectContaining({ run_id: "flow-result" })]]);
+    expect(confirming.emitted("open-round")).toBeUndefined();
   });
 
   it("shows finished_at as the primary time and falls back to created_at", () => {
@@ -157,6 +429,50 @@ describe("ResultHistoryDrawer", () => {
     const wrapper = mountDrawer();
     await wrapper.get('[data-run-id="h2"]').trigger("click");
     expect(wrapper.emitted("open-round")).toEqual([["h2"]]);
+  });
+
+  // 平铺轮次行整行 cursor:pointer、点了就开，但它是 div 且没有键盘入口：
+  // 只用键盘的用户 Tab 进抽屉只能删轮和看日志，一轮历史内容都打不开。
+  it("opens a flat round row from the keyboard while keeping nested buttons independent", async () => {
+    const wrapper = mountDrawer();
+    const row = wrapper.get('[data-run-id="h2"]');
+
+    expect(row.attributes("tabindex")).toBe("0");
+    expect(row.attributes("role")).toBe("button");
+
+    await row.trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("open-round")).toEqual([["h2"]]);
+    await row.trigger("keydown", { key: " " });
+    expect(wrapper.emitted("open-round")).toEqual([["h2"], ["h2"]]);
+    wrapper.unmount();
+  });
+
+  it("does not open a round when the keyboard event belongs to a nested row action", async () => {
+    const wrapper = mountDrawer({
+      items: [item({ run_id: "h1", scrape_task_id: "scrape-h1" })],
+    });
+    const logButton = wrapper.get('[data-run-id="h1"] [data-testid="history-log-trigger"]');
+
+    await logButton.trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("open-round")).toBeUndefined();
+    await logButton.trigger("click");
+    expect(wrapper.emitted("open-round")).toBeUndefined();
+    expect(wrapper.emitted("view-log")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("keeps a confirming row closed to keyboard opening", async () => {
+    const wrapper = mountDrawer({ deleteTarget: item({ run_id: "h2", status: "partial" }) });
+    await wrapper.get('[data-run-id="h2"]').trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("open-round")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  // 键盘可达必须看得见落点：焦点环样式必须存在（窄屏深色主题下同样可辨）。
+  it("gives the keyboard-focusable round row a visible focus ring", () => {
+    const source = readFileSync(path.join(__dirname, "../../components/ResultHistoryDrawer.vue"), "utf8");
+    const focusBlock = source.match(/\.history-round-row:focus-visible\s*\{[^}]*\}/s)?.[0] || "";
+    expect(focusBlock).toContain("outline");
   });
 
   it("confirms before deleting a round", async () => {

@@ -16,16 +16,22 @@ from webui.task_pause_support import is_user_paused_run
 
 def build_browser_support(store, tasks, lock, account_for_run, activate_run_browser):
 
-    def _browser_lock() -> tuple[str | None, str | None, str | None]:
+    def _browser_lock(platform: str | None = None) -> tuple[str | None, str | None, str | None]:
         """Return the active browser lock as (kind, account id).
 
         Running/queued tasks lock every account; a paused run locks only the
-        account frozen into its execution params (or the current fallback)."""
+        account frozen into its execution params (or the current fallback).
+        When a platform is supplied, only that platform's lane is inspected;
+        the no-argument form keeps the legacy global settings lock."""
+        requested_platform = str(platform or "").strip().lower() or None
         with lock:
             for _task_id, task in reversed(list(tasks.items())):
                 if task.get("status") in ("running", "queued"):
+                    task_platform = str(task.get("platform") or "boss").strip().lower()
+                    if requested_platform is not None and task_platform != requested_platform:
+                        continue
                     return ("running", str(task.get("browser_account") or ""),
-                            str(task.get("platform") or "boss"))
+                            task_platform)
         try:
             with store._connection() as conn:
                 rows = conn.execute(
@@ -46,11 +52,13 @@ def build_browser_support(store, tasks, lock, account_for_run, activate_run_brow
             if not isinstance(params, dict):
                 params = {}
             platform = str(params.get("platform") or run.get("platform") or "boss")
+            if requested_platform is not None and platform.strip().lower() != requested_platform:
+                continue
             return "paused", account, platform
         return None, None, None
 
-    def _browser_busy() -> bool:
-        return _browser_lock()[0] is not None
+    def _browser_busy(platform: str | None = None) -> bool:
+        return _browser_lock(platform)[0] is not None
 
     def _latest_paused_run_for_browser_close() -> tuple[dict | None, int | None]:
         """Return the latest paused run and its frozen CDP port, if any."""

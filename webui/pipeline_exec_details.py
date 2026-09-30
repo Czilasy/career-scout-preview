@@ -149,6 +149,10 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     activity_by_idx: dict = {}
     counted_done: set[int] = set()
     counted_fetched: set[int] = set()
+    # A source that emits on_item_done owns numeric progress for this batch.
+    # Batch outcome reconciliation still advances the internal counter, but
+    # must not echo the same numeric progress a second time.
+    batch_progress_seen = False
     def _apply_batch_outcomes(batch_entries, batch_outcomes, batch_exc_code,
                               *, count_done=True):
         """处理一批 outcomes 并入 jd_by_idx / jd_fail（025 B077：批返回后立即处理，
@@ -222,7 +226,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             if count_done and idx not in counted_done:
                 done += 1
                 counted_done.add(idx)
-                if progress is not None:
+                if progress is not None and not batch_progress_seen:
                     try:
                         progress(done, total)
                     except Exception:
@@ -254,6 +258,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     _robin_impl = getattr(detail_robin, "robin", detail_robin)
     _whitebox = getattr(_robin_impl, "_whitebox", None)
     for batch_start in range(0, len(indexed_jobs), BATCH_SIZE):
+        batch_progress_seen = False
         if stop_event is not None and stop_event.is_set():
             stopped = True
             break
@@ -378,19 +383,26 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             # 在批返回时一次性回调（幂等），不改变原有批量语义。
             batch_done_before = done
 
-            def _item_progress(n: int, _base: int = batch_done_before, _total: int = total) -> None:
-                # 022/026：条级进度同时刷新 guard 心跳。智联 in-process 串行
-                # 路径由 source 逐条回调（无子进程 stdout 心跳源），否则批次
-                # 超过 300s 会被卡死防护误判强杀/跳批；BOSS 子进程模式在批
-                # 返回时一次性回调，此处 touch 幂等无害。
+            def _item_event(_event: object = None) -> None:
+                # 并行详情 worker 的无参事件回调只负责卡死防护心跳；
+                # 数值进度由 _item_progress(n) 独立接收，禁止混用。
                 if guard is not None:
                     try:
                         guard.touch(batch_key)
                     except Exception:
                         _logger.debug("guard 心跳触碰失败（忽略）", exc_info=True)
 
+            def _item_progress(n: int, _base: int = batch_done_before, _total: int = total) -> None:
+                nonlocal batch_progress_seen
+                # 022/026：条级进度同时刷新 guard 心跳。智联 in-process 串行
+                # 路径由 source 逐条回调（无子进程 stdout 心跳源），否则批次
+                # 超过 300s 会被卡死防护误判强杀/跳批；BOSS 子进程模式在批
+                # 返回时一次性回调，此处 touch 幂等无害。
+                _item_event()
+
                 if progress is None:
                     return
+                batch_progress_seen = True
                 try:
                     progress(min(_base + n, _total), _total)
                 except Exception:
@@ -410,6 +422,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                         gap_min=_detail_interval,
                         gap_max=_detail_interval + 7,
                         reset_every=_detail_reset_every,
+                        event_callback=_item_event if with_progress else None,
                         tab_pool_size=_detail_tab_pool_size,
                         on_item_done=_item_progress if with_progress else None,
                         simulation_mode=simulation_mode,

@@ -12,6 +12,7 @@ import { computed, ref, toValue, watch, type MaybeRefOrGetter, type Ref } from "
 
 import { apiRequest, errorMessage } from "../api";
 import type {
+  ConditionSnapshotV2,
   Notice,
   SearchPackage,
   SearchPackageCity,
@@ -19,13 +20,16 @@ import type {
   SearchPackagePayload,
   SearchPackageProfile,
   SearchPackageSummary,
+  UnifiedFilterValues,
 } from "../types";
+import { validateConditionSnapshot } from "../parallelFilterMapping";
 
 /** 第二页可被配置包恢复的字段（与后端快照一一对应）。 */
 export interface SearchPackageDraft {
   keywords: SearchPackageKeywords;
   city: SearchPackageCity;
   profile: SearchPackageProfile;
+  conditions?: ConditionSnapshotV2;
 }
 
 /** 配置包读写的第二页 refs：由页面传入，本模块不自己持有页面状态。 */
@@ -37,6 +41,9 @@ export interface SearchPackageRefs {
   customCity: Ref<string>;
   profileSummary: Ref<string>;
   profileFacts: Ref<Record<string, unknown>>;
+  conditionSnapshot?: Ref<ConditionSnapshotV2 | null>;
+  /** 选择配置包即代表已有可用分析输入，可恢复第二页会话。 */
+  analysisReady?: Ref<boolean>;
 }
 
 /** 与页面其余部分的接线：共享草稿、步骤切换与通知。 */
@@ -45,11 +52,15 @@ export interface SearchPackageHooks {
   persistDraft(): void;
   /** 选择提交失败时，把共享草稿恢复为应用前的内容。 */
   restoreDraft?(): void;
+  /** 选择提交失败时，把并行 Flow 内部的 V2 条件状态恢复为应用前内容。 */
+  restoreConditions?(snapshot: ConditionSnapshotV2 | null): void;
   /** 选择提交失败时，把页面停留位置恢复为应用前的步骤。 */
   restoreStep?(): void;
   /** 回填全部成功后最后一步：进入第二页。 */
   enterSearchStep(): void;
   notify(message: string, tone: Notice["tone"]): void;
+  /** 在构造保存请求前同步当前条件快照。 */
+  prepareSnapshot?(): void;
 }
 
   /** 当前选择所属的用户上下文：新轮/画像/新分析会清掉当前标记。 */
@@ -61,7 +72,7 @@ export interface SearchPackageContext {
   fileKey?: MaybeRefOrGetter<string | null | undefined>;
 }
 
-export const SEARCH_PACKAGE_PAYLOAD_VERSION = 1;
+export const SEARCH_PACKAGE_PAYLOAD_VERSION = 2;
 const DEFAULT_PACKAGE_NAME = "常用搜索配置";
 const MAX_NAME_LENGTH = 80;
 const UNUSABLE_MESSAGE = "这套配置无法完整读取，请重新保存";
@@ -198,7 +209,15 @@ function sameJson(left: unknown, right: unknown): boolean {
  */
 function validateLoadedPackage(raw: unknown): SearchPackage | null {
   if (!isRecord(raw)) return null;
-  if (raw.payloadVersion !== SEARCH_PACKAGE_PAYLOAD_VERSION) return null;
+  if (raw.payloadVersion !== 1 && raw.payloadVersion !== SEARCH_PACKAGE_PAYLOAD_VERSION) return null;
+  if (raw.payloadVersion === SEARCH_PACKAGE_PAYLOAD_VERSION) {
+    if (!isRecord(raw.conditions)) return null;
+    try {
+      validateConditionSnapshot(raw.conditions);
+    } catch {
+      return null;
+    }
+  } else if (raw.conditions !== undefined && !isRecord(raw.conditions)) return null;
   const keywords = raw.keywords;
   const city = raw.city;
   const profile = raw.profile;
@@ -225,6 +244,9 @@ function packageDraft(loaded: SearchPackage): SearchPackageDraft {
     },
     city: { ...loaded.city },
     profile: { summary: loaded.profile.summary, facts: { ...loaded.profile.facts } },
+    conditions: loaded.payloadVersion === SEARCH_PACKAGE_PAYLOAD_VERSION
+      ? loaded.conditions as ConditionSnapshotV2
+      : undefined,
   };
 }
 
@@ -325,8 +347,7 @@ export function useSearchPackages(
         currentPackageName.value = validated.name;
         persistCurrentIdentity();
       } catch {
-        restoreRefs(snapshot);
-        try { hooks.restoreDraft?.(); } catch { /* 保留恢复失败状态 */ }
+        restoreSelectionSnapshot(snapshot);
         clearCurrentIdentity();
       }
     } catch {
@@ -391,6 +412,7 @@ export function useSearchPackages(
         summary: refs.profileSummary.value,
         facts: normalizeProfileFacts(refs.profileFacts.value),
       },
+      conditions: refs.conditionSnapshot?.value ?? undefined,
     };
   }
 
@@ -402,6 +424,7 @@ export function useSearchPackages(
       keywords: draft.keywords,
       city: draft.city,
       profile: draft.profile,
+      conditions: refs.conditionSnapshot?.value,
     };
   }
 
@@ -419,6 +442,7 @@ export function useSearchPackages(
     refs.customCity.value = draft.city.custom;
     refs.profileSummary.value = draft.profile.summary;
     refs.profileFacts.value = { ...draft.profile.facts };
+    if (refs.conditionSnapshot) refs.conditionSnapshot.value = draft.conditions ?? null;
   }
 
   function snapshotRefs() {
@@ -426,6 +450,7 @@ export function useSearchPackages(
       draft: buildDraft(),
       packageId: currentPackageId.value,
       packageName: currentPackageName.value,
+      analysisReady: refs.analysisReady?.value,
     };
   }
 
@@ -433,8 +458,17 @@ export function useSearchPackages(
     applyDraft(snapshot.draft);
     currentPackageId.value = snapshot.packageId;
     currentPackageName.value = snapshot.packageName;
+    if (refs.analysisReady && snapshot.analysisReady !== undefined) {
+      refs.analysisReady.value = snapshot.analysisReady;
+    }
     if (snapshot.packageId) persistCurrentIdentity();
     else clearCurrentIdentity();
+  }
+
+  function restoreSelectionSnapshot(snapshot: ReturnType<typeof snapshotRefs>): void {
+    restoreRefs(snapshot);
+    try { hooks.restoreDraft?.(); } catch { /* 保留原提交错误 */ }
+    try { hooks.restoreConditions?.(snapshot.draft.conditions ?? null); } catch { /* 保留原提交错误 */ }
   }
 
   function upsertSummary(pkg: SearchPackage): void {
@@ -498,6 +532,7 @@ export function useSearchPackages(
       const snapshot = snapshotRefs();
       try {
         applyDraft(draft);
+        if (refs.analysisReady) refs.analysisReady.value = true;
         hooks.persistDraft();
         currentPackageId.value = loaded.id;
         currentPackageName.value = loaded.name;
@@ -505,8 +540,7 @@ export function useSearchPackages(
         hooks.enterSearchStep();
         hooks.notify("已使用常用配置", "success");
       } catch (error) {
-        restoreRefs(snapshot);
-        try { hooks.restoreDraft?.(); } catch { /* 保留原提交错误 */ }
+        restoreSelectionSnapshot(snapshot);
         try { hooks.restoreStep?.(); } catch { /* 保留原提交错误 */ }
         hooks.notify(packageErrorMessage(error, UNUSABLE_MESSAGE), "error");
         return false;
@@ -546,6 +580,7 @@ export function useSearchPackages(
     const requestContext = captureContextVersion();
     saveBusy.value = true;
     try {
+      hooks.prepareSnapshot?.();
       return await createPackage(name, requestContext);
     } finally {
       saveBusy.value = false;

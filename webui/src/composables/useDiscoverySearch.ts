@@ -257,6 +257,7 @@ function handleDrop(event: DragEvent) {
 const resumeFlow = useResumeAnalysisFlow({
   refs: {
     activeStep,
+    navigateStep: (step) => state.navigateStep(step, { source: "system" }),
     uploadBusy,
     resumeError,
     resumeAnalysis,
@@ -341,11 +342,15 @@ function analyzeResume() {
     return;
   }
   // 035：未结束任务存在时，上传简历不取消旧任务、不开新一轮，直接跳回任务视图。
-  // 跳回落点按任务类型分派（抓取活 → 02；筛选/重抓活 → 03）。
+  // 跳回落点按任务类型分派（抓取活 → 02；筛选/重抓活 → 03；流程在跑时跟随投影）。
   const liveStep = liveTaskStep(state);
   if (liveStep) {
-    activeStep.value = liveStep;
-    deps.notify("当前还有任务在跑，已回到任务进度", "warning");
+    // 提示必须跟着真实落点走：navigateStep 在看历史轮或被人工停留拦住时会原地不动
+    //（历史轮那条还会另发「历史轮次不可改写」），此时说「已回到任务进度」就是谎报。
+    const landed = state.navigateStep(liveStep, { source: "system" });
+    deps.notify(landed === liveStep
+      ? "当前还有任务在跑，已回到任务进度"
+      : "当前还有任务在跑，简历未开始解析", "warning");
     return;
   }
   resumeFlow.startAnalysis({

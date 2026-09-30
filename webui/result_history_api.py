@@ -14,7 +14,7 @@ _PLATFORMS = ("boss", "zhilian")
 
 
 def _error(code: str, message: str, status: int):
-    return jsonify({"ok": False, "error": code, "message": message}), status
+    return jsonify({"ok": False, "error": code, "error_code": code, "message": message}), status
 
 
 def register_result_history_routes(app, store) -> None:
@@ -36,6 +36,34 @@ def register_result_history_routes(app, store) -> None:
             return _error("persistence_failed", "历史列表读取失败", 500)
         return jsonify({"ok": True, "items": items})
 
+    @app.route("/api/result-history/flows", methods=["GET"])
+    def result_flow_history_list():
+        profile_id = _profile_id_arg()
+        if not profile_id:
+            return _error("profile_id_required", "profile_id 不能为空", 422)
+        try:
+            items = service.list_flow_history(profile_id)
+        except Exception:
+            return _error("persistence_failed", "流程历史读取失败", 500)
+        return jsonify({"ok": True, "items": items})
+
+    @app.route("/api/result-history/flows/<flow_id>", methods=["GET"])
+    def result_flow_history_detail(flow_id: str):
+        profile_id = _profile_id_arg()
+        if not profile_id:
+            return _error("profile_id_required", "profile_id 不能为空", 422)
+        try:
+            item = next(
+                (entry for entry in service.list_flow_history(profile_id)
+                 if entry["flow_id"] == str(flow_id)),
+                None,
+            )
+        except Exception:
+            return _error("persistence_failed", "流程历史读取失败", 500)
+        if item is None:
+            return _error("flow_not_found", "流程历史不存在", 404)
+        return jsonify({"ok": True, "item": item})
+
     @app.route("/api/result-history/<run_id>", methods=["GET"])
     def result_history_detail(run_id: str):
         try:
@@ -50,10 +78,26 @@ def register_result_history_routes(app, store) -> None:
     def result_history_archive_all_current():
         body = request.get_json(silent=True)
         profile_id = ""
+        flow_id = ""
         if isinstance(body, dict):
             profile_id = str(body.get("profile_id") or "").strip()
+            flow_id = str(body.get("flow_id") or "").strip()
+        if bool(profile_id) != bool(flow_id):
+            return _error(
+                "flow_scope_required",
+                "flow_id 与 profile_id 必须同时提供",
+                422,
+            )
+        if not profile_id or not flow_id:
+            return _error(
+                "flow_scope_required",
+                "归档必须指定流程与画像",
+                422,
+            )
         try:
-            run_ids = service.archive_all_current_results(profile_id or None)
+            run_ids = service.archive_flow(flow_id, profile_id)
+        except (KeyError, ValueError):
+            return _error("flow_not_found", "流程不存在或不属于该画像", 404)
         except Exception:
             return _error("persistence_failed", "归档失败", 500)
         return jsonify({"ok": True, "archived_run_ids": run_ids})

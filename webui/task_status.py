@@ -87,18 +87,76 @@ def _pipeline_kind_for_stage(stage: str) -> str:
     return "ai_screen"
 
 
-def _active_elapsed_ms(started_at_ms, finished_at_ms, events):
+def _task_uses_live_clock(status) -> bool:
+    """任务是否真的有 worker 在跑（时长允许以"现在"为结束锚点继续增长）。
+
+    "活动轨道"与"在跑"是两件事：store 状态机的 ACTIVE_STATUSES 含 queued，
+    说的是整条线还活着（排队中也算），拿它判走不走活表会把"排队中、还没开始
+    干活"也算成在跑，界面上一格一格涨的就是这段没发生的时长。这里要的是
+    "已开始运行"这一既有口径：状态先经 `_public_task_status` 归一
+    （waiting→queued、done→completed 等历史别名落到同一口径），归一后只剩
+    统一状态词表里的 running 走活表。
+    "正在暂停"在后端没有独立状态（暂停请求只把 pausing 作为回执，行状态仍是
+    running、worker 仍在飞），因此这条判据天然覆盖它。
+    queued / waiting（尚未开始）、paused / interrupted 与各终态一律定格。
+    status 为 None 表示调用方没有提供状态（legacy 三参数调用），按活动态处理，
+    保持既有随时间行为，不新增猜测。
+    """
+    if status is None:
+        return True
+    return _public_task_status(str(status)) == "running"
+
+
+def _last_event_epoch_ms(events):
+    """最后一条任务事件的时间（epoch 毫秒）；无可用时间返回 None。"""
     from webui.task_runners import _iso_epoch_ms  # 延迟：避免与 webui.task_runners 循环
+    latest = None
+    for event in events or []:
+        if not isinstance(event, dict):
+            continue
+        at = _iso_epoch_ms(event.get("at"))
+        if at is not None and (latest is None or at > latest):
+            latest = at
+    return latest
+
+
+def _elapsed_end_ms(finished_at_ms, events, *, live_clock, updated_at_ms, now_ms):
+    """时长结束锚点：真实 finished_at → 最后一条事件 → run 行 updated_at → 现在。
+
+    只有没有 worker 在跑（含尚未开始的排队态）才允许回退到事件时间或 run 行的
+    updated_at（停下的与没开始的都要定格，不再随每次轮询增长）；真的在跑一律以
+    "现在"为锚点，保证真正在跑的任务继续计时。
+    """
+    if finished_at_ms is not None:
+        return int(finished_at_ms)
+    if not live_clock:
+        for candidate in (_last_event_epoch_ms(events), updated_at_ms):
+            if candidate is not None:
+                return int(candidate)
+    return int(now_ms)
+
+
+def _active_elapsed_ms(started_at_ms, finished_at_ms, events, *, status=None,
+                       updated_at_ms=None, now_ms=None):
     """从 pause/resume 事件推导累计实际运行时长（排除暂停），单位毫秒。
 
     暂停时间不计入"已用"：暂停区间以 task_logs 的 pause/resume 事件为准，
     未闭合的 pause（任务仍处于暂停态）按暂停持续到截止时刻处理。
     无 started_at 时返回 None（调用方沿用 started_at 差值回退）；
     无 pause/resume 事件但有 started_at 时返回跨度（全程实际运行，无暂停）。
+    截止时刻（结束锚点）见 `_elapsed_end_ms`：没有 worker 在跑（含尚未开始的
+    排队态）时时长必须定格。
     """
+    from webui.task_runners import _iso_epoch_ms  # 延迟：避免与 webui.task_runners 循环
     if not started_at_ms:
         return None
-    end_ms = finished_at_ms if finished_at_ms is not None else int(time.time() * 1000)
+    end_ms = _elapsed_end_ms(
+        finished_at_ms,
+        events,
+        live_clock=_task_uses_live_clock(status),
+        updated_at_ms=updated_at_ms,
+        now_ms=now_ms if now_ms is not None else int(time.time() * 1000),
+    )
     paused_ms = 0
     pause_start = None
     for event in events or []:

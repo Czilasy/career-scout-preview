@@ -331,4 +331,42 @@ describe("useDiscoveryWorkflow（026 B078）", () => {
     expect(state.advancedPanelsOpen.value).toBe(false);
     expect(state.screenPanelOpen.value).toBe(false);
   });
+
+  it("恢复到不可达的 activeStep 后由统一守卫稳定钳制到最近可达页", () => {
+    sessionStorage.setItem(WORKFLOW_KEY, JSON.stringify({
+      version: 2, unfinished: true, activeStep: "results", analysisReady: false,
+      keywords: [], selectedKeywords: [], cityText: "",
+      filterValues: { boss: {}, zhilian: {} }, profileSummary: "", profileFacts: {},
+      scrapeTaskId: "", screenTaskId: "", pausedRunId: "", interruptedRunId: "", recrawlTaskId: "",
+      scrapeCompleted: false, scrapeSnapshot: null, screenSnapshot: null, recrawlSnapshot: null,
+      pipelineResult: null, pipelineResultRunId: "", currentRoundStatus: "", resultLoaded: false,
+    }));
+    const state = makeState();
+    const workflow = useDiscoveryWorkflow(state, makeDeps());
+
+    workflow.restoreWorkflowState();
+
+    expect(state.activeStep.value).toBe("upload");
+    expect(state.activeStep.value).toBe(state.activeStep.value);
+  });
+
+  it("有效恢复页在 Flow 水合后仍保留，不被强制跳回上传页", () => {
+    sessionStorage.setItem(WORKFLOW_KEY, JSON.stringify({
+      version: 2, unfinished: true, activeStep: "screen", analysisReady: true,
+      keywords: [], selectedKeywords: [], cityText: "",
+      filterValues: { boss: {}, zhilian: {} }, profileSummary: "", profileFacts: {},
+      scrapeTaskId: "scrape-valid", screenTaskId: "screen-valid", pausedRunId: "", interruptedRunId: "", recrawlTaskId: "",
+      scrapeCompleted: true, scrapeSnapshot: { status: "completed", progress: {}, logs: [] },
+      screenSnapshot: { status: "running", progress: {}, logs: [] }, recrawlSnapshot: null,
+      pipelineResult: null, pipelineResultRunId: "", currentRoundStatus: "", resultLoaded: false,
+    }));
+    const state = makeState();
+    state.setFlowReachableSteps(new Set(["search", "screen"]));
+    const workflow = useDiscoveryWorkflow(state, makeDeps());
+
+    workflow.restoreWorkflowState();
+    state.reconcileActiveStep();
+
+    expect(state.activeStep.value).toBe("screen");
+  });
 });

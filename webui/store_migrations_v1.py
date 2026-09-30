@@ -129,6 +129,27 @@ class StoreMigrationsV1Mixin:
                 latest = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
             if int(latest["v"] if latest is not None else 0) >= 36:
                 self._migration_037()
+        if current < 38:
+            # 同 033-037：冻结版测试库不得被推着往前走，只有库已实际到 37
+            # 才建立 B096 的 Flow/Track 归属关系。
+            with self._connection() as conn:
+                latest = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
+            if int(latest["v"] if latest is not None else 0) >= 37:
+                self._migration_038()
+        if current < 39:
+            # 039 is a narrow additive column on the B096 Track relation.  A
+            # database that did not reach 038 cannot have a valid Flow table.
+            with self._connection() as conn:
+                latest = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
+            if int(latest["v"] if latest is not None else 0) >= 38:
+                self._migration_039()
+        if current < 40:
+            # 040 is a narrow additive column on search packages.  A database
+            # that did not reach 037 cannot have that table.
+            with self._connection() as conn:
+                latest = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
+            if int(latest["v"] if latest is not None else 0) >= 39:
+                self._migration_040()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -157,6 +178,9 @@ class StoreMigrationsV1Mixin:
                 "WHERE status IN ('queued', 'running')",
                 (_now(),),
             )
+        # run 投影归一之后立刻把 Track 对齐到同一事实：轨道还写 running 时，
+        # 界面会一边说「已中断」一边继续「抓取中」并给出送不达的暂停/停止。
+        self.reconcile_flow_tracks_with_runs()
 
     def _migration_001(self):
         """First workbench migration: add all new tables."""

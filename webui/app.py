@@ -71,7 +71,6 @@ from webui.constants import (
     PROJECT_ROOT,
     _FEEDBACK_ERROR_STATUS,
     _MSG_ACCOUNT_NOT_FOUND,
-    _MSG_BOSS_LOGIN_STATUS,
     _MSG_EXPERIMENT_NOT_FOUND,
     _MSG_MANIFEST_NOT_FOUND,
     _MSG_PROFILE_ID_REQUIRED,
@@ -484,6 +483,8 @@ def create_app(config=None):
     register_resume_fields_routes(app, ctx)
     from webui.exec_search_api import register_exec_search_routes
     register_exec_search_routes(app, ctx)
+    from webui.flow_api import register_flow_routes
+    register_flow_routes(app, ctx)
     from webui.ai_screen_api import register_ai_screen_routes
     register_ai_screen_routes(app, ctx)
     from webui.core_api import register_core_routes
@@ -568,6 +569,14 @@ def create_app(config=None):
             execution_config, cross_platform_dedupe)
 
     ctx.run_ai_screen_task = _run_ai_screen_task  # 021 B6：定义晚于组装点，原地补绑定
+
+    # B096: scrape workers hand each completed Flow Track directly to the
+    # production AI submission path.  The callback is installed after the
+    # runner binding so no HTTP request is required for auto-screening.
+    from webui.ai_screen_api import enqueue_auto_screen_for_scrape
+    ctx.enqueue_auto_screen_for_scrape = lambda task_id: enqueue_auto_screen_for_scrape(
+        app, ctx, task_id,
+    )
 
 
 

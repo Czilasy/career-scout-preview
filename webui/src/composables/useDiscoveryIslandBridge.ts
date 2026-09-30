@@ -8,7 +8,7 @@ import {
   type DiscoveryState,
   type StepId,
 } from "./useDiscoveryState";
-import { reachableStep, useIslandNavigation } from "./useIslandNavigation";
+import { useIslandNavigation } from "./useIslandNavigation";
 
 /**
  * Spec041：灵动岛点击 → 步骤页落点的桥接。
@@ -67,11 +67,7 @@ export function useDiscoveryIslandBridge(state: DiscoveryState): void {
       // 放行（它来自真实状态，核实了 035「刷新后回真实进度页」的契约）；其余
       // 不可进的页一律落回最近的可达页，既不越级，也不静默吞掉点击。
       onSetActiveStep: (step: string) => {
-        const live = liveProbe().liveStep;
-        const landing = step === live
-          ? step
-          : reachableStep(step, new Set(state.enabledSteps.value));
-        state.activeStep.value = landing as StepId;
+        state.navigateStep(step, { source: "island" });
       },
     };
   }

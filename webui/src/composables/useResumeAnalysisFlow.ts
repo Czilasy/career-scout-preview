@@ -27,6 +27,7 @@ export interface ResumeAnalysisTaskState {
 
 interface ResumeAnalysisRefs {
   activeStep: Ref<string>;
+  navigateStep: (step: string) => void;
   uploadBusy: Ref<boolean>;
   resumeError: Ref<string>;
   resumeAnalysis: Ref<unknown>;
@@ -231,7 +232,7 @@ export function useResumeAnalysisFlow(deps: ResumeAnalysisFlowDeps) {
       return;
     }
     if (phaseRef.value === "idle") return;
-    deps.refs.activeStep.value = "upload";
+    deps.refs.navigateStep("upload");
   }
 
   function reset(): void {

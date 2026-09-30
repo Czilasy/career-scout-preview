@@ -167,16 +167,16 @@ class ProfileIsolationContractTests(unittest.TestCase):
         self.assertIsNone(self.store.get_screening_run(run_b))
 
     def test_archive_latest_only_touches_current_profile(self):
-        """归档只动当前画像的未归档轮，另一画像的轮保持未归档。"""
+        """缺少 Flow 时拒绝归档，避免画像级请求回退成全局归档。"""
         run_a = self._save_round("profile-a", "boss", "a-job")
         run_b = self._save_round("profile-b", "boss", "b-job")
 
         resp = self.client.post(
             "/api/result-history/archive-latest", json={"profile_id": "profile-a"})
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.get_json()["archived_run_ids"], [run_a])
+        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(resp.get_json()["error"], "flow_scope_required")
 
-        self.assertIsNotNone(self._archived_at(run_a))
+        self.assertIsNone(self._archived_at(run_a))
         self.assertIsNone(self._archived_at(run_b))
 
     # -- latest-running-task 画像隔离 -------------------------------------
@@ -373,12 +373,13 @@ class ProfileIsolationContractTests(unittest.TestCase):
         self.assertTrue(latest["has_result"])
         self.assertEqual(latest["source_run_id"], legacy)
 
-        # 归档：当前画像的轮次与无归属老数据一并收走，别的画像的轮次不动
+        # 归档必须有明确 Flow；画像级请求不能把无归属老数据当作当前流程归档
         archived = self.client.post(
             "/api/result-history/archive-latest", json={"profile_id": "profile-b"},
-        ).get_json()["archived_run_ids"]
-        self.assertEqual(set(archived), {legacy})
-        self.assertIsNotNone(self._archived_at(legacy))
+        )
+        self.assertEqual(archived.status_code, 422)
+        self.assertEqual(archived.get_json()["error"], "flow_scope_required")
+        self.assertIsNone(self._archived_at(legacy))
         self.assertIsNone(self._archived_at(run_a))
 
         # 删除：老数据可被任一画像删除；有归属的轮次仍拒绝跨画像删除

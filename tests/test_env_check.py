@@ -4,7 +4,7 @@
 - detect_chromium_browsers：Chrome/Edge 双链探测与缺失兜底
 - get_default_chrome_path：Chrome 优先
 - collect_check_items：结构化检查项，CLI 与 Web 共用
-- /api/env-check：三组分组返回
+- /api/env-check：三组分组返回，不推断登录状态
 """
 
 import importlib.util
@@ -23,7 +23,7 @@ SCRIPT_PATH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "boss_cd
 
 
 def fake_env_check_items():
-    """四行环境检查夹具（040 批三：Web 侧 /api/env-check 与 runtime 测试共用）。"""
+    """环境检查夹具（Web 侧 /api/env-check 与 runtime 测试共用）。"""
     return ([
         {"id": "browsers", "name": "Chromium 浏览器", "status": "ok",
          "detail": "找到 Chrome ✅", "fix": None},
@@ -31,8 +31,6 @@ def fake_env_check_items():
          "detail": "requests / websocket 可导入", "fix": None},
         {"id": "cdp", "name": "专用浏览器已启动", "status": "fail",
          "detail": "无法连接 127.0.0.1:9222", "fix": "启动专用浏览器"},
-        {"id": "boss_login", "name": "BOSS 登录状态", "status": "skip",
-         "detail": "跳过", "fix": None},
     ], False)
 
 
@@ -158,7 +156,7 @@ class BrowserDetectionTests(unittest.TestCase):
 class CollectCheckItemsTests(unittest.TestCase):
     """D5: run_check 重构后，检查逻辑与终端打印分离。"""
 
-    def _check(self, module, *, cdp_ok=True, logged_in=True, deps_ok=True):
+    def _check(self, module, *, cdp_ok=True, deps_ok=True, login_probe=None):
         class FakeRequests:
             ConnectionError = real_requests.ConnectionError
             Timeout = real_requests.Timeout
@@ -178,7 +176,7 @@ class CollectCheckItemsTests(unittest.TestCase):
             mock.patch.object(boss_constants, "detect_chromium_browsers",
                               return_value={"chrome": "C:/chrome.exe", "edge": None}),
             mock.patch.object(login, "check_login_state_tri",
-                              return_value="logged_in" if logged_in else "not_logged_in"),
+                              login_probe or mock.Mock(side_effect=AssertionError("环境检查不应探测登录态"))),
         ]
         for patcher in patchers:
             patcher.start()
@@ -193,7 +191,7 @@ class CollectCheckItemsTests(unittest.TestCase):
         items, all_pass = self._check(module)
         self.assertTrue(all_pass)
         self.assertEqual([item["id"] for item in items],
-                         ["browsers", "deps", "cdp", "boss_login"])
+                         ["browsers", "deps", "cdp"])
         for item in items:
             self.assertIn(item["status"], ("ok", "fail", "skip"))
             self.assertIn("name", item)
@@ -201,7 +199,7 @@ class CollectCheckItemsTests(unittest.TestCase):
             self.assertIn("fix", item)
         self.assertEqual(items[0]["detail"], "找到 Chrome ✅")
 
-    def test_cdp_down_fails_and_skips_login(self):
+    def test_cdp_down_fails_without_login_item(self):
         module = load_module()
         items, all_pass = self._check(module, cdp_ok=False)
         self.assertFalse(all_pass)
@@ -209,15 +207,15 @@ class CollectCheckItemsTests(unittest.TestCase):
         self.assertEqual(by_id["cdp"]["status"], "fail")
         # cdp 项只读展示：不再提供一键启动按钮（启动任务时自动拉起浏览器）
         self.assertIsNone(by_id["cdp"]["fix"])
-        self.assertEqual(by_id["boss_login"]["status"], "skip")
+        self.assertNotIn("boss_login", by_id)
 
-    def test_not_logged_in_fails_with_guidance(self):
+    def test_healthy_browser_does_not_probe_login(self):
         module = load_module()
-        items, all_pass = self._check(module, logged_in=False)
-        self.assertFalse(all_pass)
-        by_id = {item["id"]: item for item in items}
-        self.assertEqual(by_id["boss_login"]["status"], "fail")
-        self.assertIn("登录", by_id["boss_login"]["fix"])
+        probe = mock.Mock(side_effect=AssertionError("环境检查不应探测登录态"))
+        items, all_pass = self._check(module, login_probe=probe)
+        self.assertTrue(all_pass)
+        self.assertNotIn("boss_login", {item["id"] for item in items})
+        probe.assert_not_called()
 
     def test_missing_browser_fails_with_hint(self):
         load_module()
@@ -225,8 +223,7 @@ class CollectCheckItemsTests(unittest.TestCase):
         with mock.patch.object(runtime, "require_runtime_dependencies", return_value=True), \
                 mock.patch.object(boss_constants, "detect_chromium_browsers",
                                   return_value={"chrome": None, "edge": None}), \
-                mock.patch.object(runtime, "requests", mock.Mock()), \
-                mock.patch.object(login, "check_login_state_tri", return_value="logged_in"):
+                mock.patch.object(runtime, "requests", mock.Mock()):
             items, all_pass = module2.collect_check_items(cdp_port=9333)
         self.assertFalse(all_pass)
         self.assertEqual(items[0]["status"], "fail")
@@ -279,7 +276,7 @@ class EnvCheckApiTests(unittest.TestCase):
         self.assertEqual(set(groups), {"browser", "ai", "local"})
         self.assertEqual(
             [item["id"] for item in groups["browser"]["items"]],
-            ["browsers", "cdp", "boss_login"],
+            ["browsers", "cdp"],
         )
         self.assertEqual(groups["ai"]["items"][0]["id"], "ai_key")
         self.assertEqual(
@@ -287,6 +284,17 @@ class EnvCheckApiTests(unittest.TestCase):
             ["data_dir", "webui_dist", "deps"],
         )
         self.assertIsInstance(payload["checked_at"], int)
+
+    def test_env_check_does_not_resolve_browser_account(self):
+        with mock.patch("scripts.boss.smoke.collect_check_items",
+                        return_value=fake_env_check_items()), \
+                mock.patch("webui.pipeline_exec.load_browser_accounts",
+                           return_value={"a": {"id": "a"}}) as resolve_accounts:
+            response = self.client.get("/api/env-check")
+
+        self.assertEqual(response.status_code, 200)
+        resolve_accounts.assert_not_called()
+        self.assertNotIn("active_account", response.get_json())
 
 
 class ZhilianLoginProbeTests(unittest.TestCase):

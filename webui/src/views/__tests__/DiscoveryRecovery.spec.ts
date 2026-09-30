@@ -2,6 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import DiscoveryView from "../DiscoveryView.vue";
 import { expectedBackendBuildHash, setBuildIdentity } from "../../api";
+import { setThemePlatform } from "../../composables/useTheme";
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -69,6 +70,164 @@ describe("Discovery recovery paths", () => {
     setBuildIdentity(expectedBackendBuildHash);
     sessionStorage.clear();
     localStorage.clear();
+  });
+
+  it("shows an initial Flow restore failure instead of silently falling back", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) throw new Error("初始流程恢复失败");
+      return commonResponse(url) || response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-initial-flow-failure" } });
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="parallel-flow-error"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="parallel-flow-error"]').text()).toContain("初始流程恢复失败");
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/latest-running-task"))).toHaveLength(0);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/latest-pipeline-result"))).toHaveLength(0);
+
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("does not apply delayed Flow recovery after the view is unmounted", async () => {
+    let releaseCurrent!: (value: Response) => void;
+    const pendingCurrent = new Promise<Response>((resolve) => { releaseCurrent = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) return pendingCurrent;
+      if (url.includes("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      return commonResponse(url) || response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-unmount-recovery" } });
+    await Promise.resolve();
+    const flowRef = (wrapper.vm as unknown as {
+      parallelFlow?: { flow?: { value?: unknown } };
+    }).parallelFlow?.flow;
+    wrapper.unmount();
+
+    releaseCurrent(response({ ok: true, flow: {
+      id: "late-unmount-flow", profile_id: "profile-unmount-recovery", selection: "all", status: "running", tracks: [],
+    } }));
+    await flushPromises();
+    await flushPromises();
+
+    expect(flowRef?.value).toBeNull();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/latest-running-task"))).toHaveLength(0);
+    expect(wrapper.emitted("notify") || []).toHaveLength(0);
+    vi.unstubAllGlobals();
+  });
+
+  it("does not continue a delayed profile recovery after the view is unmounted", async () => {
+    let releaseNewProfile!: (value: Response) => void;
+    const pendingNewProfile = new Promise<Response>((resolve) => { releaseNewProfile = resolve; });
+    const newProfileTaskCalls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current?profile_id=profile-unmount-old")) return response({ ok: true, flow: null });
+      if (url.includes("/api/flows/current?profile_id=profile-unmount-new")) return pendingNewProfile;
+      if (url.includes("/api/latest-running-task?profile_id=profile-unmount-new")) {
+        newProfileTaskCalls.push(url);
+        return response({ ok: true, has_task: false });
+      }
+      return commonResponse(url) || response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-unmount-old" } });
+    await flushPromises();
+    await wrapper.setProps({ profileId: "profile-unmount-new" });
+    await Promise.resolve();
+    const flowRef = (wrapper.vm as unknown as {
+      parallelFlow?: { flow?: { value?: unknown } };
+    }).parallelFlow?.flow;
+    wrapper.unmount();
+
+    releaseNewProfile(response({ ok: true, flow: {
+      id: "late-profile-unmount-flow", profile_id: "profile-unmount-new", selection: "all", status: "running", tracks: [],
+    } }));
+    await flushPromises();
+    await flushPromises();
+
+    expect(flowRef?.value).toBeNull();
+    expect(newProfileTaskCalls).toHaveLength(0);
+    vi.unstubAllGlobals();
+  });
+
+  it("does not continue legacy auto-new-round after unmount while latest result is pending", async () => {
+    let releaseLatest!: (value: Response) => void;
+    const pendingLatest = new Promise<Response>((resolve) => { releaseLatest = resolve; });
+    const profileId = "profile-unmount-latest-result";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) return response({ ok: true, flow: null });
+      if (url.includes("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return pendingLatest;
+      return commonResponse(url) || response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId } });
+    await flushPromises();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/latest-pipeline-result"))).toHaveLength(1);
+    const epochKey = `career-scout-round-epoch:${profileId}`;
+    const epochBeforeUnmount = sessionStorage.getItem(epochKey);
+    expect(epochBeforeUnmount).toBeTruthy();
+
+    wrapper.unmount();
+    releaseLatest(response({
+      ok: true,
+      has_result: true,
+      source_run_id: "late-completed-run",
+      platform: "boss",
+      status: "completed",
+      result: {
+        jobs: [{ job_id: "late-job", platform: "boss", verdict: "match", title: "晚到结果" }],
+        dropped: [],
+        total_scraped: 1,
+        total_kept: 1,
+        total_matched: 1,
+        total_dropped: 0,
+      },
+    }));
+    await flushPromises();
+    await flushPromises();
+
+    expect(sessionStorage.getItem(epochKey)).toBe(epochBeforeUnmount);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/latest-running-task"))).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/result-history/archive-latest"))).toBe(false);
+    expect(wrapper.emitted("notify") || []).toHaveLength(0);
+    vi.unstubAllGlobals();
+  });
+
+  it("clears the previous Flow error when switching to a new profile", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current?profile_id=profile-error-old")) {
+        throw new Error("旧画像流程读取失败");
+      }
+      if (url.includes("/api/flows/current?profile_id=profile-error-new")) {
+        return response({ ok: true, flow: null });
+      }
+      return commonResponse(url) || response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-error-old" } });
+    await flushPromises();
+    expect(wrapper.get('[data-testid="parallel-flow-error"]').text()).toContain("旧画像流程读取失败");
+
+    await wrapper.setProps({ profileId: "profile-error-new" });
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="parallel-flow-error"]').exists()).toBe(false);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
   });
 
   it("shows the recrawl action only in the pending header and keeps it after dismissing the reminder", async () => {
@@ -317,6 +476,464 @@ describe("Discovery recovery paths", () => {
     }));
   }
 
+  it("Spec046 T037: refresh preserves the same unlocked page and does not auto-advance", async () => {
+    sessionStorage.setItem("career-scout-workflow:profile-v2-recovery", JSON.stringify({
+      version: 2, unfinished: true, activeStep: "screen", analysisReady: true,
+      keywords: [], selectedKeywords: [], cityText: "", filterValues: { boss: {}, zhilian: {} },
+      profileSummary: "", profileFacts: {}, scrapeTaskId: "scrape-r", screenTaskId: "screen-r",
+      scrapeCompleted: true, scrapeSnapshot: { status: "completed", progress: {}, logs: [] },
+      screenSnapshot: { status: "running", progress: {}, logs: [] }, resultLoaded: false, resultsPageSeen: false,
+    }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) {
+        return response({
+          ok: true,
+          flow: {
+            id: "flow-recovery", profile_id: "profile-v2-recovery", selection: "all", status: "running",
+            tracks: [
+              { id: "boss-track", platform: "boss", scrape_run_id: "scrape-r", screen_run_id: "screen-r", status: "running", stage: "screen" },
+              { id: "zhilian-track", platform: "zhilian", scrape_run_id: "scrape-z", screen_run_id: "screen-z", status: "running", stage: "screen" },
+            ],
+          },
+        });
+      }
+      if (url.includes("/api/task-state/scrape-r") || url.includes("/api/task-state/screen-r")) {
+        return response({ status: "running", progress: {}, logs: [] });
+      }
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-v2-recovery" } });
+    await flushPromises();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/task-state/scrape-r"))).toBe(true);
+    expect(wrapper.findAll('[data-testid="parallel-track-boss"]')).toHaveLength(2);
+    expect(wrapper.findAll('[data-testid="parallel-track-zhilian"]')).toHaveLength(2);
+    expect(wrapper.findAll("section.workflow-stack")[1]?.isVisible()).toBe(true);
+    const stepButtons = wrapper.findAll(".step-nav button");
+    expect(stepButtons[2]?.attributes("disabled")).toBeUndefined();
+    expect(stepButtons[3]?.attributes("disabled")).toBe("");
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("preserves a valid restored page when the all-platform Flow hydrates later", async () => {
+    sessionStorage.setItem("career-scout-workflow:profile-flow-restore", JSON.stringify({
+      version: 2, unfinished: true, activeStep: "search", analysisReady: false,
+      keywords: [], selectedKeywords: [], cityText: "", filterValues: { boss: {}, zhilian: {} },
+      profileSummary: "", profileFacts: {}, scrapeTaskId: "", screenTaskId: "",
+      scrapeCompleted: false, scrapeSnapshot: null, screenSnapshot: null,
+      resultLoaded: false, resultsPageSeen: false,
+    }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) {
+        return response({ ok: true, flow: {
+          id: "flow-valid-restore", profile_id: "profile-flow-restore", selection: "all", status: "running",
+          tracks: [
+            { id: "boss-track", platform: "boss", scrape_run_id: "scrape-flow", screen_run_id: "screen-flow", status: "running", stage: "screen" },
+            { id: "zhilian-track", platform: "zhilian", scrape_run_id: "scrape-flow-z", screen_run_id: "screen-flow-z", status: "running", stage: "screen" },
+          ],
+        } });
+      }
+      if (url.includes("/api/task-state/")) return response({ status: "running", progress: {}, logs: [] });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      return commonResponse(url) || response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-flow-restore" } });
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.findAll("section.workflow-stack")[0]?.isVisible()).toBe(true);
+    expect(wrapper.findAll("section.workflow-stack")[1]?.isVisible()).toBe(false);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps a restored all-platform Flow in the neutral theme", async () => {
+    setThemePlatform("boss");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) {
+        return response({
+          ok: true,
+          flow: {
+            id: "flow-neutral-recovery", profile_id: "profile-neutral-recovery", selection: "all", status: "running",
+            tracks: [
+              { id: "boss-track", platform: "boss", scrape_run_id: "scrape-neutral-b", status: "running", stage: "scrape" },
+              { id: "zhilian-track", platform: "zhilian", scrape_run_id: "scrape-neutral-z", status: "running", stage: "scrape" },
+            ],
+          },
+        });
+      }
+      if (url.includes("/api/task-state/")) return response({ status: "running", progress: {}, logs: [] });
+      return commonResponse(url) || response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-neutral-recovery" } });
+    await flushPromises();
+
+    expect(document.documentElement.getAttribute("data-platform")).toBe("all");
+    expect(wrapper.find('[data-testid="platform-current-all"]').exists()).toBe(true);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the all-platform theme when a late legacy task restore reports BOSS", async () => {
+    let legacyStarted = false;
+    let releaseLegacy!: () => void;
+    const legacyGate = new Promise<void>((resolve) => { releaseLegacy = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) {
+        return response({
+          ok: true,
+          flow: {
+            id: "flow-neutral-race", profile_id: "profile-neutral-race", selection: "all", status: "running",
+            tracks: [
+              { id: "boss-track", platform: "boss", status: "running", stage: "scrape" },
+              { id: "zhilian-track", platform: "zhilian", status: "running", stage: "scrape" },
+            ],
+          },
+        });
+      }
+      if (url.includes("/api/latest-running-task")) {
+        legacyStarted = true;
+        await legacyGate;
+        return response({
+          ok: true, has_task: true, task_id: "legacy-boss-task", kind: "scrape", status: "running",
+          platform: "boss", progress: {}, logs: [],
+        });
+      }
+      if (url.includes("/api/task-state/")) return response({ status: "running", progress: {}, logs: [] });
+      return commonResponse(url) || response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-neutral-race" } });
+    for (let attempt = 0; attempt < 10 && !legacyStarted; attempt += 1) {
+      await Promise.resolve();
+      await nextTick();
+    }
+    expect(legacyStarted).toBe(true);
+    releaseLegacy();
+    await flushPromises();
+    await flushPromises();
+
+    expect(document.documentElement.getAttribute("data-platform")).toBe("all");
+    expect(wrapper.find('[data-testid="platform-current-all"]').exists()).toBe(true);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("wires a later Flow result into the live view and emits one island notice", async () => {
+    const initialFlow = {
+      id: "flow-live-notice", profile_id: "profile-live-notice", selection: "all" as const, status: "running",
+      tracks: [
+        { id: "boss-track", platform: "boss" as const, scrape_run_id: "scrape-live-b", screen_run_id: null as string | null, result_run_id: null as string | null, status: "running", stage: "scrape" },
+        { id: "zhilian-track", platform: "zhilian" as const, scrape_run_id: "scrape-live-z", screen_run_id: null as string | null, result_run_id: null as string | null, status: "running", stage: "scrape" },
+      ],
+    };
+    let currentFlow = initialFlow;
+    let resultLoads = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) return response({ ok: true, flow: currentFlow });
+      if (url.includes("/api/task-state/")) return response({ status: "running", progress: {}, logs: [] });
+      if (url.endsWith("/api/task/pause/scrape-live-b")) return response({ ok: true });
+      if (url.endsWith("/api/flows/flow-live-notice/tracks/boss/pause")) {
+        currentFlow = {
+          ...currentFlow,
+          tracks: [
+            { ...currentFlow.tracks[0], status: "done", stage: "complete", result_run_id: "result-live-b" },
+            currentFlow.tracks[1],
+          ],
+        };
+        return response({ ok: true, flow: currentFlow });
+      }
+      if (url.includes("/api/flows/flow-live-notice/results")) {
+        resultLoads += 1;
+        const bossTrack = currentFlow.tracks[0];
+        return response({
+          ok: true,
+          results: {
+            flow_id: "flow-live-notice", selection: "all", status: "running",
+            tracks: [bossTrack.result_run_id ? {
+              platform: "boss", status: "done", stage: "complete", result_run_id: "result-live-b",
+              jobs: [{ job_id: "live-boss-job", platform: "boss", title: "新增岗位", verdict: "match" }], dropped: [],
+            } : { platform: "boss", status: "running", stage: "scrape", scrape_run_id: "scrape-live-b", jobs: [], dropped: [] }, { platform: "zhilian", status: "running", stage: "scrape", scrape_run_id: "scrape-live-z", jobs: [], dropped: [] }],
+          },
+        });
+      }
+      return commonResponse(url) || response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-live-notice" } });
+    await flushPromises();
+    await wrapper.get('[data-testid="parallel-boss-pause"]').trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    expect(resultLoads).toBeGreaterThan(0);
+    const notices = wrapper.emitted("island-notice") || [];
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.[0]).toMatchObject({ id: "flow-live-notice:boss:result-live-b", target: "results" });
+    expect(wrapper.find(".results-stage").exists()).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("refreshes 04 in place when a failed track adds projected jobs without a result id", async () => {
+    vi.useFakeTimers();
+    let currentFlow: Record<string, unknown> = {
+      id: "flow-failed-projection", profile_id: "profile-failed-projection", selection: "all", status: "running",
+      tracks: [
+        { id: "boss-track", platform: "boss", scrape_run_id: "scrape-failed-b", result_run_id: "boss-result", status: "running", stage: "scrape" },
+        { id: "zhilian-track", platform: "zhilian", result_run_id: null, status: "failed", stage: "screen" },
+      ],
+    };
+    let resultLoads = 0;
+    let projectionPhase = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) return response({ ok: true, flow: currentFlow });
+      if (url.includes("/api/task-state/scrape-failed-b")) return response({ status: "running", progress: {}, logs: [] });
+      if (url.includes("/api/flows/flow-failed-projection/results")) {
+        resultLoads += 1;
+        const zhilianJobs = projectionPhase > 0
+          ? [{ job_id: "failed-zhilian-job", platform: "zhilian", title: "失败轨仍保留的岗位", verdict: "" }]
+          : [];
+        return response({ ok: true, results: {
+          flow_id: "flow-failed-projection", selection: "all", status: "running",
+          tracks: [
+            { platform: "boss", status: "done", stage: "complete", result_run_id: "boss-result", jobs: [{ job_id: "boss-existing-job", platform: "boss", title: "已有岗位", verdict: "match" }], dropped: [] },
+            { platform: "zhilian", status: "failed", stage: "screen", result_run_id: null, unfinished_ai_screening: projectionPhase > 0, message: projectionPhase > 0 ? "智联 AI 筛选未完成" : "", jobs: zhilianJobs, dropped: [] },
+          ],
+        } });
+      }
+      return commonResponse(url) || response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-failed-projection" } });
+    await flushPromises();
+    await flushPromises();
+    const resultsStep = wrapper.findAll(".step-nav button").find((button) => button.text().includes("查看结果"));
+    expect(resultsStep).toBeTruthy();
+    await resultsStep!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".results-stage").isVisible()).toBe(true);
+    expect(wrapper.text()).toContain("已有岗位");
+    const noticesBeforeProjection = (wrapper.emitted("island-notice") || []).length;
+
+    projectionPhase = 1;
+    await vi.advanceTimersByTimeAsync(2100);
+    await flushPromises();
+    await flushPromises();
+
+    expect(resultLoads).toBeGreaterThan(1);
+    await wrapper.findAll("button").find((button) => button.text().includes("待确认"))!.trigger("click");
+    await nextTick();
+    expect(wrapper.text()).toContain("失败轨仍保留的岗位");
+    expect(wrapper.text()).toContain("智联 AI 筛选未完成");
+    expect((wrapper.emitted("island-notice") || []).slice(noticesBeforeProjection)).toHaveLength(0);
+    wrapper.unmount();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  // ---------- SPEC 046 判活口径返修：已中断轮不是活体 ----------
+  // 用户真实现场（画像 296b32cc038e494a / 流程 7c2e865496964794）：一条轨道已完成并
+  // 带全量结果（匹配 11 + 不匹配 23 + 已筛除 642），另一条轨道停在 AI 阶段、被服务
+  // 重启打断（377 条未判定）。此刻内存里没有任何活体 worker，用户点进 04 却看到
+  // 「匹配 0 / 不匹配 0 / 待确认 0 / 已筛除 0」——本轮结果从未提交进现场。
+  // 三条用例按真实调用链走（挂载 → 点 04 → 结果页数字），不单独测谓词返回值。
+  const doneLaneMatched = Array.from({ length: 11 }, (_unused, index) => ({
+    job_id: `kept-${index}`, platform_job_id: `kept-${index}`, title: `保留岗位 ${index}`, verdict: "match",
+  }));
+  const doneLaneUnmatched = Array.from({ length: 23 }, (_unused, index) => ({
+    job_id: `rejected-${index}`, platform_job_id: `rejected-${index}`, title: `不匹配岗位 ${index}`, verdict: "not_match",
+  }));
+  const doneLaneDropped = Array.from({ length: 642 }, (_unused, index) => ({
+    job_id: `dropped-${index}`, platform_job_id: `dropped-${index}`, title: `筛除岗位 ${index}`,
+  }));
+  const brokenLaneUnjudged = Array.from({ length: 377 }, (_unused, index) => ({
+    job_id: `unjudged-${index}`, platform_job_id: `unjudged-${index}`, title: `未判定岗位 ${index}`,
+  }));
+
+  /** 已完成轨道 + 指定状态的另一条轨道；zhilianStatus 用中断/运行两种口径复用同一形状。 */
+  function interruptedRoundFlow(zhilianStatus: string): Record<string, unknown> {
+    return {
+      id: "flow-interrupted-round",
+      profile_id: "profile-interrupted-round",
+      selection: "all",
+      status: zhilianStatus === "running" ? "running" : "interrupted",
+      tracks: [
+        {
+          id: "track-finished-lane", platform: "boss",
+          scrape_run_id: "scrape-finished-lane", screen_run_id: "screen-finished-lane",
+          result_run_id: "result-finished-lane", status: "done", stage: "complete",
+        },
+        {
+          id: "track-unjudged-lane", platform: "zhilian",
+          scrape_run_id: "scrape-unjudged-lane", screen_run_id: "screen-unjudged-lane",
+          result_run_id: null, status: zhilianStatus, stage: zhilianStatus === "running" ? "screen" : "ai",
+        },
+      ],
+    };
+  }
+
+  function interruptedRoundResults(zhilianStatus: string): Record<string, unknown> {
+    return {
+      flow_id: "flow-interrupted-round",
+      selection: "all",
+      status: zhilianStatus === "running" ? "running" : "interrupted",
+      tracks: [
+        {
+          platform: "boss", status: "done", stage: "complete",
+          scrape_run_id: "scrape-finished-lane", screen_run_id: "screen-finished-lane",
+          result_run_id: "result-finished-lane",
+          jobs: [...doneLaneMatched, ...doneLaneUnmatched], dropped: doneLaneDropped,
+        },
+        {
+          platform: "zhilian", status: zhilianStatus, stage: zhilianStatus === "running" ? "screen" : "ai",
+          scrape_run_id: "scrape-unjudged-lane", screen_run_id: "screen-unjudged-lane",
+          result_run_id: null, jobs: brokenLaneUnjudged, dropped: [],
+        },
+      ],
+    };
+  }
+
+  /** 用户被中断那一轮的会话现场：停在 03、没进过 04、也没有结果。 */
+  function seedInterruptedRoundScene(profileId: string): void {
+    sessionStorage.setItem(`career-scout-workflow:${profileId}`, JSON.stringify({
+      version: 2, unfinished: true, activeStep: "screen", analysisReady: true,
+      keywords: [], selectedKeywords: [], cityText: "", filterValues: { boss: {}, zhilian: {} },
+      profileSummary: "", profileFacts: {},
+      scrapeTaskId: "", screenTaskId: "", pausedRunId: "", interruptedRunId: "", recrawlTaskId: "",
+      scrapeCompleted: true,
+      scrapeSnapshot: { status: "completed", progress: { message: "上次抓取已完成" }, logs: [] },
+      screenSnapshot: { status: "interrupted", progress: {}, logs: [] },
+      recrawlSnapshot: null,
+      pipelineResult: null, pipelineResultRunId: "", currentRoundStatus: "",
+      resultLoaded: false, resultsPageSeen: false,
+    }));
+  }
+
+  function stubInterruptedRoundFetch(zhilianStatus: string) {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) {
+        return response({ ok: true, flow: interruptedRoundFlow(zhilianStatus) });
+      }
+      if (url.includes("/api/flows/flow-interrupted-round/results")) {
+        return response({ ok: true, results: interruptedRoundResults(zhilianStatus) });
+      }
+      if (url.includes("/api/task-state/")) {
+        return response({
+          status: zhilianStatus === "running" && url.includes("screen-unjudged-lane") ? "running" : "completed",
+          progress: {}, logs: [], total: 411, success_count: 34, fail_count: 0, unstarted_count: 0,
+        });
+      }
+      if (url.includes("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      return commonResponse(url) || response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  async function enterResultsStep(wrapper: ReturnType<typeof mount>) {
+    const resultsStep = wrapper.findAll(".step-nav button").find((button) => button.text().includes("查看结果"));
+    expect(resultsStep).toBeTruthy();
+    await resultsStep!.trigger("click");
+    await flushPromises();
+    await flushPromises();
+  }
+
+  /** 视图实例上的现场读数：沿用本文件的 (wrapper.vm as unknown as ...) 惯例，
+   *  只补类型，不改任何断言口径（script setup 顶层 ref 在 vm 上已解包，嵌套对象不解包）。 */
+  function recoveryViewModel(wrapper: ReturnType<typeof mount>) {
+    return wrapper.vm as unknown as {
+      activeStep: string;
+      resultsPageSeen: boolean;
+      resultLoaded: boolean;
+      scopeLocked: boolean;
+      pipelineBusy: boolean;
+      hasLiveTaskState(): boolean;
+      parallelFlow: { canStartNewRound: { value: boolean } };
+    };
+  }
+
+  it("已中断的并行流程进入 04 后按本轮结果给出四个桶", async () => {
+    const profileId = "profile-interrupted-round";
+    seedInterruptedRoundScene(profileId);
+    stubInterruptedRoundFetch("interrupted");
+
+    const wrapper = mount(DiscoveryView, { props: { profileId } });
+    await flushPromises();
+    await flushPromises();
+
+    await enterResultsStep(wrapper);
+
+    const vm = recoveryViewModel(wrapper);
+    expect(vm.activeStep).toBe("results");
+    expect(vm.resultsPageSeen).toBe(true);
+    expect(vm.resultLoaded).toBe(true);
+    expect(wrapper.findAll(".vtab-count").map((count) => count.text())).toEqual(["11", "23", "377", "642"]);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("仍有活体轨道时 04 不接本轮结果，也不记「已进 04 页」", async () => {
+    const profileId = "profile-interrupted-round";
+    seedInterruptedRoundScene(profileId);
+    stubInterruptedRoundFetch("running");
+
+    const wrapper = mount(DiscoveryView, { props: { profileId } });
+    await flushPromises();
+    await flushPromises();
+
+    const vm = recoveryViewModel(wrapper);
+    expect(vm.hasLiveTaskState()).toBe(true);
+
+    await enterResultsStep(wrapper);
+
+    expect(vm.resultsPageSeen).toBe(false);
+    expect(vm.resultLoaded).toBe(false);
+    expect(wrapper.findAll(".vtab-count").map((count) => count.text())).toEqual(["0", "0", "0", "0"]);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("已中断仍锁住本轮范围与新一轮提交（判活放开不放过头）", async () => {
+    const profileId = "profile-interrupted-round";
+    seedInterruptedRoundScene(profileId);
+    stubInterruptedRoundFetch("interrupted");
+
+    const wrapper = mount(DiscoveryView, { props: { profileId } });
+    await flushPromises();
+    await flushPromises();
+
+    const vm = recoveryViewModel(wrapper);
+    expect(vm.scopeLocked).toBe(true);
+    expect(vm.pipelineBusy).toBe(true);
+    expect(vm.parallelFlow.canStartNewRound.value).toBe(false);
+
+    await enterResultsStep(wrapper);
+
+    // 结果已接进现场，本轮范围与提交守卫不因此放松。
+    expect(vm.scopeLocked).toBe(true);
+    expect(vm.pipelineBusy).toBe(true);
+    expect(vm.parallelFlow.canStartNewRound.value).toBe(false);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
   it("Spec041: 智联完成结果页刷新后仍在智联结果页（平台/分类/选中/滚动全保留）", async () => {
     const profileId = "profile-refresh-zhilian";
     seedCompletedScene({
@@ -340,6 +957,10 @@ describe("Discovery recovery paths", () => {
     });
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/flows/current")) return response({
+        ok: true,
+        flow: { id: "flow-refresh-zhilian", profile_id: profileId, selection: "zhilian", status: "done", tracks: [] },
+      });
       if (url.includes("/api/latest-running-task")) return response({ ok: true, has_task: false });
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) {
@@ -395,6 +1016,10 @@ describe("Discovery recovery paths", () => {
     });
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/flows/current")) return response({
+        ok: true,
+        flow: { id: "flow-refresh-boss", profile_id: profileId, selection: "boss", status: "done", tracks: [] },
+      });
       if (url.includes("/api/latest-running-task")) return response({ ok: true, has_task: false });
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
       if (url.includes("/api/filter-labels")) {
@@ -439,6 +1064,10 @@ describe("Discovery recovery paths", () => {
     });
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/flows/current")) return response({
+        ok: true,
+        flow: { id: "flow-refresh-zhilian", profile_id: profileId, selection: "zhilian", status: "done", tracks: [] },
+      });
       if (url.includes("/api/latest-running-task")) {
         // 后端残留的终态 BOSS 抓取任务：不得把恢复好的智联结果页改回 BOSS。
         return response({

@@ -50,6 +50,8 @@ type CleanupActionResponse = {
   error?: string;
   cleanup_error?: string;
   cleanup?: { ok?: boolean } | null;
+  status?: string;
+  message?: string;
 };
 
 function hasCleanupFailure(data: CleanupActionResponse): boolean {
@@ -61,9 +63,9 @@ function hasCleanupFailure(data: CleanupActionResponse): boolean {
 // 只有真正没有待处理结果的终态，才允许刷新后自动开启新一轮。
 // completed_with_pending/partial 仍有待确认岗位，scraped_only 也只是抓取完成。
 const FULLY_COMPLETED_TASK_STATUSES = new Set(["done", "completed", "succeeded"]);
-
 export function useDiscoveryTasks(state: DiscoveryState, deps: TasksNeeds) {
   const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, activeTaskRestored, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, executionSelection, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, historyStore, interruptedRunId, isScrapedOnly, taskCompletedToast, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileId, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsBootstrapPending, resultsPageSeen, resumeAnalysis, resumeAnalysisLandOnReturn, resumeAnalysisPhase, resumeAnalysisReset, schemaLoader, scopePreview, scopePreviewBusy, scrapeActionBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform, unfinishedWorkflowRestored, workflowEpoch } = state;
+  const navigateStep = (step: string, options?: Parameters<DiscoveryState["navigateStep"]>[1]) => state.navigateStep(step, options);
   const { platformState } = state;
   const sceneStore = useDiscoverySceneState();
   const { cancelScrape, clearLatestResult, clearWorkflowState, continueAiScreen, enterScreenStep, fetchMergedLatestResult, finishPausedTask, isLoginErrorCode, jobId, loadLatestResult, notify, restoreRunningTask, setPipelineResult, showLoginGuide, startAiScreen } = deps;
@@ -165,7 +167,12 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       pollRetryCount.value = 0;
       restoredTaskHint.value = "";
       const hasJobs = typeof data.scraped_count === "number" ? data.scraped_count > 0 : true;
-      const shouldAutoScreen = kind === "scrape" && (autoScreenArmed.value || data.auto_screen === true) && hasJobs;
+      const flowOwnedScrape = kind === "scrape"
+        && deps.isFlowOwnedScrapeTask?.(taskId) === true;
+      const shouldAutoScreen = kind === "scrape"
+        && !flowOwnedScrape
+        && (autoScreenArmed.value || data.auto_screen === true)
+        && hasJobs;
       autoScreenArmed.value = false;
       if (kind === "scrape") {
         scrapeBusy.value = false;
@@ -187,7 +194,7 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
           data.status === "completed_with_pending" ? "warning" : "success",
         );
         // B038：单独抓取完成即自动保存未筛选轮，刷新后不再依赖手动"直接查看结果"。
-        if (kind === "scrape" && !shouldAutoScreen && hasJobs) {
+        if (kind === "scrape" && !flowOwnedScrape && !shouldAutoScreen && hasJobs) {
           await saveScrapedOnlySnapshot();
           if (roundEpoch !== workflowEpoch.value) return;
         }
@@ -244,7 +251,7 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
           // 刷新历史列表，让刚完成的轮次以已完成状态出现在历史中。
           void historyStore.loadHistory({ silent: true });
         } else {
-          activeStep.value = "results";
+          navigateStep("results", { source: "system" });
         }
         deps.notify(
           data.status === "completed_with_pending"
@@ -309,7 +316,7 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
         clearScrapeRecoveryMarkers();
         scrapeTaskId.value = taskId;
         analysisReady.value = true;
-        activeStep.value = "search";
+        navigateStep("search", { source: "system" });
         restoredTaskHint.value = "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取";
       } else {
         // 服务中断属于错误终态：保留快照和查看入口，但不把它登记为
@@ -475,7 +482,7 @@ async function viewScrapedOnly() {
   const outcome = await saveScrapedOnlySnapshot(true);
   if (outcome === "failed") return;
   activeCategory.value = "matched";
-  activeStep.value = "results";
+  navigateStep("results", { source: "system" });
   deps.notify(
     outcome === "zero" ? "本轮没有抓到岗位，可回到第二步重新抓取" : "已保存本轮抓取结果（已抓取，未筛选）",
     outcome === "zero" ? "warning" : "success",
@@ -486,14 +493,32 @@ async function viewScrapedOnly() {
 // 后 2 次保持 64s，总等待约 4 分钟。达上限后主动放弃并提示用户。
 
 
-async function cancelActiveTasksForNewRound(silent = false): Promise<boolean> {
+async function cancelActiveTasksForNewRound(
+  silent = false,
+  expectedWorkflowEpoch?: number,
+): Promise<boolean> {
+  const isCurrent = () => expectedWorkflowEpoch === undefined
+    || expectedWorkflowEpoch === workflowEpoch.value;
+  if (!isCurrent()) return false;
   lastCancellationCleanupFailed = false;
   const ids = new Set<string>();
-  for (const id of [
-    scrapeTaskId.value, screenTaskId.value, recrawlTaskId.value,
-    pausedRunId.value, interruptedRunId.value,
-  ]) {
+  for (const id of [scrapeTaskId.value, screenTaskId.value, recrawlTaskId.value]) {
+    // The local snapshot is only one projection.  A shared task id may have
+    // a terminal screening row while its search row is still active, so the
+    // server must always decide whether cancellation is a no-op or a conflict.
     if (id) ids.add(id);
+  }
+  for (const id of deps.getFlowTaskIds?.() || []) {
+    const normalized = String(id || "").trim();
+    if (normalized) ids.add(normalized);
+  }
+  for (const id of [pausedRunId.value, interruptedRunId.value]) if (id) ids.add(id);
+  // A Flow envelope/Track can be active while the legacy page has no local
+  // task projection yet.  Do not guess with latest-running-task in that
+  // state: without a durable Flow run id it is unsafe to reset another lane.
+  if (state.flowActive.value && !ids.size) {
+    if (!silent) deps.notify("当前流程状态暂不可确认，请刷新后重试", "error");
+    return false;
   }
   if (!ids.size) {
     try {
@@ -506,6 +531,7 @@ async function cancelActiveTasksForNewRound(silent = false): Promise<boolean> {
           ? `/api/latest-running-task?profile_id=${encodeURIComponent(profileId.value)}`
           : "/api/latest-running-task",
       );
+      if (!isCurrent()) return false;
       const returnedProfile = String(latest.profile_id || "");
       const sameProfile = !returnedProfile
         || returnedProfile === String(profileId.value || "");
@@ -514,14 +540,23 @@ async function cancelActiveTasksForNewRound(silent = false): Promise<boolean> {
   }
   let cancelled = false;
   for (const id of ids) {
+    if (!isCurrent()) return false;
     try {
       const data = await apiRequest<CleanupActionResponse>(
         `/api/task/cancel/${encodeURIComponent(id)}`,
         { method: "POST" },
       );
+      if (!isCurrent()) return false;
+      if (String(data.status || "").trim().toLowerCase() === "finalizing") {
+        if (!silent) {
+          deps.notify(data.message || "任务正在收尾，取消未执行，请稍后重试", "warning");
+        }
+        return false;
+      }
       if (hasCleanupFailure(data)) lastCancellationCleanupFailed = true;
       cancelled = true;
     } catch (error) {
+      if (!isCurrent()) return false;
       const payload = (error as ApiError).payload as {
         error?: string;
         cleanup_error?: string;
@@ -541,6 +576,7 @@ async function cancelActiveTasksForNewRound(silent = false): Promise<boolean> {
       return false;
     }
   }
+  if (!isCurrent()) return false;
   // 取消接口确认后，先把本地任务槽收口为非活动终态，再清理最新结果。
   // 否则 clearLatestResult 会继续看到旧的 paused/running 快照，拒绝归档，
   // “放弃本轮”就会出现按钮点了但现场仍留在原步骤的假成功。
@@ -569,7 +605,7 @@ async function cancelActiveTasksForNewRound(silent = false): Promise<boolean> {
   }
   if (pausedRunId.value && ids.has(pausedRunId.value)) pausedRunId.value = "";
   if (interruptedRunId.value && ids.has(interruptedRunId.value)) interruptedRunId.value = "";
-  if (cancelled && !silent) {
+  if (cancelled && !silent && isCurrent()) {
     deps.notify(
       lastCancellationCleanupFailed ? "任务已停止，但浏览器清理失败" : "已结束旧任务，开始新一轮",
       lastCancellationCleanupFailed ? "error" : "info",
@@ -948,11 +984,14 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
  */
 
 
-async function maybeAutoStartNewRound(): Promise<void> {
+async function maybeAutoStartNewRound(): Promise<boolean> {
+  const recoveryEpoch = workflowEpoch.value;
+  const isCurrentRecovery = () => recoveryEpoch === workflowEpoch.value;
+  if (!isCurrentRecovery()) return false;
   // 未完成流程（本地有未完成快照）→ 恢复现场（B068 行为保留，不改）
-  if (unfinishedWorkflowRestored.value) return;
+  if (unfinishedWorkflowRestored.value) return false;
   // 035：未结束任务真实存在时，刷新/启动优先恢复现场，不自动开始新一轮、不取消任务。
-  if (hasLiveTaskState(state)) return;
+  if (hasLiveTaskState(state)) return false;
   // Spec041 返工（真实验收失败项一）：已完成（已进 04 页 / 结束保存）不再
   // "刷新即自动开新一轮"——那会把刚恢复的当前轮结果与现场清成 01 空上传页。
   // 完成态优先原地接回；会话存档缺失时从后端最新轮补齐；确实取不到结果
@@ -960,20 +999,22 @@ async function maybeAutoStartNewRound(): Promise<void> {
   if (resultsPageSeen.value || finishedPartial.value) {
     if (activeStep.value === "results" && resultLoaded.value && pipelineResult.value) {
       resultsBootstrapPending.value = false;
-      return;
+      return false;
     }
     const fetched = await deps.fetchMergedLatestResult();
+    if (!isCurrentRecovery()) return false;
     if (fetched) {
       await deps.loadLatestResult();
+      if (!isCurrentRecovery()) return false;
       if (resultLoaded.value && pipelineResult.value) {
         resultsBootstrapPending.value = false;
-        activeStep.value = "results";
-        return;
+        navigateStep("results", { source: "system" });
+        return false;
       }
     }
     resultsBootstrapPending.value = false;
-    await resetWorkflow();
-    return;
+    if (!isCurrentRecovery()) return false;
+    return resetWorkflowInternal(false, recoveryEpoch);
   }
   // 有恢复的活动任务：仅已完成终态属于完成态 → 自动新一轮；否则恢复现场
   if (activeTaskRestored.value) {
@@ -981,12 +1022,13 @@ async function maybeAutoStartNewRound(): Promise<void> {
       screenSnapshot.value?.status || scrapeSnapshot.value?.status || "",
     );
     const completedTask = FULLY_COMPLETED_TASK_STATUSES.has(taskStatus);
-    if (!completedTask) return;
+    if (!completedTask) return false;
   }
   // 无进行中任务（或已完成终态）：查最新历史轮（只查不设，不糊脸）
   try {
     const fetched = await deps.fetchMergedLatestResult();
-    if (!fetched) return;  // 无历史轮（全新用户）→ 保持干净 01 页
+    if (!isCurrentRecovery()) return false;
+    if (!fetched) return false;  // 无历史轮（全新用户）→ 保持干净 01 页
     // 025 B078：任一平台最新轮为未完成态（暂停/中断/已抓未筛选/未知）→
     // 属"有未完成流程"→ 恢复现场（B068 不变）；全部完成态才自动新一轮。
     const platformStatuses = Object.values(fetched.platformStatuses ?? {})
@@ -997,8 +1039,8 @@ async function maybeAutoStartNewRound(): Promise<void> {
     if (platformStatuses.length && !anyUnfinished) {
       // 上一轮已正常走完、结果已落历史 → 自动「开始新一轮」
       //（复用按钮背后逻辑，不糊脸；想看结论去历史）
-      await resetWorkflow();
-      return;
+      if (!isCurrentRecovery()) return false;
+      return resetWorkflowInternal(false, recoveryEpoch);
     }
     // 043：未收尾轮（只抓取未筛选）的"一次性提醒"闸门——
     // 已提醒过：不自动接回（岛不提醒、页面也不落）；首次：标记并推岛一行字。
@@ -1008,13 +1050,14 @@ async function maybeAutoStartNewRound(): Promise<void> {
       source_run_id?: string;
     };
     if (String(newerData.status || "") === "scraped_only") {
-      if (newerData.notice_sent) return;
+      if (newerData.notice_sent) return false;
       const noticeRunId = String(newerData.source_run_id || "");
       try {
         const marked = await apiRequest<{
           marked?: boolean;
           notice?: { run_id?: string; message?: string } | null;
         }>("/api/run-notice/mark", { method: "POST", json: { run_id: noticeRunId } });
+        if (!isCurrentRecovery()) return false;
         if (marked?.marked && marked.notice?.message) {
           deps.emit("island-notice", {
             id: `run-notice-${marked.notice.run_id || noticeRunId}`,
@@ -1028,14 +1071,23 @@ async function maybeAutoStartNewRound(): Promise<void> {
     }
     // 未完成态（暂停/中断/已抓未筛选/status 缺失）→ 恢复现场（原 loadLatestResult）
     await deps.loadLatestResult();
+    if (!isCurrentRecovery()) return false;
+    return false;
   } catch {
     // 历史轮查询失败：回退原恢复行为，不误重置
+    if (!isCurrentRecovery()) return false;
     await deps.loadLatestResult();
+    if (!isCurrentRecovery()) return false;
+    return false;
   }
 }
 
 
-async function resetWorkflowInternal(silent = false): Promise<boolean> {
+async function resetWorkflowInternal(
+  silent = false,
+  expectedWorkflowEpoch?: number,
+): Promise<boolean> {
+  if (expectedWorkflowEpoch !== undefined && expectedWorkflowEpoch !== workflowEpoch.value) return false;
   // Spec041：轮次身份由现场存档生成并持有（同一轮跨抓取/筛选/结果稳定）；
   // 这里只做两件事——把旧轮现场归档成该轮历史查看现场，然后把身份换成新轮。
   const oldRunEpoch = sceneStore.roundEpoch.value || sceneStore.ensureRoundEpoch(profileId.value);
@@ -1052,14 +1104,16 @@ async function resetWorkflowInternal(silent = false): Promise<boolean> {
   };
   // 先使旧轮所有尚未返回的请求失效，再等待取消/归档；否则旧轮响应可能
   // 在清空现场后重新写回结果页。
-  workflowEpoch.value += 1;
+  const resetEpoch = state.invalidateWorkflowEpoch();
   // 先停掉旧轮询，避免取消/归档等待期间旧任务回调把已清空的现场写回来。
   if (pollTimer.value) {
     window.clearTimeout(pollTimer.value);
     pollTimer.value = undefined;
   }
-  if (!(await cancelActiveTasksForNewRound(silent))) return false;
+  if (!(await cancelActiveTasksForNewRound(silent, resetEpoch))) return false;
+  if (resetEpoch !== workflowEpoch.value) return false;
   if (!(await deps.clearLatestResult())) return false;
+  if (resetEpoch !== workflowEpoch.value) return false;
   sceneStore.getCurrent(oldSceneIdentity);
   sceneStore.archiveCurrentForNewRound(oldRunEpoch, oldHistoryRunId, oldSceneIdentity.platform);
   sceneStore.rotateRoundEpoch(profileId.value);
@@ -1067,7 +1121,7 @@ async function resetWorkflowInternal(silent = false): Promise<boolean> {
   // 026 B078：开始新一轮即清除持久化的已结束事实。
   deps.clearFinishedState?.();
   resultsPageSeen.value = false;
-  activeStep.value = "upload";
+  state.resetNavigation();
   analysisReady.value = false;
   scrapeCompleted.value = false;
   resultLoaded.value = false;
@@ -1123,16 +1177,16 @@ async function resetWorkflowInternal(silent = false): Promise<boolean> {
   return true;
 }
 
-async function resetWorkflow() {
-  await resetWorkflowInternal();
+async function resetWorkflow(): Promise<boolean> {
+  return resetWorkflowInternal();
 }
 
 /**
  * 结束当前业务轮次：取消仍占用的任务、归档当前最新结果并清空现场，
  * 让用户明确回到第一步。与“结束并保存结果”不同，这里不把本轮停在结果页。
  */
-async function abandonRound(): Promise<void> {
-  if (cancelBusy.value || deps.roundFlow.busyAction) return;
+async function abandonRound(): Promise<boolean> {
+  if (cancelBusy.value || deps.roundFlow.busyAction) return false;
   cancelBusy.value = true;
   try {
     const cleared = await resetWorkflowInternal(true);
@@ -1144,6 +1198,7 @@ async function abandonRound(): Promise<void> {
         lastCancellationCleanupFailed ? "error" : "info",
       );
     }
+    return cleared;
   } finally {
     cancelBusy.value = false;
   }

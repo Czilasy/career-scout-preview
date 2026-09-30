@@ -3,157 +3,38 @@
 任务声明 / 断言 / runner 包装经 ctx 取用。
 """
 from __future__ import annotations
-import threading
 import uuid
 import hashlib
 import json
-import sqlite3
 from flask import jsonify, request
 from webui.constants import (
-    _MSG_TASK_ALREADY_RUNNING,
-    _MSG_TASK_NOT_FOUND,
     _MSG_UNSUPPORTED_PLATFORM,
-    _MSG_USER_STOPPED_SCRAPE,
 )
-from webui.task_status import _public_task_status, is_resume_eligible_run
 from webui.error_registry import (
-    ALIAS_TO_CODE,
-    ERROR_TAXONOMY,
     is_recoverable_systemic_block,
-    resolve_code,
 )
-from webui.pipeline_exec_status import user_visible_failure_reason
-from webui.resume_identity import (
-    activate_frozen_identity_candidate,
-    append_account_switch_log_line,
-    commit_continue_identity,
-    invalidate_login_cache_for_resume,
-    prepare_continue_identity,
-)
-from webui.task_runners import _iso_epoch_ms
 from webui.logging_setup import get_logger
-from webui.exec_search_whitebox import begin_scrape_whitebox, mark_scrape_submission_failed
-from webui.task_pause_support import (
-    STOP_MODE_CANCEL,
-    ScrapeCheckpointReadError,
-    normalize_recoverable_failed_run,
-    request_stop,
-    scrape_checkpoint,
+from webui.exec_search_whitebox import begin_scrape_whitebox
+from webui.store_flow import FlowConflictError
+from webui.flow_service import public_flow_message
+from webui.flow_submission_service import FlowSubmissionService
+from webui.flow_future import attach_scrape_future_failure
+from webui.flow_task_state import (
+    FlowStateClosureError,
+    register_flow_state_error_handler,
 )
+from webui.exec_search_cancel import register_cancel_execute_search
+from webui.exec_search_resume import (
+    _public_failure_details,
+    register_search_continue,
+)
+from webui.exec_search_scope import register_search_scope_preview
 _logger = get_logger(__name__)
 
 
-def _is_recoverable_resume_failure(code: object) -> bool:
-    """Resume-time source failures stay paused, including non-systemic retries."""
-    canonical = resolve_code(code, default="")
-    taxonomy = ERROR_TAXONOMY.get(canonical) or {}
-    return bool(
-        is_recoverable_systemic_block(canonical)
-        or (
-            taxonomy.get("category") == "source"
-            and taxonomy.get("retryable")
-        )
-    )
-
-
-def _public_failure_details(
-        code: object, diagnostic: object = "", platform: str = "",
-) -> tuple[str, str]:
-    """Return a canonical code and safe public reason for one failure."""
-    raw_code = str(code or "").strip()
-    canonical = raw_code
-    if raw_code.startswith("source_") or raw_code in ALIAS_TO_CODE:
-        canonical = resolve_code(raw_code, default="source_unknown_error")
-    is_source = canonical.startswith("source_")
-    if not is_source:
-        return canonical, str(diagnostic or raw_code or "")
-    reason = user_visible_failure_reason(
-        canonical, "", platform,
-    )
-    return canonical, reason
-
-
 def register_exec_search_routes(app, ctx):
-    @app.route("/api/search-scope/preview", methods=["POST"])
-    def search_scope_preview():
-        """SPEC011 T004 / tasks005 T402: 后端权威范围预览与校验（平台感知）。
-        不改变任务工作量字段；仅返回规范化后的 scope 和去重信息。
-        对应 HTTP API POST /api/search-scope/preview。
-        """
-        from webui.execution_config import CityValidationError, preview_scope
-        from webui.location_catalog import LocationCatalogUnavailable
-        from webui.platforms import (
-            UnknownPlatformError,
-            get_platform_or_none,
-            validate_platform_key,
-        )
-        body = request.get_json(silent=True) or {}
-        platform_raw = body.get("platform") or "boss"
-        try:
-            validate_platform_key(platform_raw)
-        except UnknownPlatformError:
-            return jsonify({
-                "ok": False,
-                "error_code": "platform_validation_failed",
-                "user_message": _MSG_UNSUPPORTED_PLATFORM,
-            }), 400
-        reg = get_platform_or_none(platform_raw)
-        if reg is None:
-            return jsonify({
-                "ok": False,
-                "error_code": "platform_validation_failed",
-                "user_message": "平台未注册",
-            }), 400
-        if not reg.enabled_for_new_tasks:
-            return jsonify({
-                "ok": False,
-                "error_code": "platform_disabled",
-                "user_message": reg.availability_reason or "平台暂不可用",
-            }), 503
-        keywords = body.get("keywords")
-        scope_kind = body.get("scope_kind", "cities")
-        cities = body.get("cities", [])
-        pages_per_combination = body.get("pages_per_combination", 1)
-        locations = body.get("locations") or []
-        if not isinstance(keywords, list):
-            return jsonify({"ok": False, "error": "keywords 必须是数组"}), 400
-        if scope_kind not in ("cities", "nationwide"):
-            return jsonify({"ok": False, "error": "scope_kind 必须是 cities 或 nationwide"}), 400
-        if not isinstance(cities, list):
-            return jsonify({"ok": False, "error": "cities 必须是数组"}), 400
-        if not isinstance(locations, list):
-            return jsonify({"ok": False, "error": "locations 必须是数组"}), 400
-        if isinstance(pages_per_combination, bool) or not isinstance(
-            pages_per_combination, int
-        ):
-            return jsonify({"ok": False, "error": "pages_per_combination 必须是整数"}), 400
-        pages_int = pages_per_combination
-        try:
-            result = preview_scope(
-                keywords=keywords,
-                scope_kind=scope_kind,
-                cities=cities,
-                pages_per_combination=pages_int,
-                locations=locations,
-                platform=platform_raw,
-            )
-            ctx.scope_previews[result["scope"]["scope_digest"]] = dict(result["scope"])
-            return jsonify({"ok": True, **result})
-        except LocationCatalogUnavailable:
-            return jsonify({"ok": False, "error_code": "location_catalog_unavailable", "error": "地点目录暂时不可用，按城市级搜索"}), 503
-        except CityValidationError as e:
-            return jsonify({
-                "ok": False,
-                "error_code": "city_validation_failed",
-                "error": str(e),
-                "details": e.details,
-            }), 422
-        except ValueError as e:
-            return jsonify({
-                "ok": False,
-                "error_code": "scope_validation_failed",
-                "error": str(e),
-            }), 422
+    register_flow_state_error_handler(app)
+    register_search_scope_preview(app, ctx)
     @app.route("/api/execute-search", methods=["POST"])
     def execute_search():
         """Stage 3 / tasks005 T402: 平台感知搜索 run 创建。
@@ -181,35 +62,118 @@ def register_exec_search_routes(app, ctx):
             validate_platform_key,
         )
         body = request.get_json(silent=True) or {}
+        career_profile_id = str(body.get("profile_id") or "").strip() or None
+        requested_flow_id = str(body.get("flow_id") or "").strip() or None
+        requested_platform = str(body.get("platform") or "").strip().lower()
+        if requested_flow_id and not requested_platform:
+            return jsonify({
+                "ok": False,
+                "error": "platform_identity_missing",
+                "error_code": "platform_identity_missing",
+                "message": "Flow 任务必须显式提供平台身份",
+            }), 409
+        platform_raw = requested_platform or "boss"
+        flow_service = getattr(ctx, "flow_service", None)
+        submission_service = getattr(ctx, "flow_submission_service", None)
+        if submission_service is None:
+            submission_service = FlowSubmissionService(ctx, flow_service)
+
+        def _record_preflight(error_code, *, recoverable=False, reason=""):
+            if not requested_flow_id or not career_profile_id or flow_service is None:
+                return
+            try:
+                flow_service.record_preflight_failure(
+                    flow_id=requested_flow_id,
+                    platform=platform_raw,
+                    profile_id=career_profile_id,
+                    error_code=error_code,
+                    recoverable=recoverable,
+                    reason=reason,
+                )
+            except Exception as state_exc:
+                _logger.warning(
+                    "Flow preflight failure state write failed (%s)",
+                    type(state_exc).__name__,
+                )
+
         script_params = body.get("script_params") or body
         if not isinstance(script_params, dict):
+            _record_preflight("track_submit_failed")
             return jsonify({"ok": False, "error": "无效的请求体"}), 400
+
+        def _remember_submission_snapshot():
+            """Keep only safe search inputs for a no-run preflight retry."""
+            if not requested_flow_id or not career_profile_id or flow_service is None:
+                return True, "", ""
+            safe_script_params = {
+                key: script_params.get(key)
+                for key in ("keyword", "city", "locations", "pages")
+                if key in script_params
+            }
+            snapshot = {
+                "script_params": safe_script_params,
+                "scope_digest": str(body.get("scope_digest") or ""),
+                "auto_screen": bool(body.get("auto_screen")),
+                "auto_screen_fields": (
+                    dict(body.get("auto_screen_fields"))
+                    if isinstance(body.get("auto_screen_fields"), dict) else {}
+                ),
+                "auto_screen_profile": str(body.get("auto_screen_profile") or ""),
+                "auto_screen_facts": (
+                    dict(body.get("auto_screen_facts"))
+                    if isinstance(body.get("auto_screen_facts"), dict) else {}
+                ),
+                "profile_summary": str(body.get("profile_summary") or ""),
+                "profile_facts": (
+                    dict(body.get("profile_facts"))
+                    if isinstance(body.get("profile_facts"), dict) else {}
+                ),
+                "cross_platform_dedupe": bool(body.get("cross_platform_dedupe", True)),
+            }
+            try:
+                flow_service.save_track_submission_snapshot(
+                    flow_id=requested_flow_id,
+                    platform=platform_raw,
+                    profile_id=career_profile_id,
+                    snapshot=snapshot,
+                )
+                return True, "", ""
+            except FlowConflictError as state_exc:
+                return False, "flow_conflict", public_flow_message("flow_conflict", state_exc)
+            except Exception as state_exc:
+                _logger.warning(
+                    "Flow preflight snapshot write failed (%s)",
+                    type(state_exc).__name__,
+                )
+                return False, "track_submit_failed", public_flow_message(
+                    "track_submit_failed", state_exc,
+                )
+
         if not script_params.get("keyword") or not script_params.get("city"):
+            _record_preflight("scope_validation_failed")
             return jsonify({"ok": False, "error": "缺少关键词或城市"}), 400
         locations = script_params.get("locations") or []
         if not isinstance(locations, list):
+            _record_preflight("location_validation_failed")
             return jsonify({"ok": False, "error": "locations 必须是数组"}), 400
         auto_screen = bool(body.get("auto_screen"))
+        cross_platform_dedupe = bool(body.get("cross_platform_dedupe", True))
         auto_screen_fields = body.get("auto_screen_fields") if auto_screen else {}
         if auto_screen and not isinstance(auto_screen_fields, dict):
+            _record_preflight("track_submit_failed")
             return jsonify({"ok": False, "error": "auto_screen_fields 必须是对象"}), 400
         auto_screen_profile = str(body.get("auto_screen_profile") or "") if auto_screen else ""
-        auto_screen_facts = (
-            body.get("auto_screen_facts")
-            if auto_screen and isinstance(body.get("auto_screen_facts"), dict)
-            else None
-        )
+        auto_screen_facts = body.get("auto_screen_facts") if auto_screen and isinstance(body.get("auto_screen_facts"), dict) else None
         profile_summary = str(body.get("profile_summary") or "")
-        career_profile_id = str(body.get("profile_id") or "").strip() or None
         raw_profile_facts = body.get("profile_facts")
         profile_facts = (
             raw_profile_facts
             if isinstance(raw_profile_facts, dict) else None
         )
-        platform_raw = body.get("platform") or "boss"
         try:
             validate_platform_key(platform_raw)
         except UnknownPlatformError:
+            _record_preflight("platform_validation_failed")
             return jsonify({
                 "ok": False,
                 "error_code": "platform_validation_failed",
@@ -217,39 +181,27 @@ def register_exec_search_routes(app, ctx):
             }), 400
         reg = get_platform_or_none(platform_raw)
         if reg is None:
+            _record_preflight("platform_validation_failed")
             return jsonify({
                 "ok": False,
                 "error_code": "platform_validation_failed",
                 "user_message": "平台未注册",
             }), 400
-        if not has_selected_account(app.config["BROWSER_ACCOUNTS_PATH"]):
-            return jsonify({
-                "ok": False,
-                "error_code": "account_pool_empty",
-                "error": "请至少勾选一个账号参与轮询后再开抓",
-                "user_message": "请至少勾选一个账号参与轮询后再开抓",
-            }), 422
         offending = [
             k for k in _AI_FILTER_KEYS
             if k in script_params and _is_non_empty_filter_value(script_params[k])
         ]
         if offending:
+            _record_preflight("scope_validation_failed")
             return jsonify({
                 "ok": False,
                 "error_code": "search_filters_not_supported",
                 "user_message": "搜索请求不允许携带非空 AI filters: " + ", ".join(sorted(offending)),
             }), 422
-        ok, err_resp = ctx.check_tuning_lease_conflict()
-        if not ok:
-            return err_resp
-        if ctx.browser_busy():
-            return jsonify({
-                "ok": False, "error": "browser_busy",
-                "message": "当前已有任务在运行或暂停，请先等待、继续或结束任务后再开始新任务",
-            }), 409
         requested_digest = str(body.get("scope_digest") or "")
         scope_payload = ctx.scope_previews.get(requested_digest) if requested_digest else None
         if requested_digest and scope_payload is None:
+            _record_preflight("scope_validation_failed")
             return jsonify({
                 "ok": False,
                 "error_code": "scope_preview_required",
@@ -278,11 +230,13 @@ def register_exec_search_routes(app, ctx):
                     platform=platform_raw,
                 )
             except LocationCatalogUnavailable:
+                _record_preflight("location_validation_failed", recoverable=True)
                 return jsonify({"ok": False, "error_code": "location_catalog_unavailable", "error": "地点目录暂时不可用，按城市级搜索"}), 503
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError):
+                _record_preflight("scope_validation_failed")
                 return jsonify({
                     "ok": False, "error_code": "scope_validation_failed",
-                    "error": str(exc),
+                    "error": "搜索范围参数无效",
                 }), 422
             scope_payload = preview["scope"]
             ctx.scope_previews[scope_payload["scope_digest"]] = dict(scope_payload)
@@ -293,18 +247,21 @@ def register_exec_search_routes(app, ctx):
                 state["active_selection"], task_size=frozen_scope.task_size,
             )
             execution_config = ExecutionConfigSnapshot.from_dict(selected["config"])
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError):
+            _record_preflight("config_resolution_failed")
             return jsonify({
                 "ok": False, "error_code": "config_resolution_failed",
-                "error": str(exc),
+                "error": "执行配置无效",
             }), 422
         if frozen_scope.platform != platform_raw:
+            _record_preflight("scope_validation_failed")
             return jsonify({
                 "ok": False,
                 "error_code": "scope_platform_mismatch",
                 "user_message": "请求平台与搜索范围平台不一致",
             }), 409
         if not reg.enabled_for_new_tasks:
+            _record_preflight("platform_disabled")
             return jsonify({
                 "ok": False,
                 "error_code": "platform_disabled",
@@ -327,12 +284,14 @@ def register_exec_search_routes(app, ctx):
         try:
             norm_request_locations = normalize_locations(platform_raw, locations)
         except LocationCatalogUnavailable:
+            _record_preflight("location_validation_failed", recoverable=True)
             return jsonify({"ok": False, "error_code": "location_catalog_unavailable", "error": "地点目录暂时不可用，按城市级搜索"}), 503
-        except ValueError as exc:
+        except ValueError:
+            _record_preflight("location_validation_failed")
             return jsonify({
                 "ok": False,
                 "error_code": "location_validation_failed",
-                "error": str(exc),
+                "error": "搜索地点参数无效",
             }), 422
         pages_mismatch = False
         if "pages" in script_params:
@@ -345,6 +304,7 @@ def register_exec_search_routes(app, ctx):
                 or list(sp_cities) != scope_cities
                 or list(norm_request_locations) != list(frozen_scope.locations)
                 or pages_mismatch):
+            _record_preflight("scope_validation_failed")
             return jsonify({
                 "ok": False,
                 "error_code": "scope_request_mismatch",
@@ -358,6 +318,37 @@ def register_exec_search_routes(app, ctx):
             script_params["locations"] = list(frozen_scope.locations)
         else:
             script_params.pop("locations", None)
+
+        # Only a fully validated request may freeze the retry payload.  Runtime
+        # gates below can still reject this request, but the durable snapshot is
+        # then safe to use for a later Flow action retry.
+        snapshot_ok, snapshot_code, snapshot_reason = _remember_submission_snapshot()
+        if not snapshot_ok:
+            status_code = 409 if snapshot_code == "flow_conflict" else 503
+            return jsonify({
+                "ok": False,
+                "error": snapshot_code,
+                "error_code": snapshot_code,
+                "error_reason": snapshot_reason,
+            }), status_code
+        if not has_selected_account(app.config["BROWSER_ACCOUNTS_PATH"]):
+            _record_preflight("account_pool_empty")
+            return jsonify({
+                "ok": False,
+                "error_code": "account_pool_empty",
+                "error": "请至少勾选一个账号参与轮询后再开抓",
+                "user_message": "请至少勾选一个账号参与轮询后再开抓",
+            }), 422
+        ok, err_resp = ctx.check_tuning_lease_conflict()
+        if not ok:
+            _record_preflight("browser_busy", recoverable=True)
+            return err_resp
+        if ctx.browser_busy(platform_raw):
+            _record_preflight("browser_busy", recoverable=True)
+            return jsonify({
+                "ok": False, "error": "browser_busy",
+                "message": "当前已有任务在运行或暂停，请先等待、继续或结束任务后再开始新任务",
+            }), 409
         from webui.pipeline_exec import account_for_role
         browser_account = account_for_role(
             "R1", app.config["BROWSER_ACCOUNTS_PATH"],
@@ -389,7 +380,87 @@ def register_exec_search_routes(app, ctx):
             "profile_key": login_space.profile_key,
         }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         task_id = uuid.uuid4().hex
-        task = ctx.register_pipeline_task(task_id, "scrape")
+        flow_service = getattr(ctx, "flow_service", None)
+        flow_id = requested_flow_id
+        flow_track_id = None
+        if flow_id:
+            if not career_profile_id or flow_service is None: return jsonify({"ok": False, "error_code": "flow_not_found", "message": "流程不存在或不可访问"}), 404
+            try:
+                flow_service.validate_track_submission(flow_id=flow_id, platform=platform_raw, profile_id=career_profile_id)
+            except FlowConflictError as exc: return jsonify({"ok": False, "error_code": "flow_conflict", "message": public_flow_message("flow_conflict", exc)}), 409
+            except (KeyError, ValueError): return jsonify({"ok": False, "error_code": "flow_not_found", "message": "流程不存在或不可访问"}), 404
+            except Exception as exc:
+                _record_preflight("track_submit_failed", reason=type(exc).__name__)
+                return jsonify({
+                    "ok": False,
+                    "error": "track_submit_failed",
+                    "error_code": "track_submit_failed",
+                    "error_reason": public_flow_message("track_submit_failed"),
+                }), 503
+        elif career_profile_id and flow_service is not None:
+            try:
+                single_flow = flow_service.start_single_flow(
+                    profile_id=career_profile_id, platform=platform_raw, start_key=task_id)
+                flow_id = single_flow["id"] if single_flow else None
+            except FlowConflictError as exc:
+                return jsonify({"ok": False, "error": "flow_conflict",
+                                "error_code": "flow_conflict", "message": public_flow_message("flow_conflict", exc)}), 409
+        # Claim the Track before creating any external task.  This is the
+        # durable idempotency boundary for two concurrent execute-search
+        # requests racing after the same Flow POST.
+        if flow_id and career_profile_id:
+            try:
+                flow_track_id = submission_service.claim_track(
+                    flow_id=flow_id,
+                    platform=platform_raw,
+                    profile_id=career_profile_id,
+                )
+            except FlowConflictError as exc:
+                return jsonify({
+                    "ok": False,
+                    "error": "flow_conflict",
+                    "error_code": "flow_conflict",
+                    "message": public_flow_message("flow_conflict", exc),
+                }), 409
+            except (KeyError, ValueError):
+                return jsonify({
+                    "ok": False,
+                    "error": "flow_not_found",
+                    "error_code": "flow_not_found",
+                    "message": "流程不存在或不可访问",
+                }), 404
+            except Exception as exc:
+                _record_preflight("track_submit_failed", reason=type(exc).__name__)
+                return jsonify({
+                    "ok": False,
+                    "error": "track_submit_failed",
+                    "error_code": "track_submit_failed",
+                    "error_reason": public_flow_message("track_submit_failed"),
+                }), 503
+        def _fail_flow_submission(error_code, detail="", *, status="failed"):
+            """Persist a safe Track failure for every post-claim boundary."""
+            return submission_service.fail(
+                flow_id=flow_id,
+                platform=str(platform_raw).strip().lower(),
+                profile_id=career_profile_id,
+                task_id=task_id,
+                error_code=str(error_code or "track_submit_failed"),
+                reason=public_flow_message(
+                    str(error_code or "track_submit_failed"), detail,
+                ),
+                status=status,
+            )
+
+        try:
+            task = ctx.register_pipeline_task(task_id, "scrape")
+        except Exception as exc:
+            _fail_flow_submission("track_submit_failed", exc)
+            return jsonify({
+                "ok": False,
+                "error": "track_submit_failed",
+                "error_code": "track_submit_failed",
+                "error_reason": public_flow_message("track_submit_failed"),
+            }), 503
         with ctx.lock:
             task["config_digest"] = execution_config.config_digest
             task["scope_digest"] = frozen_scope.scope_digest
@@ -399,70 +470,99 @@ def register_exec_search_routes(app, ctx):
             task["profile_key"] = login_space.profile_key
             task["task_input_digest"] = task_input_digest
             task["auto_screen"] = auto_screen
+            task["cross_platform_dedupe"] = cross_platform_dedupe
             # Spec041：内存任务也携带画像身份，恢复/取消不得跨画像。
             task["profile_id"] = career_profile_id
-        ctx.store.create_screening_run(
-            task_id,
-            frozen_filters={},
-            source_count=frozen_scope.combination_count,
-            profile_id=career_profile_id,
-            execution_params={
-                "platform": platform_raw,
-                "filter_schema_version": None,
-                "script_params": script_params,
-                "browser_account": browser_account,
-                "cdp_port": login_space.cdp_port,
-                "profile_key": login_space.profile_key,
-                "task_input_digest": task_input_digest,
-                "execution_config": execution_config.to_dict(),
-                "resolved_cities": resolved_cities,
-                "frozen_scope": frozen_scope.to_dict(),
-                "auto_screen": auto_screen,
-                "auto_screen_fields": auto_screen_fields,
-                "auto_screen_profile": auto_screen_profile,
-                "auto_screen_facts": auto_screen_facts,
-                "profile_summary": profile_summary,
-                "profile_facts": profile_facts,
-                "active_account_at_freeze": ctx.account_for_run(),
-            },
-            backend_version=ctx.backend_version,
-        )
-        ctx.store.save_filter_snapshot(
-            task_id,
-            platform=platform_raw,
-            filter_schema_version=None,
-            filter_snapshot={},
-            task_input_digest=task_input_digest,
-        )
+            task["flow_id"] = flow_id
+
         try:
-            begin_scrape_whitebox(ctx.store, task_id, script_params, frozen_scope.pages_per_combination)
+            submission_service.create_scrape_records(
+                task_id=task_id,
+                profile_id=career_profile_id,
+                platform=platform_raw,
+                flow_id=flow_id,
+                track_id=flow_track_id,
+                frozen_scope=frozen_scope,
+                script_params=script_params,
+                browser_account=browser_account,
+                login_space=login_space,
+                task_input_digest=task_input_digest,
+                execution_config=execution_config,
+                resolved_cities=resolved_cities,
+                auto_screen=auto_screen,
+                auto_screen_fields=auto_screen_fields,
+                auto_screen_profile=auto_screen_profile,
+                auto_screen_facts=auto_screen_facts,
+                cross_platform_dedupe=cross_platform_dedupe,
+                profile_summary=profile_summary,
+                profile_facts=profile_facts,
+            )
+        except Exception as exc:
+            _fail_flow_submission("track_submit_failed", exc)
+            with ctx.lock:
+                task["status"] = "failed"
+                task["error"] = public_flow_message("track_submit_failed")
+            return jsonify({
+                "ok": False,
+                "error": "track_submit_failed",
+                "error_code": "track_submit_failed",
+                "error_reason": public_flow_message("track_submit_failed"),
+            }), 503
+
+        try:
+            if flow_id:
+                submission_service.begin_whitebox(
+                    task_id=task_id,
+                    script_params=script_params,
+                    pages_per_combination=frozen_scope.pages_per_combination,
+                )
+            else:
+                begin_scrape_whitebox(
+                    ctx.store,
+                    task_id,
+                    script_params,
+                    frozen_scope.pages_per_combination,
+                )
         except Exception as exc:
             reason = "任务证据白箱初始化失败"
-            _logger.warning("搜索白箱计划初始化失败", exc_info=True)
+            _logger.warning(
+                "搜索白箱计划初始化失败 (%s)", type(exc).__name__,
+            )
+            _fail_flow_submission("whitebox_incomplete", exc)
             try:
-                ctx.store.update_screening_run(
-                    task_id, status="failed", error_code="whitebox_incomplete",
-                    error_reason=reason,
+                submission_service.mark_whitebox_failure(
+                    task_id=task_id, reason=reason,
                 )
-                ctx.store.append_task_event(task_id, "whitebox_incomplete", {
-                    "error_code": "whitebox_incomplete", "error_reason": reason,
-                })
-            except Exception:
-                _logger.warning("搜索白箱初始化失败状态写入失败", exc_info=True)
+            except Exception as state_exc:
+                _logger.warning(
+                    "搜索白箱初始化失败状态写入失败 (%s)",
+                    type(state_exc).__name__,
+                )
             with ctx.lock:
                 task["status"] = "failed"
                 task["error"] = reason
             return jsonify({"ok": False, "error": "whitebox_incomplete",
-                            "error_reason": reason,
-                            "detail": type(exc).__name__}), 503
+                            "error_reason": reason}), 503
         # Browser activation is part of the running scrape lifecycle.  Mark
         # the queued row running before the activation boundary so a
         # recoverable CDP failure can legally converge to paused and remain
         # resumable in durable storage.
-        ctx.write_run(task_id, status="running", current_stage="scrape")
+        try:
+            ctx.write_run(task_id, status="running", current_stage="scrape")
+        except Exception as exc:
+            _fail_flow_submission("track_submit_failed", exc)
+            with ctx.lock:
+                task["status"] = "failed"
+                task["error"] = public_flow_message("track_submit_failed")
+            return jsonify({
+                "ok": False,
+                "error": "track_submit_failed",
+                "error_code": "track_submit_failed",
+                "error_reason": public_flow_message("track_submit_failed"),
+            }), 503
         try:
             ctx.activate_run_browser()
-        except (OSError, RuntimeError, ValueError, KeyError) as exc:
+        except Exception as exc:
             raw_error_code = str(
                 getattr(exc, "error_code", "")
                 or getattr(exc, "failed_code", "")
@@ -474,24 +574,35 @@ def register_exec_search_routes(app, ctx):
             recoverable = is_recoverable_systemic_block(error_code)
             resume_status = "paused" if recoverable else "failed"
             try:
-                ctx.write_run(
-                    task_id,
-                    status=resume_status,
-                    current_stage="scrape",
-                    error_code=error_code,
-                    error_reason=reason,
+                if flow_id:
+                    _fail_flow_submission(error_code, reason, status=resume_status)
+                else:
+                    ctx.write_run(
+                        task_id,
+                        status=resume_status,
+                        current_stage="scrape",
+                        error_code=error_code,
+                        error_reason=reason,
+                    )
+                if recoverable:
+                    ctx.record_pause_failure(
+                        task_id, "scrape", error_code, reason,
+                        exception=exc, include_traceback=True,
+                    )
+            except Exception as state_exc:
+                if flow_id and isinstance(state_exc, FlowStateClosureError):
+                    raise
+                _logger.warning(
+                    "搜索任务激活失败状态写入失败 (%s)",
+                    type(state_exc).__name__,
                 )
-                ctx.record_pause_failure(
-                    task_id, "scrape", error_code, reason,
-                    exception=exc, include_traceback=True,
-                )
-            except Exception:
-                _logger.warning("搜索任务激活失败状态写入失败", exc_info=True)
             with ctx.lock:
                 task["status"] = resume_status
                 task["error"] = reason
             if not recoverable:
                 ctx.clear_auto_screen(task_id)
+            if not flow_id:
+                _fail_flow_submission(error_code, exc, status=resume_status)
             ctx.schedule_pipeline_task_cleanup(task_id)
             ctx.release_worker_resume_claims(task)
             return jsonify({
@@ -500,31 +611,44 @@ def register_exec_search_routes(app, ctx):
                 "error_code": error_code,
                 "status": resume_status,
                 "error_reason": reason,
-                "detail": type(exc).__name__,
             }), 503
         try:
-            ctx.executor.submit(
-                ctx.run_pipeline_task, task_id, script_params,
-                execution_config, frozen_scope,
+            future = submission_service.submit_scrape(
+                flow_id=flow_id,
+                platform=platform_raw,
+                task_id=task_id,
+                script_params=script_params,
+                execution_config=execution_config,
+                frozen_scope=frozen_scope,
             )
-        except RuntimeError as exc:
+            if flow_id and career_profile_id:
+                attach_scrape_future_failure(
+                    future,
+                    ctx,
+                    task_id=task_id,
+                    flow_id=flow_id,
+                    platform=platform_raw,
+                    profile_id=career_profile_id,
+                )
+        except Exception as exc:
             reason = "任务执行器未接受任务"
-            ctx.store.update_screening_run(
-                task_id, status="failed", error_code="submit_failed",
-                error_reason=reason,
-            )
+            _fail_flow_submission("submit_failed", exc)
             try:
-                ctx.store.append_task_event(task_id, "submission_failed", {
-                    "error_code": "submit_failed", "error_reason": reason,
-                })
-                mark_scrape_submission_failed(ctx.store, task_id, script_params, reason, stage="submit", pages=frozen_scope.pages_per_combination)
-            except Exception:
-                _logger.warning("搜索提交失败白箱记录失败", exc_info=True)
+                submission_service.mark_executor_failure(
+                    task_id=task_id,
+                    script_params=script_params,
+                    reason=reason,
+                    pages=frozen_scope.pages_per_combination,
+                )
+            except Exception as marker_exc:
+                _logger.warning(
+                    "搜索提交失败白箱记录失败 (%s)",
+                    type(marker_exc).__name__,
+                )
             with ctx.lock:
                 task["status"] = "failed"
                 task["error"] = reason
-            return jsonify({"ok": False, "error": "submit_failed", "error_reason": reason,
-                            "detail": type(exc).__name__}), 503
+            return jsonify({"ok": False, "error": "submit_failed", "error_reason": reason}), 503
         return jsonify({
             "ok": True,
             "task_id": task_id,
@@ -535,367 +659,5 @@ def register_exec_search_routes(app, ctx):
             "task_size": frozen_scope.task_size,
             "browser_account": browser_account,
         })
-    @app.route("/api/execute-search/continue/<old_task_id>", methods=["POST"])
-    def continue_execute_search(old_task_id, _block_checked=False,
-                                account_switch_note=None):
-        """断点续抓：从上次失败的组合接着跑，跳过已完成的组合。
-        切片4：支持 paused 状态继续（FR-020）。优先从 DB checkpoint 恢复
-        completed_combos（服务重启后内存丢失也能恢复），回退到内存 task.result。
-        同时检查阻断是否解除（如登录已恢复、验证码已过）。
-        SPEC011 T015: 实验租约持有时拒绝继续（FR-035）。
-        """
-        ok, err_resp = ctx.check_tuning_lease_conflict()
-        if not ok:
-            return err_resp
-        with ctx.lock:
-            old_task = ctx.tasks.get(old_task_id)
-            old_snapshot = dict(old_task) if old_task else None
-        db_run = None
-        try:
-            db_run = ctx.store.get_screening_run(old_task_id)
-        except ctx.operational_errors:
-            db_run = None
-        if old_snapshot is None and db_run is None:
-            return jsonify({"ok": False, "error": "原任务不存在或已过期"}), 404
-        mem_status = old_snapshot.get("status") if old_snapshot else None
-        db_status = db_run.get("status") if db_run else None
-        effective_status = db_status or mem_status
-        if not is_resume_eligible_run(db_run or old_snapshot):
-            return jsonify({
-                "ok": False,
-                "error": "not_paused",
-                "status": _public_task_status(effective_status),
-                "message": "只有 paused 状态的任务才能继续",
-            }), 409
-
-        def _finish_resume_failure(
-                error_code, reason, exception=None, *, platform=""):
-            """Keep recoverable resume blocks paused; fail only terminal errors."""
-            code, message = _public_failure_details(
-                error_code or "internal_error", reason, platform,
-            )
-            message = message or code
-            recoverable = _is_recoverable_resume_failure(code)
-            try:
-                ctx.write_run(
-                    old_task_id,
-                    status="paused" if recoverable else "failed",
-                    current_stage="scrape",
-                    error_code=code,
-                    error_reason=message,
-                )
-            except ctx.operational_errors as persist_exc:
-                _logger.warning(
-                    "续跑失败状态写入失败 error_type=%s",
-                    type(persist_exc).__name__,
-                )
-            recorder = getattr(ctx, "record_pause_failure", None)
-            if callable(recorder):
-                try:
-                    recorder(
-                        old_task_id, "scrape", code, message,
-                        exception=exception, include_traceback=exception is not None,
-                    )
-                except Exception:
-                    _logger.warning("续跑失败审计写入失败", exc_info=True)
-            with ctx.lock:
-                current = ctx.tasks.get(old_task_id)
-                if current is not None:
-                    current["status"] = "paused" if recoverable else "failed"
-                    current["error"] = message
-            if not recoverable:
-                ctx.clear_auto_screen(old_task_id)
-            ctx.schedule_pipeline_task_cleanup(old_task_id)
-            ctx.release_worker_resume_claims(ctx.tasks.get(old_task_id))
-            return code, message, "paused" if recoverable else "failed"
-
-        resume_snapshot = old_snapshot.get("result") if old_snapshot else {}
-        resume_completed = (
-            resume_snapshot.get("completed_combos")
-            if isinstance(resume_snapshot, dict) else None
-        )
-        if db_run is not None and db_run.get("status") == "failed":
-            db_run = normalize_recoverable_failed_run(ctx, db_run)
-        resume_identity = None
-        resume_auto_switch = None
-        resume_run = db_run or old_snapshot
-        if db_run is not None and not _block_checked:
-            continue_body = request.get_json(silent=True) or {}
-            target_account = (
-                str(continue_body.get("target_account") or "").strip()
-                if isinstance(continue_body, dict) else ""
-            )
-            plan = prepare_continue_identity(
-                ctx.store,
-                db_run,
-                target_account=target_account,
-                current_account=ctx.load_legacy_advanced_settings,
-                fallback_account=lambda: ctx.account_for_run(db_run),
-                accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
-            )
-            if plan["status"] != "ok":
-                return jsonify(plan["body"]), plan["http_status"]
-            resume_identity = plan["identity"]
-            resume_auto_switch = plan.get("auto_switch")
-            activation = activate_frozen_identity_candidate(
-                ctx.activate_run_browser, db_run, resume_identity,
-            )
-            if not activation["ok"]:
-                code, reason, resume_status = _finish_resume_failure(
-                    activation.get("error_code") or activation.get("error")
-                    or "source_cdp_unavailable",
-                    "", exception=None,
-                    platform=str(resume_identity.get("platform") or ""),
-                )
-                return jsonify({
-                    "ok": False,
-                    "error": code,
-                    "error_code": code,
-                    "status": resume_status,
-                    "message": reason,
-                    "error_reason": reason,
-                    "detail": activation.get("detail") or "",
-                }), 409
-            resume_run = activation["run"]
-        if resume_run is not None and not _block_checked:
-            try:
-                if resume_identity is None:
-                    ctx.activate_run_browser(resume_run)
-            except (OSError, RuntimeError, ValueError, KeyError) as exc:
-                platform = str(
-                    resume_run.get("platform")
-                    or (resume_run.get("execution_params") or {}).get("platform")
-                    or ""
-                )
-                code, reason, resume_status = _finish_resume_failure(
-                    getattr(exc, "error_code", "")
-                    or getattr(exc, "failed_code", "")
-                    or "source_cdp_unavailable",
-                    "", exception=exc, platform=platform,
-                )
-                return jsonify({
-                    "ok": False,
-                    "error": code,
-                    "error_code": code,
-                    "status": resume_status,
-                    "message": reason,
-                    "error_reason": reason,
-                    "detail": type(exc).__name__,
-                }), 409
-            resume_params = resume_run.get("execution_params") or {}
-            invalidate_login_cache_for_resume(
-                str(resume_params.get("browser_account") or ""),
-                str(resume_run.get("platform") or resume_params.get("platform") or ""),
-            )
-            passed, code, reason = ctx.check_resume_block(resume_run)
-            if not passed:
-                platform = str(
-                    resume_run.get("platform")
-                    or (resume_run.get("execution_params") or {}).get("platform")
-                    or ""
-                )
-                code, reason, resume_status = _finish_resume_failure(
-                    code, reason, platform=platform,
-                )
-                return jsonify({
-                    "ok": False, "error": "block_not_resolved",
-                    "error_code": code, "error_reason": reason,
-                    "status": resume_status,
-                }), 409
-        try:
-            # The fresh browser/login checks above must pass before the strict
-            # checkpoint read.  A corrupt payload is not equivalent to an
-            # empty checkpoint: reject before identity commit, claims, or
-            # worker submission so resume can never restart from zero or
-            # overwrite the raw bytes.
-            completed = set(scrape_checkpoint(
-                ctx, old_task_id, completed_combos=resume_completed,
-            ))
-        except ScrapeCheckpointReadError as exc:
-            return jsonify({
-                "ok": False,
-                "error": exc.error_code,
-                "error_code": exc.error_code,
-                "error_reason": exc.public_reason,
-                "message": exc.public_reason,
-                "status": "failed",
-            }), 409
-        if resume_identity is not None:
-            try:
-                commit_continue_identity(
-                    ctx.store, old_task_id, resume_identity, resume_auto_switch,
-                )
-                db_run = ctx.store.get_screening_run(old_task_id) or resume_run
-                resume_run = db_run
-            except ctx.operational_errors as exc:
-                return jsonify({
-                    "ok": False,
-                    "error": "resume_identity_persist_failed",
-                    "message": "继续任务身份未能保存，任务保持暂停，请重试",
-                    "status": "paused",
-                    "detail": type(exc).__name__,
-                }), 503
-            except (KeyError, ValueError) as exc:
-                return jsonify({
-                    "ok": False,
-                    "error": "resume_identity_persist_failed",
-                    "message": "继续任务身份未能保存，任务保持暂停，请重试",
-                    "status": "paused",
-                    "detail": type(exc).__name__,
-                }), 503
-        if account_switch_note is None and resume_auto_switch is not None \
-                and resume_auto_switch[0]:
-            account_switch_note = (
-                resume_auto_switch[1], resume_auto_switch[2],
-            )
-        script_params = (old_snapshot or {}).get("script_params")
-        if not script_params and db_run:
-            try:
-                ep = db_run.get("execution_params") or {}
-                script_params = ep.get("script_params") or ep
-            except (AttributeError, TypeError):
-                script_params = None
-        if not script_params:
-            return jsonify({"ok": False, "error": "原任务参数丢失，无法继续"}), 400
-        try:
-            old_jobs = ctx.store.load_scrape_run_jobs(old_task_id)
-        except ctx.operational_errors:
-            old_jobs = []
-        if not old_jobs and old_snapshot:
-            old_result = old_snapshot.get("result") or {}
-            old_jobs = old_result.get("jobs") or []
-        if not ctx.claim_resume(old_task_id):
-            return jsonify({
-                "ok": False, "error": "already_running",
-                "message": _MSG_TASK_ALREADY_RUNNING,
-            }), 409
-        task_id = old_task_id
-        claimed_task, previous_task = ctx.claim_pipeline_task_id(
-            task_id, "scrape",
-            started_at=_iso_epoch_ms((db_run or {}).get("started_at")),
-        )
-        if claimed_task is None:
-            ctx.release_resume_claim(old_task_id)
-            return jsonify({
-                "ok": False, "error": "already_running",
-                "message": _MSG_TASK_ALREADY_RUNNING,
-            }), 409
-        if account_switch_note:
-            append_account_switch_log_line(
-                claimed_task,
-                from_account=account_switch_note[0],
-                to_account=account_switch_note[1])
-        db_ep = (db_run or {}).get("execution_params") or {}
-        from webui.execution_config import (
-            ExecutionConfigSnapshot,
-            FrozenTaskScope,
-        )
-        resume_config = None
-        resume_scope = None
-        try:
-            if db_ep.get("execution_config"):
-                resume_config = ExecutionConfigSnapshot.from_dict(db_ep["execution_config"])
-            if db_ep.get("frozen_scope"):
-                resume_scope = FrozenTaskScope.from_dict(db_ep["frozen_scope"])
-        except (KeyError, TypeError, ValueError):
-            resume_config = None
-            resume_scope = None
-        with ctx.lock:
-            task = ctx.tasks[task_id]
-            task["skip_combos"] = completed
-            task["old_jobs"] = old_jobs
-            task["resuming_from"] = old_task_id
-            task["browser_account"] = (
-                db_ep.get("browser_account") or ctx.account_for_run(db_run)
-            )
-            task["platform"] = db_ep.get("platform") or "boss"
-            task["cdp_port"] = db_ep.get("cdp_port")
-            task["profile_key"] = db_ep.get("profile_key")
-            task["task_input_digest"] = db_ep.get("task_input_digest")
-            task["auto_screen"] = bool(db_ep.get("auto_screen"))
-        start_gate = threading.Event()
-        abort_start = threading.Event()
-        def run_after_claim_commits():
-            start_gate.wait()
-            if not abort_start.is_set():
-                ctx.run_pipeline_task(task_id, script_params, resume_config, resume_scope)
-        try:
-            future = ctx.executor.submit(run_after_claim_commits)
-            if db_run is not None:
-                ctx.store.append_task_event(old_task_id, "resume", {"task_id": task_id})
-                if not ctx.store.claim_paused_screening_run(old_task_id):
-                    raise RuntimeError("resume_already_claimed")
-            with ctx.lock:
-                if ctx.tasks.get(task_id) is claimed_task:
-                    claimed_task["status"] = "running"
-        except (sqlite3.Error, RuntimeError, ValueError, KeyError) as exc:
-            abort_start.set()
-            start_gate.set()
-            if "future" in locals():
-                future.cancel()
-            ctx.release_pipeline_claim(task_id, claimed_task, previous_task)
-            ctx.release_resume_claim(old_task_id)
-            reason = "继续任务提交失败，任务已结束"
-            try:
-                ctx.store.update_screening_run(
-                    task_id, status="failed", error_code="submit_failed", error_reason=reason)
-                mark_scrape_submission_failed(ctx.store, task_id, script_params, reason, stage="resume_submit", pages=int(resume_scope.pages_per_combination) if resume_scope else 0)
-            except Exception as _marker_exc:
-                _logger.warning("继续任务提交失败白箱记录失败: %s", type(_marker_exc).__name__)
-            return jsonify({
-                "ok": False, "error": "resume_submit_failed",
-                "message": f"继续任务提交失败：{type(exc).__name__}",
-            }), 500
-        start_gate.set()
-        return jsonify({"ok": True, "task_id": task_id,
-                        "skipped": len(completed), "old_jobs": len(old_jobs),
-                        "resumed_from": old_task_id})
-    @app.route("/api/execute-search/<task_id>/cancel", methods=["POST"])
-    def cancel_execute_search(task_id):
-        """停止正在运行的抓取任务。
-        做法：set stop_event → 立刻关调试 Chrome（不等当前组合抓完）→
-        task 标 cancelled。run_search 会因浏览器被关而退出，ctx.run_pipeline_task
-        看到 stop_event.is_set() 后标 cancelled 而非 failed/done。
-        """
-        with ctx.lock:
-            task = ctx.tasks.get(task_id)
-            if task is None:
-                return jsonify({"ok": False, "error": _MSG_TASK_NOT_FOUND}), 404
-            if task["status"] not in ("queued", "running"):
-                return jsonify({"ok": False, "error": f"任务已结束，无法取消（当前状态：{task['status']}）"}), 400
-            stop_event = task.get("stop_event")
-            if stop_event is not None:
-                request_stop(task, stop_event, STOP_MODE_CANCEL)
-            task["status"] = "cancelled"
-            task["error"] = _MSG_USER_STOPPED_SCRAPE
-            task["logs"].append("用户取消任务")
-            cancel_platform = task.get("platform")
-        from webui import pipeline_exec as _facade
-        from webui.frozen_browser_identity import cleanup_frozen_task_browser
-        cleanup = cleanup_frozen_task_browser(
-            ctx.store, task_id, task,
-            accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
-            activate=_facade.set_active_cdp_data_dir,
-            close=_facade.close_debug_chrome,
-        )
-        if not cleanup.ok:
-            with ctx.lock:
-                current = ctx.tasks.get(task_id)
-                if current is not None:
-                    current["error"] = "用户已取消，但浏览器清理失败"
-        ctx.clear_auto_screen(task_id)
-        if not cancel_platform:
-            try:
-                _db_run = ctx.store.get_screening_run(task_id)
-                cancel_platform = (_db_run or {}).get("platform")
-            except ctx.operational_errors:
-                pass
-        return jsonify({
-            "ok": cleanup.ok,
-            **({"error": "browser_cleanup_failed"}
-               if not cleanup.ok else {}),
-            "run_id": task_id, "task_id": task_id,
-            "platform": cancel_platform, "status": "cancelled",
-            "cleanup": cleanup.as_dict(),
-        })
-    ctx.continue_execute_search = continue_execute_search
+    register_search_continue(app, ctx)
+    register_cancel_execute_search(app, ctx)

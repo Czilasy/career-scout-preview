@@ -70,6 +70,7 @@ import { historyStatusLabel } from "../discovery";
 import { useLocationDraft } from "../composables/useLocationDraft";
 import { useSearchDraftSlots } from "../composables/useSearchDraftSlots";
 import { setHistoryProfile, useResultHistory } from "../composables/resultHistory";
+import { reachableStep } from "./useIslandNavigation";
 
 // ---------------------------------------------------------------------------
 // 036 B088：胶囊点击导航信号（App.vue 经 DynamicIsland 派发，本域消费）。
@@ -85,6 +86,43 @@ export type { DynamicIslandState } from "../types";
 /** 请求顶栏胶囊导航（App.vue 在 DynamicIsland 点击时调用）。 */
 export function requestCapsuleNavigation(target: CapsuleNavigationTarget): void {
   capsuleNavigationTarget.value = target;
+}
+
+// ---------------------------------------------------------------------------
+// 暂停族（用户主动暂停 / 服务重启打断）的判定与中文口径——模块级唯一实现。
+// 两条线共用同一条 attention 通道（kind 仍为 paused，胶囊状态枚举与导航落点不变），
+// 但性质不能混着说：把「已中断」写成「已暂停」就是谎报，与同一屏的阶段卡和顶栏胶囊
+// 互相打脸。这里只把胶囊分支已经读到的那一份状态换成中文口径——判活与状态权威仍是
+// 那一份，不在此另起一套判定；用词与阶段卡的 stageStatusLabel 对齐（paused=已暂停、
+// interrupted=已中断），两种都保留「请处理后继续」的可恢复引导。
+// 顶栏胶囊与展开面板的通知行标题共读这一份：通知池只接性质，不再自己按 kind 猜。
+// ---------------------------------------------------------------------------
+const PAUSED_FAMILY_STATUSES = ["paused", "interrupted"] as const;
+export type PausedFamilyFact = typeof PAUSED_FAMILY_STATUSES[number];
+
+const PAUSED_FAMILY_LABELS: Record<PausedFamilyFact, string> = {
+  paused: "任务已暂停",
+  interrupted: "任务已中断",
+};
+
+/** 快照带暂停族状态才取该状态；其它状态（含缺失）一律空串，交回调用方既有判定。 */
+function pausedFamilyStatusOf(
+  snapshot: { status?: unknown } | null | undefined,
+): PausedFamilyFact | "" {
+  const status = String(snapshot?.status ?? "");
+  return (PAUSED_FAMILY_STATUSES as readonly string[]).includes(status)
+    ? status as PausedFamilyFact
+    : "";
+}
+
+/** 短说法：通知池展开行的标题（同一行的详情用下面的完整说法）。 */
+export function pausedFamilyNoticeTitle(fact: PausedFamilyFact): string {
+  return PAUSED_FAMILY_LABELS[fact];
+}
+
+/** 完整说法：顶栏胶囊那一行的提示。 */
+function pausedFamilyIslandMessage(fact: PausedFamilyFact): string {
+  return `${PAUSED_FAMILY_LABELS[fact]}，请处理后继续`;
 }
 
 export function useDiscoveryState(props: DiscoveryProps, emit: DiscoveryEmit) {
@@ -208,6 +246,21 @@ const stepCopy: Record<StepId, { eyebrow: string; title: string; description: st
 
 
 const activeStep = ref<StepId>("upload");
+
+// Discovery 页面导航的唯一投影入口。单平台使用 legacy 业务事实；全部平台
+// 由 Flow 把可达阶段投影到这里。页面、灵动岛和后台恢复都只经过下面的守卫，
+// 不再各自维护一份“能不能进”的集合。
+const flowReachableSteps = ref<Set<StepId> | null>(null);
+const navigationManualHold = ref(false);
+// B096：并行 Flow 的活动 Track 是页面级占用事实，不属于任一平台草稿。
+// 由页面把 parallelFlow.hasActiveTrack 投影进来，所有新任务/范围守卫共用。
+const flowActive = ref(false);
+// SPEC 046 判活口径：flowActive 说的是「这一轮还没结束」（锁范围、锁提交、决定落点），
+// 不等于「此刻有活体 worker 在跑」。已中断/已暂停的轮次前者为真、后者为假。
+// 由页面把 parallelFlow.hasLiveWorker 投影进来，判活（hasLiveTaskState）只认这个。
+// null = 页面还没投影过活体事实（未经协调器投影的调用方，例如单平台传统链路的单元测试）：
+// 这时没有「此刻无活体」这条否定证据，只能保守退回活动线。
+const flowLiveWorker = ref<boolean | null>(null);
 
 
 const analysisReady = ref(false);
@@ -389,6 +442,18 @@ const resultPlatformFilter = ref<"all" | "boss" | "zhilian">("all");
 const resultEpoch = ref(0);
 // 新一轮代次：重置开始即失效旧轮的异步请求，避免旧轮结果在清空后回写。
 const workflowEpoch = ref(0);
+
+/**
+ * Invalidate every workflow-owned async continuation.
+ *
+ * The epoch is shared by task recovery and round transitions.  Unmounting a
+ * view uses the same invalidation boundary so a response that settles after
+ * the view is gone cannot continue the old workflow internally.
+ */
+function invalidateWorkflowEpoch(): number {
+  workflowEpoch.value += 1;
+  return workflowEpoch.value;
+}
 // B074：重抓胶囊「暂不处理」隐藏态（会话内共享，组件卸载重建不丢）。
 // 仅按 resultEpoch（新结果重载）复位，不按 count 归零复位——
 // 平台/页签切换导致的待确认数抖动不会让胶囊重弹。
@@ -703,6 +768,7 @@ const profileConfirmed = ref(false);
 // 用户可见错误快照，不再把新任务入口锁死。
 const pipelineBusy = computed(() => Boolean(
   scrapeBusy.value || screenBusy.value || recrawlBusy.value
+  || flowActive.value
   || pausedRunId.value
   || [scrapeSnapshot.value?.status, screenSnapshot.value?.status, recrawlSnapshot.value?.status]
     .some((s) => s && String(s) === "paused"),
@@ -724,12 +790,26 @@ const pollTimer = ref<number | undefined>(undefined);
 
 const scopeLocked = computed(() => Boolean(
   scrapeBusy.value || screenBusy.value || recrawlBusy.value || pausedRunId.value
+  || flowActive.value
   || activeStep.value === "screen" || activeStep.value === "results"
   || historyMode.value,
 ));
 
+// 锁定原因必须与事实一致：scopeLocked 还包含「已在第 3/4 步」「正在看历史轮」，
+// 这些时候没有任何任务在跑，一律提示「任务进行中」就是谎报。锁定范围不变，
+// 只把原因按真实情况分层说清楚。
+const scopeLockReason = computed(() => {
+  if (!scopeLocked.value) return "";
+  if (scrapeBusy.value || screenBusy.value || recrawlBusy.value || flowActive.value) {
+    return "任务进行中，平台已锁定";
+  }
+  if (pausedRunId.value) return "任务已暂停，平台已锁定";
+  if (historyMode.value) return "正在查看历史轮次，平台已锁定";
+  return "本轮搜索范围已确认，返回第 2 步前平台已锁定";
+});
 
-const enabledSteps = computed<StepId[]>(() => {
+
+const legacyEnabledSteps = computed<StepId[]>(() => {
   if (historyMode.value) return ["results"];
   const enabled: StepId[] = ["upload"];
   if (analysisReady.value) enabled.push("search");
@@ -741,6 +821,98 @@ const enabledSteps = computed<StepId[]>(() => {
   if (resultLoaded.value && screenSnapshot.value?.status !== "paused") enabled.push("results");
   return enabled;
 });
+
+const STEP_ORDER: StepId[] = ["upload", "search", "screen", "results"];
+
+const enabledSteps = computed<StepId[]>(() => {
+  if (historyMode.value) return ["results"];
+  const projected = flowReachableSteps.value;
+  // An active Flow envelope owns the round even before Track rows/projected
+  // steps arrive.  A legacy/single-platform view must not expose screen or
+  // result actions during that gap, otherwise a second round can be started
+  // while the Flow is only queued on the server.
+  if (flowActive.value && !projected) return ["upload", "search"];
+  const reachable = projected
+    ? new Set<StepId>([
+      "upload",
+      ...Array.from(projected).filter((step): step is StepId => STEP_ORDER.includes(step)),
+    ])
+    : new Set<StepId>(legacyEnabledSteps.value);
+  const liveStep = deriveLiveTaskStep({
+    scrapeBusy: scrapeBusy.value,
+    scrapeSnapshot: scrapeSnapshot.value,
+    screenBusy: screenBusy.value,
+    screenSnapshot: screenSnapshot.value,
+    recrawlBusy: recrawlBusy.value,
+    recrawlSnapshot: recrawlSnapshot.value,
+    pausedRunId: pausedRunId.value,
+    interruptedRunId: interruptedRunId.value,
+  });
+  if (liveStep) reachable.add(liveStep);
+  return STEP_ORDER.filter((step) => reachable.has(step));
+});
+
+function setFlowReachableSteps(steps: Iterable<string> | null): void {
+  flowReachableSteps.value = steps === null
+    ? null
+    : new Set(Array.from(steps).filter((step): step is StepId => STEP_ORDER.includes(step as StepId)));
+}
+
+function setNavigationManualHold(hold: boolean): void {
+  navigationManualHold.value = hold;
+}
+
+function setFlowActive(active: boolean): void {
+  flowActive.value = active;
+}
+
+function setFlowLiveWorker(active: boolean): void {
+  flowLiveWorker.value = active;
+}
+
+type NavigationOwner = { activeStep?: Ref<StepId> };
+
+function navigateStep(
+  this: NavigationOwner | undefined,
+  step: string,
+  options: { source?: "user" | "flow" | "island" | "restore" | "system" | "reset"; allowUnreachable?: boolean } = {},
+): StepId {
+  const targetRef = this?.activeStep || activeStep;
+  const requested = STEP_ORDER.includes(step as StepId) ? step as StepId : "upload";
+  const source = options.source || "user";
+  if (historyMode.value && requested !== "results") {
+    emit("notify", { message: "历史轮次不可改写，请先回到最新", tone: "warning" });
+    return targetRef.value;
+  }
+  // A user's explicit earlier click owns the current landing page.  All
+  // background sources share this gate so legacy polling cannot jump over the
+  // same hold that already protects Flow projection updates.  Explicit user
+  // clicks and restore reconciliation remain allowed to establish a landing
+  // page in the first place.
+  if ((source === "flow" || source === "system") && navigationManualHold.value) return targetRef.value;
+  const landing = options.allowUnreachable || source === "system" || source === "reset"
+    ? requested
+    : reachableStep(requested, new Set(enabledSteps.value)) as StepId;
+  if (source === "user" || source === "island") {
+    const requestedRank = STEP_ORDER.indexOf(requested);
+    const highestRank = Math.max(...enabledSteps.value.map((candidate) => STEP_ORDER.indexOf(candidate)));
+    if (requestedRank < highestRank) navigationManualHold.value = true;
+  }
+  targetRef.value = landing;
+  return landing;
+}
+
+function reconcileActiveStep(this: NavigationOwner | undefined, step?: string): StepId {
+  const targetRef = this?.activeStep || activeStep;
+  return navigateStep.call(this, step || targetRef.value, { source: "restore" });
+}
+
+function resetNavigation(this: NavigationOwner | undefined): void {
+  flowReachableSteps.value = null;
+  navigationManualHold.value = false;
+  const targetRef = this?.activeStep || activeStep;
+  targetRef.value = "upload";
+}
 
 function capsuleNavigationMeta(stuckAt: "scrape" | "screen" | "none" = "none") {
   return {
@@ -922,14 +1094,16 @@ const lifecycleDialogOpen = ref(false);
 
 const lifecycleDialogJob = ref<JobItem | null>(null);
 
-function resetForProfileSwitch(): void {
-  workflowEpoch.value += 1;
+function resetForProfileSwitch(this: NavigationOwner | undefined): void {
+  invalidateWorkflowEpoch();
   workflowStateRestored.value = false;
   if (pollTimer.value !== undefined) {
     window.clearTimeout(pollTimer.value);
     pollTimer.value = undefined;
   }
-  activeStep.value = "upload";
+  resetNavigation.call(this);
+  flowActive.value = false;
+  flowLiveWorker.value = false;
   analysisReady.value = false;
   selectedFile.value = null;
   aiConsent.value = false;
@@ -1003,6 +1177,12 @@ function resetForProfileSwitch(): void {
 const resultsBootstrapPending = ref(false);
 
 // ---------------------------------------------------------------------------
+// 暂停族（用户主动暂停 / 服务重启打断）的中文口径与性质判定，见本文件上方的
+// pausedFamilyStatusOf / pausedFamilyNoticeTitle / pausedFamilyIslandMessage：
+// 纯函数、模块级唯一实现，顶栏胶囊与展开面板的通知行标题共读这一份，不各写一套。
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // 顶栏本轮状态胶囊数据（纯派生，不发请求）：
 // 四态按 spec FR-013 优先级判定；平台优先取任务自身平台（恢复任务快照携带），
 // 缺省时用草稿平台。空闲常驻（idle），不再上抛 null（spec FR-012）。
@@ -1011,6 +1191,44 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
   const platform: Platform = scrapeSnapshot.value?.platform
     || screenSnapshot.value?.platform
     || draftPlatform.value;
+
+  // A terminal Flow projection is the public lifecycle owner for a parallel
+  // round.  Legacy task recovery can leave a stale paused snapshot/ID behind
+  // after latest-running-task has already gone empty; letting that snapshot
+  // win here makes the island say “paused” and navigate back to Step 2 even
+  // though the Flow failure is recoverable from Step 3/4.  Only take this
+  // branch when the Flow has no active sibling, so a real worker still keeps
+  // the strict live-task attention semantics below.
+  const flowResult = pipelineResult.value as (PipelineResult & {
+    flow_id?: string;
+    flow_tracks?: Array<Record<string, unknown>>;
+  }) | null;
+  const flowTracks = Array.isArray(flowResult?.flow_tracks) ? flowResult.flow_tracks : [];
+  const flowHasActiveSibling = flowTracks.some((track) =>
+    ["running", "queued", "paused", "interrupted"].includes(String(track.status || "")));
+  const flowFailure = flowTracks.find((track) => (
+    ["failed", "unavailable", "interrupted"].includes(String(track.status || ""))
+    || String(track.error_code || "") === "flow_result_incomplete"
+    || track.unfinished_ai_screening === true
+  ));
+  const legacyTaskLive = scrapeBusy.value || screenBusy.value || recrawlBusy.value
+    || [scrapeSnapshot.value, screenSnapshot.value, recrawlSnapshot.value].some((snapshot) =>
+      snapshot && ["running", "queued"].includes(String(snapshot.status || "")));
+  if (flowResult?.flow_id && flowFailure && !flowHasActiveSibling && !legacyTaskLive) {
+    const message = String(
+      flowFailure.message || flowFailure.reason || flowFailure.error
+      || "AI 筛选未完成，请处理后继续",
+    );
+    return {
+      platform, phase: "scraping" as const, judged: 0, scope: platform,
+      ...capsuleNavigationMeta("screen"),
+      capsule: {
+        state: "attention", platform,
+        attention: { kind: "error", message },
+      },
+      integrity: pipelineResult.value?.integrity,
+    };
+  }
 
   // 简历分析在后台进行时只占用上传按钮，胶囊单独展示分析中，不能冒充抓取任务。
   if (uploadBusy.value) {
@@ -1036,18 +1254,24 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
       integrity: failed.integrity,
     };
   }
+  const pausedFamilyScreenSide = pausedFamilyStatusOf(screenSnapshot.value)
+    || pausedFamilyStatusOf(recrawlSnapshot.value);
+  const pausedFamilyScrape = pausedFamilyStatusOf(scrapeSnapshot.value);
   const hasPaused = pausedRunId.value || interruptedRunId.value
-    || snapshots.some((s) => s && (String(s.status) === "paused" || String(s.status) === "interrupted"));
+    || Boolean(pausedFamilyScreenSide) || Boolean(pausedFamilyScrape);
   if (hasPaused) {
-    const stuckAt = screenSnapshot.value && ["paused", "interrupted"].includes(String(screenSnapshot.value.status))
-      || recrawlSnapshot.value && ["paused", "interrupted"].includes(String(recrawlSnapshot.value.status))
-      ? "screen" : "scrape";
+    const stuckAt = pausedFamilyScreenSide ? "screen" : "scrape";
+    // 性质跟着落点指向的阶段说：三个快照都没带暂停族状态（只剩恢复出来的断点 runId）时，
+    // 登记的是可恢复的暂停断点就说已暂停，否则就是被打断的断点，说已中断。
+    const pausedFact = pausedFamilyScreenSide || pausedFamilyScrape
+      || (pausedRunId.value ? "paused" : "interrupted");
     return {
       platform, phase: "scraping" as const, judged: 0, scope: platform,
       ...capsuleNavigationMeta(stuckAt),
       capsule: {
         state: "attention", platform,
-        attention: { kind: "paused", message: "任务已暂停，请处理后继续" },
+        // pausedFact 一起上抛：展开面板的通知行标题读它，与岛上同一份性质。
+        attention: { kind: "paused", pausedFact, message: pausedFamilyIslandMessage(pausedFact) },
       },
       integrity: snapshots.find((s) => s && s.integrity)?.integrity,
     };
@@ -1110,10 +1334,14 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
       ...capsuleNavigationMeta("screen"),
       capsule: {
         state: "attention", platform,
-        attention: {
-          kind: interrupted ? "paused" : "error",
-          message: integrityForDisplay.primary_reason
-            || (interrupted ? "任务已中断" : integrityForDisplay.label),
+        attention: interrupted ? {
+          // 完整性结论的中断同样走 paused 通道：性质写实，通知行标题才不会说成已暂停。
+          kind: "paused" as const,
+          pausedFact: "interrupted" as const,
+          message: integrityForDisplay.primary_reason || pausedFamilyNoticeTitle("interrupted"),
+        } : {
+          kind: "error" as const,
+          message: integrityForDisplay.primary_reason || integrityForDisplay.label,
         },
       },
       integrity: integrityForDisplay,
@@ -1218,6 +1446,17 @@ return {
   steps,
   stepCopy,
   activeStep,
+  flowReachableSteps,
+  navigationManualHold,
+  flowActive,
+  flowLiveWorker,
+  setFlowReachableSteps,
+  setNavigationManualHold,
+  setFlowActive,
+  setFlowLiveWorker,
+  navigateStep,
+  reconcileActiveStep,
+  resetNavigation,
   analysisReady,
   selectedFile,
   aiConsent,
@@ -1268,6 +1507,7 @@ return {
   resultPlatformFilter,
   resultEpoch,
   workflowEpoch,
+  invalidateWorkflowEpoch,
   recrawlCapsuleDismissed,
   dismissRecrawlCapsule,
   resultRunIds,
@@ -1311,6 +1551,7 @@ return {
   advancedPanelsOpen,
   pollTimer,
   scopeLocked,
+  scopeLockReason,
   enabledSteps,
   completedSteps,
   currentCopy,
@@ -1356,8 +1597,19 @@ return {
 
 export type DiscoveryState = ReturnType<typeof useDiscoveryState>;
 
-/** 未结束任务真实存在判定（浏览历史不改变任务状态；供开新一轮入口守卫复用）。 */
+/**
+ * 判活（问题 A「此刻有没有活体 worker 在跑」）：决定迟到响应能不能覆盖现场、
+ * 04 能不能认「已进结果页」并把本轮结果接进来。
+ * Flow 侧只认活体轨道（排队中 / 运行中）：已中断、已暂停的流程活动线不再单独算活，
+ * 否则一条被服务重启打断的流程会把 04 的结果接回永久关在门外。
+ * 「这一轮还没结束」是另一个问题（问题 B），一律用 hasUnfinishedRound，不要用这个。
+ */
 export function hasLiveTaskState(state: DiscoveryState): boolean {
+  // 页面还没投影活体事实（flowLiveWorker === null：单平台传统链路、未经协调器投影的
+  // 调用方与单元现场）时退回活动线——那不是新语义，是没有活体事实可依据时唯一的
+  // 保守口径：宁可当作有活，也不能凭空判成「本轮已结束」。
+  const liveWorker = state.flowLiveWorker.value;
+  if (liveWorker === null ? state.flowActive.value : liveWorker) return true;
   if (state.pausedRunId.value) return true;
   const liveStatuses = new Set(["running", "queued", "paused"]);
   for (const snap of [
@@ -1368,6 +1620,17 @@ export function hasLiveTaskState(state: DiscoveryState): boolean {
     if (snap && liveStatuses.has(String(snap.status))) return true;
   }
   return false;
+}
+
+/**
+ * 问题 B「这一轮还没结束」：流程活动线（含已中断、已暂停的轮）或真有活体任务 / 待恢复轮次。
+ *
+ * 它决定的是「用户要不要被带回这一轮的真实进度页」——落点 liveTaskStep、
+ * 灵动岛「回到最新」问这个。已中断的轮同样没结束：落点不能为空、不能造不可达步骤，
+ * 否则上传入口守卫会把用户带进「开新一轮」，把刚中断的这一轮冲掉（SPEC 046 第五轮修过的两个缺陷）。
+ */
+export function hasUnfinishedRound(state: DiscoveryState): boolean {
+  return state.flowActive.value || hasLiveTaskState(state);
 }
 
 /** 035：跨域共享派生的最小判定面（接受任意携带 status 的快照形状）。 */
@@ -1405,9 +1668,13 @@ export function deriveLiveTaskStep(probe: LiveTaskProbe): StepId | "" {
   return "";
 }
 
+/** 进行中阶段可作落点的清单，按页面先后排；取落点时从最深的一支开始。
+ *  01 是发起页、04 是结果页，都不是进度页，因此不进这张表。 */
+const LIVE_LANDING_STEPS: StepId[] = ["screen", "search"];
+
 /** 035：liveTaskStep(state)——持有 state 的域（search/results 等）直接取用。 */
 export function liveTaskStep(state: DiscoveryState): StepId | "" {
-  return deriveLiveTaskStep({
+  const legacyStep = deriveLiveTaskStep({
     scrapeBusy: state.scrapeBusy.value,
     scrapeSnapshot: state.scrapeSnapshot.value,
     screenBusy: state.screenBusy.value,
@@ -1417,6 +1684,24 @@ export function liveTaskStep(state: DiscoveryState): StepId | "" {
     pausedRunId: state.pausedRunId.value,
     interruptedRunId: state.interruptedRunId.value,
   });
+  if (legacyStep) return legacyStep;
+  // 落点问的是问题 B「这一轮还没结束」，不是问题 A「此刻有活体 worker」：
+  // 已中断/已暂停的轮次没有活体任务在跑，但同样没结束，落点不能为空、
+  // 不能造不可达步骤（SPEC 046 第五轮的两个缺陷）。判活（04 接回结果、迟到响应）
+  // 才用 hasLiveTaskState，两者不要混用。
+  if (!hasUnfinishedRound(state)) return "";
+  // 树干说有活（只由流程活动线成立）而本地进度探针给不出落点时，落点跟随 Flow
+  // 投影到 state 的阶段集合，取其中**最深**的进行中阶段（screen 优先于 search）：
+  // 并行流程「抓取已完成、筛选正在跑」必须落 03，落 02 只看得到抓取列表。
+  // 判定面用投影事实本身，不用被 historyMode 收窄的 enabledSteps——「回到最新」
+  // 在清掉历史轮之前求值，收窄集合会把有活任务的守卫判反。
+  // 投影还没到达时按活动线的最小开放面落 02（此时可达集合就是 01+02）；
+  // 投影里找不到进行中阶段就不给落点，绝不凭空造一个当前不可达的步骤（结果页不是进度页）。
+  const projected = state.flowReachableSteps.value;
+  const candidates = projected && projected.size
+    ? projected
+    : new Set<StepId>(["search"]);
+  return LIVE_LANDING_STEPS.find((step) => candidates.has(step)) || "";
 }
 
 // 031 B8：emit/props 形状固定为类型，替代原未类型化的 emit 参数
@@ -1512,6 +1797,18 @@ export interface MergedLatestResult {
   };
   /** 025 B078：各平台最新轮状态（供完成态判定；无该平台轮则缺省）。 */
   platformStatuses?: Partial<Record<"boss" | "zhilian", string>>;
+  /**
+   * B096 返修：这一轮牵到的全部任务线（抓取线 + AI/结果线）。合并结果一个轮次
+   * 挂两条平台线，恢复时的面板计数必须按全部任务线汇总；缺省表示单线结果，
+   * 由加载方按 newer.data 自带的任务编号回退，口径仍然只有一份。
+   */
+  flowTaskLines?: FlowTaskLine[];
+}
+
+/** 一条平台任务线：抓取线编号 + AI/结果线编号（没有 AI 任务时后者为空）。 */
+export interface FlowTaskLine {
+  scrapeRunId: string;
+  screenRunId: string;
 }
 
 /** round-status 上抛 payload：既有展示字段 + 胶囊状态（App 供 DynamicIsland 消费）。 */

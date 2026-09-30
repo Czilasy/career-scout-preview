@@ -42,7 +42,9 @@ export interface ScreenRoundFlowDeps {
     pollTimer?: Ref<number | undefined>;
     finishedPartial: Ref<boolean>;
     resultsPageSeen: Ref<boolean>;
-    activeStep: Ref<string>;
+    navigateStep: (step: string) => string;
+    /** B096：并行 Flow 活动 Track 占用整轮入口。 */
+    flowActive?: Ref<boolean>;
     currentRoundStatus: Ref<string>;
     resultPlatformFilter: Ref<"all" | Platform>;
     uncertainCount: Ref<number>;
@@ -60,7 +62,7 @@ export interface ScreenRoundFlowDeps {
       runId: string,
       options?: { waitForBatch?: boolean },
     ) => Promise<void>;
-    resetWorkflow: () => Promise<void>;
+    resetWorkflow: () => Promise<boolean | void>;
     loadLatestResult: () => Promise<void>;
     /** 035：历史模式触发守卫时完整退出历史（含平台还原/展示清理/落进度页）。
      *  Spec041 返工：返回真实落点步骤，调用方按自己的落点继续，不依赖其返回值。 */
@@ -88,6 +90,18 @@ function cleanupFailureMessage(data: CleanupActionResponse): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function setActiveStep(refs: ScreenRoundFlowDeps["refs"], step: string): string {
+  // 返回真实落点：不可进的步骤会被 navigateStep 的回退链收窄，落点可能与请求不同。
+  return refs.navigateStep(step);
+}
+
+/** 提示必须跟着真实落点走：没跳成还说「已回到任务进度」就是当着用户说假话。 */
+function liveTaskNotice(landed: string, requested: string): string {
+  return landed === requested
+    ? "当前还有任务在跑，已回到任务进度"
+    : "当前还有任务在跑，新一轮未开始";
 }
 
 function snapshotWithProgress(
@@ -503,7 +517,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   async function startScreen(): Promise<void> {
     if (busyAction.value) return;
     busyAction.value = "start";
-    deps.refs.activeStep.value = "screen";
+    setActiveStep(deps.refs, "screen");
     try {
       await deps.api.startAiScreen();
     } finally {
@@ -637,7 +651,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
         logs: previous?.logs || [],
         error: cleanupError,
       };
-      deps.refs.activeStep.value = "results";
+      setActiveStep(deps.refs, "results");
       deps.api.notify(
         cleanupError || "已停止详情补抓，当前结果已保留",
         cleanupError ? "error" : "info",
@@ -696,6 +710,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   }
 
   async function confirmNewRound(): Promise<boolean> {
+    const flowOwned = Boolean(deps.refs.flowActive?.value);
     // 035（真机问题②，FR-011）：未结束任务存在（含抓取运行中/暂停/中断）时，
     // 一律跳回该任务的真实进度页（抓取→02、筛选/重抓→03），不 reset、不取消、不弹窗。
     // 守卫先于 resumable 计算——历史模式 04 页入口同样被此覆盖。
@@ -709,11 +724,11 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       pausedRunId: deps.refs.pausedRunId.value,
       interruptedRunId: deps.refs.interruptedRunId.value,
     });
-    if (liveStep) {
+    if (liveStep && !flowOwned) {
       // 历史模式下先完整退出历史（还原平台、清理历史展示），再落到任务进度页。
       if (deps.refs.historyRound?.value) await deps.api.returnToLatest();
-      deps.refs.activeStep.value = liveStep;
-      deps.api.notify("当前还有任务在跑，已回到任务进度", "info");
+      const landed = setActiveStep(deps.refs, liveStep);
+      deps.api.notify(liveTaskNotice(landed, liveStep), "info");
       return false;
     }
     const snapshotStatus = String(deps.refs.screenSnapshot.value?.status || "");
@@ -731,19 +746,19 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     );
     // 结果页已确认本轮结束时，resumable 只代表旧上下文仍可恢复，
     // 不能覆盖用户明确点击「开始新一轮」的意图。
-    if (!roundFinished && resumable) {
+    if (!flowOwned && !roundFinished && resumable) {
       // 035：未结束任务存在时，一律跳回未完成的任务视图，不弹确认、不开始新一轮、不取消任务。
-      deps.refs.activeStep.value = "screen";
-      deps.api.notify("当前还有任务在跑，已回到任务进度", "info");
+      const landed = setActiveStep(deps.refs, "screen");
+      deps.api.notify(liveTaskNotice(landed, "screen"), "info");
       return false;
     }
     busyAction.value = "new-round";
     try {
-      await deps.api.resetWorkflow();
+      const reset = await deps.api.resetWorkflow();
+      return reset !== false;
     } finally {
       busyAction.value = "";
     }
-    return true;
   }
 
   return {

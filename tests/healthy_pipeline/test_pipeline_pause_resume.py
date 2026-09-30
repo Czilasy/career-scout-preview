@@ -456,6 +456,63 @@ class Slice7And9ApiTests(unittest.TestCase):
         self.assertEqual(run["status"], "interrupted")
         self.assertEqual(run["processed_count"], 50, "取消后结果必须保留")
 
+    def test_cancel_api_acknowledges_persisted_terminal_run_without_mutation(self):
+        """历史终态没有本地快照时，取消应返回稳定 no-op 契约而非 503。"""
+        self.store.update_screening_run(self.run_id, status="succeeded")
+
+        response = self.client.post(
+            f"/api/task/cancel/{self.run_id}", headers=self._auth_headers(),
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertEqual(payload["cancellation"], "not_required")
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(self.store.get_screening_run(self.run_id)["status"], "succeeded")
+
+    def test_cancel_api_acknowledges_restart_interrupted_run_without_mutation(self):
+        """非 user_cancelled 的 interrupted 已无可取消 worker，不应阻断重置。"""
+        self.store.update_screening_run(
+            self.run_id,
+            status="interrupted",
+            error_code="process_restart",
+            current_stage="scrape",
+        )
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE screening_runs SET interruption_kind = 'process_restart' WHERE id = ?",
+                (self.run_id,),
+            )
+
+        response = self.client.post(
+            f"/api/task/cancel/{self.run_id}", headers=self._auth_headers(),
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertEqual(payload["cancellation"], "not_required")
+        self.assertEqual(payload["status"], "interrupted")
+        self.assertEqual(self.store.get_screening_run(self.run_id)["error_code"], "process_restart")
+
+    def test_cancel_api_acknowledges_recoverable_failed_run_without_mutation(self):
+        """旧版 recoverable failed 会映射为 paused，但 DB 终态不应再尝试取消。"""
+        self.store.update_screening_run(
+            self.run_id,
+            status="failed",
+            error_code="source_cdp_unavailable",
+            current_stage="scrape",
+        )
+
+        response = self.client.post(
+            f"/api/task/cancel/{self.run_id}", headers=self._auth_headers(),
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertEqual(payload["cancellation"], "not_required")
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(self.store.get_screening_run(self.run_id)["status"], "failed")
+
     def test_cancel_api_handles_live_task_before_db_row_exists(self):
         """刚创建的任务尚未落 DB 时，统一取消仍必须立即生效。"""
         task_id = "live-cancel-before-db"
@@ -491,7 +548,7 @@ class Slice7And9ApiTests(unittest.TestCase):
         }
         with mock.patch.object(
             self.store,
-            "update_screening_run",
+            "cancel_task_atomic",
             side_effect=RuntimeError("cancel write rejected"),
         ):
             response = self.client.post(
@@ -626,6 +683,40 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
             data = resp.get_json() or {}
             self.assertEqual(data.get("skipped"), 1)
             self.assertEqual(captured.get("skip_combos"), {"前端|上海"})
+        finally:
+            executor = app.config.get("PIPELINE_EXECUTOR")
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+            temp.cleanup()
+
+    def test_stale_cleanup_schedule_skips_replacement_active_task(self):
+        """旧 worker 收尾不能为同 ID 的续跑任务注册清理定时器。"""
+        app, temp = _make_app()
+        try:
+            ctx = app.config["PIPELINE_CONTEXT"]
+            task_id = "stale-cleanup-race"
+            old_task = ctx.register_pipeline_task(task_id, "scrape")
+            old_task["status"] = "paused"
+            replacement, _previous = ctx.claim_pipeline_task_id(task_id, "scrape")
+            replacement["status"] = "running"
+
+            class _RecordingTimer:
+                instances = []
+
+                def __init__(self, interval, fn):
+                    self.interval = interval
+                    self.fn = fn
+                    self.instances.append(self)
+
+                def start(self):
+                    pass
+
+            with mock.patch("threading.Timer", new=_RecordingTimer):
+                ctx.schedule_pipeline_task_cleanup(task_id)
+                for timer in _RecordingTimer.instances:
+                    timer.fn()
+            self.assertIs(ctx.tasks[task_id], replacement)
+            self.assertEqual(ctx.tasks[task_id]["status"], "running")
         finally:
             executor = app.config.get("PIPELINE_EXECUTOR")
             if executor is not None:

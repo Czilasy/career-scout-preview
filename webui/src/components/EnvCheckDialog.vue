@@ -24,32 +24,23 @@ interface EnvCheckResponse {
   ok: boolean;
   runtime_mode?: "source" | "exe";
   groups: CheckGroup[];
-  active_account: string;
   checked_at: number;
 }
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{
   close: [];
-  "open-browser-accounts": [];
   "open-ai-settings": [];
 }>();
 
 const loading = ref(false);
 const groups = ref<CheckGroup[]>([]);
-const activeAccount = ref("");
 const checkedAt = ref<number | null>(null);
 // 运行时模式：仅用于展示差异文案（EXE 模式 deps=内置运行时、新增 webview2 项），不改变检查流程。
 // 响应缺失 runtime_mode 时默认 "source"，保证源码模式零回归（合同 §2.3、§4）。
 const runtimeMode = ref<"source" | "exe">("source");
 const localNotice = ref<Notice | null>(null);
 const busyAction = ref(""); // 正在执行的修复动作 id，避免重复点击
-const accountNames = ref<Record<string, string>>({});
-
-const PLATFORM_LABELS: Record<string, string> = {
-  boss: "BOSS",
-  zhilian: "智联",
-};
 
 function setLocalNotice(notice: Notice) {
   localNotice.value = notice;
@@ -65,32 +56,17 @@ const checkedAtText = computed(() => {
 watch(() => props.open, (open) => {
   if (open) {
     localNotice.value = null;
-    void loadAccounts();
     void runCheck();
   } else {
     busyAction.value = "";
   }
 });
 
-async function loadAccounts() {
-  try {
-    const data = await apiRequest<{ accounts?: { id: string; name: string }[] }>(
-      "/api/browser-accounts",
-    );
-    const next: Record<string, string> = {};
-    for (const acc of data.accounts || []) next[acc.id] = acc.name;
-    accountNames.value = next;
-  } catch {
-    // 账号名只是展示辅助，失败不影响检查主体。
-  }
-}
-
 async function runCheck() {
   loading.value = true;
   try {
     const data = await apiRequest<EnvCheckResponse>("/api/env-check");
     groups.value = data.groups || [];
-    activeAccount.value = data.active_account || "";
     checkedAt.value = data.checked_at || null;
     runtimeMode.value = data.runtime_mode === "exe" ? "exe" : "source";
   } catch (error) {
@@ -118,17 +94,9 @@ async function testAiConnection() {
   }
 }
 
-// 修复动作：登录指引、打开 AI 设置。其余 fix 文案仅作提示展示，不生成按钮。
+// 修复动作：打开 AI 设置。其余 fix 文案仅作提示展示，不生成按钮。
 function fixAction(item: CheckItem): { label: string; run: () => Promise<void> } | null {
   const fix = item.fix || "";
-  if (fix.includes("打开账号浏览器登录") || fix.includes("浏览器登录")) {
-    return {
-      label: "登录指引",
-      run: async () => {
-        emit("open-browser-accounts");
-      },
-    };
-  }
   if (fix.includes("打开 AI 设置")) {
     return {
       label: "打开 AI 设置",

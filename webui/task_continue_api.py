@@ -6,6 +6,7 @@ from __future__ import annotations
 import threading
 import sqlite3
 import time
+import sys
 from flask import jsonify, request
 from webui.constants import (
     _MSG_TASK_ALREADY_RUNNING,
@@ -41,149 +42,75 @@ from webui.task_pause_support import (
 from webui.task_runners import _iso_epoch_ms
 from webui.logging_setup import get_logger
 from webui.task_event_audit import append_task_event_best_effort
-
+from webui.flow_service import submit_platform_task
+from webui.flow_future import attach_ai_future_failure
+from webui.task_continue_results import build_partial_pipeline_result
+from webui.task_continue_support import (
+    _FINALIZE_WAIT_TIMEOUT_S,
+    jd_batch_active,
+    wait_for_jd_batch_settle,
+)
 _logger = get_logger(__name__)
 
-#: 结束保存等待"当前 JD 批次"收尾的上限：单批 15~30 条 × 8~15 秒 + 余量。
-_FINISH_BATCH_WAIT_TIMEOUT_S = 15 * 60
-#: 批内信号清除发生在批次结果合并/断点落盘之前，清标记后再给一拍余量。
-_FINISH_BATCH_SETTLE_GRACE_S = 1.5
-#: 收尾区守卫：worker 正在写终态时的等待上限（收尾通常毫秒级，超时即回执）。
-_FINALIZE_WAIT_TIMEOUT_S = 5.0
+_FINISH_BATCH_WAIT_TIMEOUT_S, _FINISH_BATCH_SETTLE_GRACE_S = 15 * 60, 1.5
+_jd_batch_active = jd_batch_active
 
 
-def _jd_batch_active(ctx, task_id: str) -> bool:
-    """该任务的实时进度是否正处于 JD 抓取批次内（批内信号由 runner 上报）。"""
-    with ctx.lock:
-        task = ctx.tasks.get(task_id)
-        progress = dict((task or {}).get("progress") or {})
-    if str(progress.get("stage") or "") not in ("fetch_jd", "jd_detail"):
-        return False
-    batch = progress.get("jd_batch")
-    return isinstance(batch, dict) and bool(batch)
+def _wait_for_jd_batch_settle(ctx, task_id):
+    return wait_for_jd_batch_settle(
+        ctx,
+        task_id,
+        timeout_s=_FINISH_BATCH_WAIT_TIMEOUT_S,
+        settle_grace_s=_FINISH_BATCH_SETTLE_GRACE_S,
+    )
 
 
-def _wait_for_jd_batch_settle(ctx, task_id: str) -> bool:
-    """结束保存前等当前 JD 批次返回并落盘；返回是否真的等待过。
+def _sync_flow_track_after_continue(
+    ctx, run_id: str, run: dict | None, response=None,
+):
+    """Publish a successful legacy continuation to its owning Track."""
+    if response is not None:
+        status_code = getattr(response, "status_code", None)
+        if status_code is None and isinstance(response, tuple) and len(response) > 1:
+            status_code = response[1]
+        if status_code is not None and int(status_code) >= 400:
+            return None
+    from webui.flow_task_coordinator import (
+        FlowTaskOperationError,
+        MissingPlatformIdentityError,
+        _ensure_operation_succeeded,
+        sync_flow_track_for_run,
+    )
 
-    批次结果在 ``fetch_job_details`` 返回后才写入 JD 断点，直接结束保存会把
-    这一整批已抓内容丢掉。停止信号已提前下达，批次返回后不再开新批，等待
-    是协作式的，不会无限拖住（有上限）。
-    """
-    if not _jd_batch_active(ctx, task_id):
-        return False
-    deadline = time.monotonic() + _FINISH_BATCH_WAIT_TIMEOUT_S
-    while time.monotonic() < deadline:
-        if not _jd_batch_active(ctx, task_id):
-            break
-        time.sleep(0.5)
-    time.sleep(_FINISH_BATCH_SETTLE_GRACE_S)
-    return True
+    try:
+        if response is not None:
+            _ensure_operation_succeeded(response)
+        sync_flow_track_for_run(
+            ctx,
+            run_id,
+            status="running",
+            stage=str((run or {}).get("current_stage") or "scrape"),
+        )
+    except MissingPlatformIdentityError:
+        return jsonify({
+            "ok": False,
+            "run_id": run_id,
+            "error": "platform_identity_missing",
+            "error_code": "platform_identity_missing",
+            "message": "任务缺少平台身份，无法继续关联运行线",
+        }), 409
+    except FlowTaskOperationError:
+        return jsonify({
+            "ok": False,
+            "run_id": run_id,
+            "error": "flow_task_operation_failed",
+            "error_code": "flow_task_operation_failed",
+            "message": "关联运行线继续失败，请刷新任务状态后重试",
+        }), 503
+    return None
 
 
 def register_task_continue_routes(app, ctx):
-    def _build_partial_pipeline_result(
-            source_jobs, verdicts, pending_rows, jd_map, profile_summary,
-            source_dropped=None, total_scraped=None, platform="",
-            profile_facts=None, unfiltered=False):
-        """Build a displayable result snapshot from persisted partial work."""
-        pending_reasons = {}
-        pending_codes = {}
-        for item in pending_rows or []:
-            jid = str(item.get("job_id") or "")
-            if not jid:
-                continue
-            payload = item.get("ai_payload") or {}
-            pending_reasons[jid] = str(
-                payload.get("reason") or item.get("failed_code") or "")
-            pending_codes[jid] = str(item.get("failed_code") or "")
-        jobs = []
-        dropped = []
-        for job in source_jobs or []:
-            if not isinstance(job, dict):
-                continue
-            jid = str(job.get("job_id") or job.get("source_url") or "")
-            vobj = verdicts.get(jid) or {}
-            verdict = str(vobj.get("verdict") or "")
-            reason = str(vobj.get("reason") or job.get("verdict_reason") or "")
-            if verdict == "dropped":
-                dropped.append({
-                    "platform": platform,
-                    "platform_job_id": str(job.get("platform_job_id") or jid),
-                    "job_id": str(job.get("job_id") or "") or None,
-                    "title": job.get("title") or "", "reason": reason or "粗筛移除",
-                    "canonical_url": job.get("source_url") or job.get("job_link") or "",
-                })
-                continue
-            jd = str(jd_map.get(jid) or job.get("jd") or "").strip()
-            caveats = (
-                vobj.get("caveats") if isinstance(vobj.get("caveats"), list)
-                else (job.get("caveats") if isinstance(job.get("caveats"), list) else [])
-            )
-            flags = (
-                vobj.get("flags") if isinstance(vobj.get("flags"), list)
-                else (job.get("flags") if isinstance(job.get("flags"), list) else [])
-            )
-            if verdict in ("match", "not_match", "mismatch"):
-                final_verdict = "not_match" if verdict == "mismatch" else verdict
-                final_reason = reason
-            elif jd:
-                final_verdict = "uncertain"
-                final_reason = reason or "已抓取 JD，精筛未完成（提前结束）"
-            else:
-                final_verdict = "uncertain"
-                final_reason = (
-                    pending_reasons.get(jid)
-                    or reason
-                    or "未开始抓取 JD（提前结束）"
-                )
-            jobs.append({
-                "platform": platform,
-                "platform_job_id": str(job.get("platform_job_id") or jid),
-                "job_id": str(job.get("job_id") or "") or None,
-                "title": job.get("title") or "",
-                "company": job.get("company") or job.get("boss_name") or "",
-                "salary": job.get("salary") or "",
-                "location": job.get("location") or "",
-                "tags": job.get("tags") or "",
-                "jd": jd,
-                "source_url": job.get("source_url") or job.get("job_link") or "",
-                "verdict": final_verdict,
-                "verdict_reason": final_reason,
-                "caveats": caveats,
-                "flags": flags,
-                "failed_code": pending_codes.get(jid) or "",
-            })
-        dropped_ids = {str(item.get("platform_job_id") or item.get("job_id") or "") for item in dropped}
-        for item in source_dropped or []:
-            if not isinstance(item, dict):
-                continue
-            jid = str(item.get("platform_job_id") or item.get("job_id") or item.get("source_url") or "")
-            if jid and jid in dropped_ids:
-                continue
-            dropped.append({
-                "platform": platform,
-                "platform_job_id": str(item.get("platform_job_id") or jid),
-                "job_id": str(item.get("job_id") or "") or None,
-                "title": item.get("title") or "",
-                "reason": item.get("reason") or item.get("verdict_reason") or "粗筛移除",
-                "canonical_url": item.get("canonical_url") or item.get("source_url") or "",
-            })
-        return {
-            "ok": True,
-            "jobs": jobs,
-            "dropped": dropped,
-            "total_scraped": (
-                total_scraped if total_scraped is not None
-                else len(source_jobs or []) + len(source_dropped or [])
-            ),
-            "total_kept": 0 if unfiltered else len(jobs),
-            "total_matched": sum(1 for j in jobs if j.get("verdict") == "match"),
-            "total_dropped": len(dropped),
-            "profile_summary": profile_summary or "",
-            "profile_facts": profile_facts,
-            "error": "",
-        }
     @app.route("/api/task/continue/<run_id>", methods=["POST"])
     def api_task_continue(run_id: str):
         """FR-020/FR-022：统一继续接口。
@@ -198,6 +125,46 @@ def register_task_continue_routes(app, ctx):
         run = ctx.store.get_screening_run(run_id)
         if run is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
+        from webui.flow_task_coordinator import (
+            FlowTaskOperationError,
+            MissingPlatformIdentityError,
+            ensure_ai_run_bound_to_track,
+            resolve_flow_binding,
+        )
+        # 继续前先确认轨道指名这条 run：历史数据里轨道可能只有抓取 id，
+        # 此时轨道级动作与继续都找不到可操作对象。
+        try:
+            ensure_ai_run_bound_to_track(ctx, run_id)
+        except FlowTaskOperationError:
+            pass
+        try:
+            flow_binding = resolve_flow_binding(ctx, run_id)
+        except MissingPlatformIdentityError:
+            return jsonify({
+                "ok": False,
+                "error": "platform_identity_missing",
+                "error_code": "platform_identity_missing",
+                "message": "任务缺少平台身份，无法继续关联运行线",
+            }), 409
+        except FlowTaskOperationError:
+            return jsonify({
+                "ok": False,
+                "error": "flow_task_operation_failed",
+                "error_code": "flow_task_operation_failed",
+                "message": "任务关联运行线无效，请刷新后重试",
+            }), 409
+        if flow_binding is not None:
+            # The durable Track is the only platform authority for a Flow
+            # resume.  Feed that identity into the candidate builder as a
+            # local overlay so a historical screening row whose platform
+            # column defaulted to BOSS cannot activate the wrong login space.
+            run = dict(run)
+            resume_params = dict(run.get("execution_params") or {})
+            resume_params["flow_id"] = flow_binding["flow_id"]
+            resume_params["track_id"] = flow_binding["track_id"]
+            resume_params["platform"] = flow_binding["platform"]
+            run["execution_params"] = resume_params
+            run["platform"] = flow_binding["platform"]
         if not is_resume_eligible_run(run):
             return jsonify({
                 "ok": False,
@@ -293,6 +260,24 @@ def register_task_continue_routes(app, ctx):
                     logger=_logger,
                     context="resume activation failure audit write failed",
                 )
+                if flow_binding is not None:
+                    from webui.flow_task_state import close_flow_task_state
+
+                    activation_source_id = str(
+                        ((run.get("execution_params") or {}).get("scrape_task_id") or "")
+                    ).strip() or None
+                    close_flow_task_state(
+                        ctx,
+                        task_id=run_id,
+                        scrape_task_id=activation_source_id,
+                        flow_id=flow_binding["flow_id"],
+                        profile_id=flow_binding["profile_id"],
+                        status="paused",
+                        error_code=error_code,
+                        reason=error_reason,
+                        platform=flow_binding["platform"],
+                        stage=str(run.get("current_stage") or "ai"),
+                    )
             except ctx.operational_errors as exc:
                 _logger.warning(
                     "继续激活失败状态写入失败 error_type=%s",
@@ -347,7 +332,6 @@ def register_task_continue_routes(app, ctx):
                 "error": "resume_identity_persist_failed",
                 "message": "继续任务身份未能保存，任务保持暂停，请重试",
                 "status": "paused",
-                "detail": type(exc).__name__,
             }), 503
         except (KeyError, ValueError) as exc:
             return jsonify({
@@ -355,7 +339,6 @@ def register_task_continue_routes(app, ctx):
                 "error": "resume_identity_persist_failed",
                 "message": "继续任务身份未能保存，任务保持暂停，请重试",
                 "status": "paused",
-                "detail": type(exc).__name__,
             }), 503
         refreshed_config = None
         def _refresh_run_config():
@@ -365,21 +348,25 @@ def register_task_continue_routes(app, ctx):
                 run["execution_params"]["execution_config"] = refreshed_config.to_dict()
         if continue_kind == "recrawl":
             _refresh_run_config()
-            return ctx.continue_recrawl(
+            response = ctx.continue_recrawl(
                 run_id, _block_checked=True,
                 account_switch_note=(
                     (auto_switch[1], auto_switch[2])
                     if auto_switch is not None and auto_switch[0] else None))
+            sync_error = _sync_flow_track_after_continue(ctx, run_id, run, response)
+            return sync_error or response
         if continue_kind == "scrape":
             # Scrape resumes the immutable execution snapshot captured by
             # this run.  Unlike AI/recrawl, changing current advanced
             # settings must not alter the search pacing or frozen scope of a
             # partially completed platform crawl.
-            return ctx.continue_execute_search(
+            response = ctx.continue_execute_search(
                 run_id, _block_checked=True,
                 account_switch_note=(
                     (auto_switch[1], auto_switch[2])
                     if auto_switch is not None and auto_switch[0] else None))
+            sync_error = _sync_flow_track_after_continue(ctx, run_id, run, response)
+            return sync_error or response
         params = run.get("execution_params") or {}
         scrape_task_id = str(params.get("scrape_task_id") or "")
         profile_summary = str(params.get("profile_summary") or "")
@@ -462,8 +449,19 @@ def register_task_continue_routes(app, ctx):
                     execution_config=execution_config,
                 )
         try:
-            future = ctx.executor.submit(
-                run_after_claim_commits,
+            resume_flow_id = str(
+                (flow_binding or {}).get("flow_id")
+                or (run.get("execution_params") or {}).get("flow_id")
+                or ""
+            ).strip()
+            resume_platform = str(
+                (flow_binding or {}).get("platform")
+                or run.get("platform")
+                or (run.get("execution_params") or {}).get("platform")
+                or "boss"
+            ).strip().lower()
+            future = submit_platform_task(
+                ctx, resume_flow_id, resume_platform, run_after_claim_commits,
                 task_id,
                 run.get("frozen_filters") or {},
                 profile_summary,
@@ -472,15 +470,38 @@ def register_task_continue_routes(app, ctx):
                 profile_facts,
                 refreshed_config,
             )
+            if not ctx.store.claim_paused_screening_run(run_id):
+                raise RuntimeError("resume_already_claimed")
+            if flow_binding is not None:
+                # The worker remains behind ``start_gate`` until the exact
+                # durable Run claim and Track transition have both succeeded.
+                # A failed sync therefore cannot race a running AI worker.
+                from webui.flow_task_coordinator import sync_flow_track_for_run
+
+                sync_flow_track_for_run(
+                    ctx,
+                    run_id,
+                    status="running",
+                    stage=str(run.get("current_stage") or "ai"),
+                )
             ctx.store.append_task_event(run_id, "resume", {
                 "backend_version": ctx.backend_version,
                 "task_id": task_id,
             })
-            if not ctx.store.claim_paused_screening_run(run_id):
-                raise RuntimeError("resume_already_claimed")
             with ctx.lock:
                 if ctx.tasks.get(task_id) is claimed_task:
                     claimed_task["status"] = "running"
+            # Register the Future callback only after all pre-gate durable
+            # writes succeed.  Rollback cancellation must not be interpreted
+            # as a worker failure that closes the Flow permanently.
+            if resume_flow_id:
+                attach_ai_future_failure(
+                    future,
+                    ctx,
+                    task_id=task_id,
+                    scrape_task_id=scrape_task_id,
+                    platform=resume_platform,
+                )
         except (sqlite3.Error, RuntimeError, ValueError, KeyError) as exc:
             abort_start.set()
             start_gate.set()
@@ -488,13 +509,31 @@ def register_task_continue_routes(app, ctx):
                 future.cancel()
             ctx.release_pipeline_claim(task_id, claimed_task, previous_task)
             ctx.release_resume_claim(run_id)
-            reason = "继续任务提交失败，原任务已结束"
+            reason = "继续任务提交失败，任务保持暂停，请重试"
             try:
-                ctx.store.update_screening_run(run_id, status="failed",
-                                               error_code="submit_failed", error_reason=reason)
-                ctx.store.append_task_event(run_id, "submission_failed", {
-                    "error_code": "submit_failed", "error_reason": reason,
-                })
+                if flow_binding is not None:
+                    from webui.flow_task_state import close_flow_task_state
+
+                    close_flow_task_state(
+                        ctx,
+                        task_id=run_id,
+                        scrape_task_id=scrape_task_id,
+                        flow_id=flow_binding["flow_id"],
+                        profile_id=flow_binding["profile_id"],
+                        status="paused",
+                        error_code="submit_failed",
+                        reason=reason,
+                        platform=flow_binding["platform"],
+                        stage=str(run.get("current_stage") or "ai"),
+                    )
+                else:
+                    ctx.store.update_screening_run(
+                        run_id, status="failed",
+                        error_code="submit_failed", error_reason=reason,
+                    )
+                    ctx.store.append_task_event(run_id, "submission_failed", {
+                        "error_code": "submit_failed", "error_reason": reason,
+                    })
                 from webui.task_finish_whitebox import mark_resume_submission_failed
                 mark_resume_submission_failed(
                     ctx.store, run_id, reason, parent_owner_id=scrape_task_id)
@@ -504,11 +543,18 @@ def register_task_continue_routes(app, ctx):
                     "resume submission whitebox marker failed: %s",
                     type(marker_exc).__name__,
                 )
+            operation_failed = (
+                flow_binding is not None
+                and isinstance(exc, FlowTaskOperationError)
+            )
             return jsonify({
                 "ok": False,
-                "error": "resume_submit_failed",
+                "error": "flow_task_operation_failed"
+                if operation_failed else "resume_submit_failed",
+                "error_code": "flow_task_operation_failed"
+                if operation_failed else "resume_submit_failed",
                 "message": reason,
-            }), 500
+            }), 503 if operation_failed else 500
         start_gate.set()
         return jsonify({
             "ok": True,
@@ -548,71 +594,73 @@ def register_task_continue_routes(app, ctx):
             time.sleep(0.05)
         with ctx.lock:
             task = ctx.tasks.get(run_id)
-            if task is not None and task.get("status") in {
-                "queued", "running", "paused",
-            }:
-                stop_event = task.get("stop_event")
-                if stop_event is not None:
-                    request_stop(task, stop_event, STOP_MODE_CANCEL)
         run = ctx.store.get_screening_run(run_id)
         if run is None and task is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
+        had_durable_run = run is not None
         cleanup_run = dict(run or task or {})
         if run is not None and run.get("status") == "interrupted" and run.get("error_code") == "user_finished":
             return jsonify({
                 "ok": False, "error": "already_finished",
                 "message": "任务已结束保存，无需取消",
             }), 409
-        if run is not None:
-            try:
-                if run["status"] not in (
-                    "succeeded", "partial", "failed", "interrupted",
-                ):
-                    ctx.store.update_screening_run(
-                        run_id, status="cancelled",
-                        error_code="user_cancelled",
-                        error_reason="用户已取消",
-                    )
-                    ctx.store.save_interruption_kind(run_id, "user_cancelled")
-                    append_task_event_best_effort(
-                        ctx.store, run_id, "cancel", {"by": "user"},
-                        logger=_logger,
-                    )
-            except ValueError as exc:
-                latest = ctx.store.get_screening_run(run_id)
-                if latest is None or latest.get("status") not in (
-                    "succeeded", "partial", "failed", "interrupted",
-                ):
-                    return jsonify({
-                        "ok": False,
-                        "error": "cancel_state_conflict",
-                        "detail": type(exc).__name__,
-                    }), 409
-            except ctx.operational_errors as exc:
-                latest = ctx.store.get_screening_run(run_id)
-                if latest is not None and latest.get("status") in (
-                    "succeeded", "partial", "failed", "interrupted",
-                ):
-                    with ctx.lock:
-                        current = ctx.tasks.get(run_id)
-                        if current is not None:
-                            current["status"] = _public_task_status(
-                                latest["status"], latest.get("interruption_kind"))
-                            current["error"] = "用户已取消"
-                return jsonify({
-                    "ok": False,
-                    "error": "cancel_persistence_failed",
-                    "detail": type(exc).__name__,
-                }), 503
-            run = ctx.store.get_screening_run(run_id)
+        from webui.flow_task_coordinator import (
+            FlowTaskOperationError,
+            MissingPlatformIdentityError,
+            persist_task_cancelled,
+            resolve_flow_binding,
+        )
+        try:
+            # Resolve the durable Flow identity before touching either the
+            # process-local task or its run projections.  The coordinator is
+            # the single cancellation write path for legacy and Flow APIs.
+            resolve_flow_binding(ctx, run_id)
+            persisted_run = persist_task_cancelled(ctx, run_id)
+        except MissingPlatformIdentityError:
+            return jsonify({
+                "ok": False,
+                "run_id": run_id,
+                "error": "platform_identity_missing",
+                "error_code": "platform_identity_missing",
+                "message": "任务缺少平台身份，无法取消关联运行线",
+            }), 409
+        except FlowTaskOperationError:
+            return jsonify({
+                "ok": False,
+                "run_id": run_id,
+                "error": "flow_task_operation_failed",
+                "error_code": "flow_task_operation_failed",
+                "message": "关联运行线取消失败，请刷新任务状态后重试",
+            }), 503
+        cancellation_outcome = (
+            persisted_run.pop("_cancel_outcome", None)
+            if isinstance(persisted_run, dict) else None
+        ) or "cancelled"
+        run = ctx.store.get_screening_run(run_id) or persisted_run or run
+        if run is None:
+            # A legacy task can be cancelled in the pre-persistence window.
+            # Keep this response process-local; do not manufacture a durable
+            # Run merely to make the public status formatter happy.
+            run = {
+                **cleanup_run,
+                "status": "interrupted",
+                "error_code": "user_cancelled",
+                "interruption_kind": "user_cancelled",
+            }
         with ctx.lock:
             current = ctx.tasks.get(run_id)
             if current is not None:
-                current["status"] = (
-                    _public_task_status(run["status"], run.get("interruption_kind"))
-                    if run is not None else "cancelled"
-                )
-                current["error"] = "用户已取消"
+                stop_event = current.get("stop_event")
+                if current.get("status") in {"queued", "running", "paused"} and stop_event is not None:
+                    request_stop(current, stop_event, STOP_MODE_CANCEL)
+                current["status"] = _public_task_status(
+                    run["status"], run.get("interruption_kind"))
+                if cancellation_outcome != "not_required":
+                    current["error"] = "用户已取消"
+        if cancellation_outcome != "not_required" and (had_durable_run or persisted_run is not None):
+            append_task_event_best_effort(
+                ctx.store, run_id, "cancel", {"by": "user"}, logger=_logger,
+            )
         _parent_scrape = str(((run or {}).get("execution_params") or {}).get("scrape_task_id") or "")
         ctx.clear_auto_screen(run_id)
         if _parent_scrape and _parent_scrape != run_id:
@@ -648,278 +696,10 @@ def register_task_continue_routes(app, ctx):
             "status": (
                 _public_task_status(run["status"], run.get("interruption_kind")) if run is not None else "cancelled"
             ),
+            "cancellation": cancellation_outcome,
             "processed_count": int((run or {}).get("processed_count") or 0),
             "message": "任务已取消，已有结果保留",
             "cleanup": cleanup_payload,
         })
-    @app.route("/api/task/finish/<run_id>", methods=["POST"])
-    def api_task_finish(run_id: str):
-        """T416: 结束可恢复任务并生成可展示的部分结果快照。
-        允许 queued/running/paused/failed 以及 interrupted(process_restart/
-        operator_stop)；user_cancelled 是终态，不能通过 finish 改写。
-        """
-        run = ctx.store.get_screening_run(run_id)
-        if run is None:
-            return jsonify({"ok": False, "error": "run_not_found"}), 404
-        # 收尾族：worker 正在写终态时先等它定稿，再按真实状态判断——已完成的
-        # 任务不生成假的部分快照（旧行为会把成功轮结果顶成旧快照）。
-        _finalize_deadline = time.monotonic() + _FINALIZE_WAIT_TIMEOUT_S
-        while True:
-            with ctx.lock:
-                _live_task = ctx.tasks.get(run_id)
-            if _live_task is None or not _live_task.get("finalizing"):
-                break
-            if time.monotonic() >= _finalize_deadline:
-                return jsonify({
-                    "ok": False, "error": "finalizing",
-                    "message": "任务正在收尾，请稍候重试",
-                }), 409
-            time.sleep(0.05)
-        run = ctx.store.get_screening_run(run_id)
-        if run is None:
-            return jsonify({"ok": False, "error": "run_not_found"}), 404
-        interruption_kind = run.get("interruption_kind") or ""
-        if run["status"] == "interrupted" and run.get("error_code") == "user_finished":
-            return jsonify({
-                "ok": False, "error": "already_finished",
-                "message": "任务已结束保存，请勿重复操作",
-            }), 409
-        if run["status"] == "interrupted" and interruption_kind == "user_cancelled":
-            return jsonify({
-                "ok": False, "error": "user_cancelled",
-                "message": "用户已取消的任务不能通过 finish 改写",
-            }), 409
-        if run["status"] == "interrupted" and interruption_kind not in (
-                "process_restart", "operator_stop",
-        ):
-            return jsonify({
-                "ok": False, "error": "interrupted_not_restartable",
-                "message": "该中断状态不能结束保存",
-            }), 409
-        if run["status"] in ("succeeded", "partial"):
-            return jsonify({
-                "ok": False, "error": "already_terminal",
-                "status": _public_task_status(run["status"], run.get("interruption_kind")),
-                "message": "任务已完成，无需结束保存",
-            }), 409
-        allowed_finish_statuses = {
-            "queued", "running", "paused", "failed", "interrupted",
-        }
-        if run["status"] not in allowed_finish_statuses:
-            return jsonify({
-                "ok": False, "error": "not_paused",
-                "status": _public_task_status(run["status"], run.get("interruption_kind")),
-                "message": "当前任务状态不能结束并保存",
-            }), 409
-        params = run.get("execution_params") or {}
-        scrape_task_id = str(params.get("scrape_task_id") or "")
-        source_run_id = str(params.get("source_run_id") or "")
-        platform = params.get("platform") or run.get("platform") or "boss"
-        source_jobs = []
-        verdicts = {}
-        pending_rows = []
-        jd_map = {}
-        source_payload = None
-        source_dropped = []
-        source_total_scraped = None
-        try:
-            ctx.store.save_interruption_kind(run_id, "operator_stop")
-        except ctx.operational_errors:
-            pass
-        flush_run_id = scrape_task_id or (
-            run_id if str(run.get("current_stage") or "") == "scrape" else ""
-        )
-        if flush_run_id:
-            with ctx.lock:
-                task = ctx.tasks.get(flush_run_id)
-                stop_event = task.get("stop_event") if task is not None else None
-                flush_lock = task.get("page_flush_lock") if task is not None else None
-            if stop_event is not None:
-                request_stop(task, stop_event, STOP_MODE_FINISH)
-            if flush_lock is not None:
-                stable_since = time.monotonic()
-                last_seq = None
-                flush_deadline = time.monotonic() + 3.0
-                while time.monotonic() < flush_deadline:
-                    with ctx.lock:
-                        task = ctx.tasks.get(flush_run_id)
-                        seq = int((task or {}).get("page_persist_seq") or 0) if task is not None else 0
-                    if seq != last_seq:
-                        last_seq = seq
-                        stable_since = time.monotonic()
-                    elif time.monotonic() - stable_since >= 0.2:
-                        break
-                    time.sleep(0.05)
-                if flush_lock.acquire(timeout=3.0):
-                    flush_lock.release()
-        # 结束保存：先把停止信号交给本任务，再按需等当前 JD 批次收尾——批次
-        # 结果会在返回后落进断点，等它落盘再取快照，数据更全（wait_for_batch）。
-        with ctx.lock:
-            own_task = ctx.tasks.get(run_id)
-            own_stop_event = own_task.get("stop_event") if own_task is not None else None
-        if own_stop_event is not None:
-            request_stop(own_task, own_stop_event, STOP_MODE_FINISH)
-        wait_for_batch = bool(
-            (request.get_json(silent=True) or {}).get("wait_for_batch")
-        )
-        waited_for_batch = _wait_for_jd_batch_settle(ctx, run_id) if wait_for_batch else False
-        if scrape_task_id:
-            try:
-                source_jobs = ctx.store.load_scrape_run_jobs(scrape_task_id)
-            except ctx.operational_errors:
-                source_jobs = []
-            verdicts = ctx.store.load_screening_verdicts(run_id)
-            pending_rows = ctx.store.load_screening_pending(run_id)
-            try:
-                jd_map = ctx.load_jd_checkpoint(
-                    ctx.jd_checkpoint_path(app.config["RESULT_DIR"], run_id))
-            except RuntimeError as exc:
-                return jsonify({
-                    "ok": False, "error": str(exc),
-                    "message": "JD 断点文件损坏，无法生成部分结果",
-                }), 503
-        elif source_run_id:
-            payload = ctx.store.load_latest_pipeline_result(source_run_id)
-            source_payload = payload
-            source_jobs = ((payload or {}).get("result") or {}).get("jobs") or []
-            source_dropped = ((payload or {}).get("result") or {}).get("dropped") or []
-            source_total_scraped = ((payload or {}).get("result") or {}).get("total_scraped") or None
-            verdicts = ctx.store.load_screening_verdicts(source_run_id)
-            pending_rows = ctx.store.load_screening_pending(run_id)
-            if not pending_rows:
-                pending_rows = ctx.store.load_screening_pending(source_run_id)
-        elif not scrape_task_id and not source_run_id and str(run.get("current_stage") or "") == "scrape":
-            try:
-                source_jobs = ctx.store.load_scrape_run_jobs(run_id)
-            except ctx.operational_errors:
-                source_jobs = []
-            verdicts = ctx.store.load_screening_verdicts(run_id)
-            pending_rows = ctx.store.load_screening_pending(run_id)
-        profile_summary = str(params.get("profile_summary") or "")
-        if not profile_summary and source_run_id:
-            if source_payload is None:
-                source_payload = ctx.store.load_latest_pipeline_result(source_run_id)
-            profile_summary = str(((source_payload or {}).get("result") or {}).get("profile_summary") or "")
-        parent_scrape_task_id = scrape_task_id
-        if not parent_scrape_task_id:
-            parent_scrape_task_id = (
-                run_id if str(run.get("current_stage") or "") == "scrape" else ""
-            )
-        profile_facts = params.get("profile_facts")
-        if not isinstance(profile_facts, dict) or not profile_facts:
-            profile_facts = None
-            if scrape_task_id:
-                try:
-                    parent_run = ctx.store.get_screening_run(scrape_task_id)
-                except ctx.operational_errors:
-                    parent_run = None
-                parent_facts = ((parent_run or {}).get("execution_params") or {}).get("profile_facts")
-                if isinstance(parent_facts, dict) and parent_facts:
-                    profile_facts = parent_facts
-            if profile_facts is None and source_run_id:
-                if source_payload is None:
-                    source_payload = ctx.store.load_latest_pipeline_result(source_run_id)
-                source_facts = ((source_payload or {}).get("result") or {}).get("profile_facts")
-                if isinstance(source_facts, dict) and source_facts:
-                    profile_facts = source_facts
-        with ctx.lock:
-            task = ctx.tasks.get(run_id)
-            if task is not None and task.get("stop_event") is not None:
-                request_stop(task, task["stop_event"], STOP_MODE_FINISH)
-            ctx.resume_claims.discard(run_id)
-        from webui import pipeline_exec as _facade
-        from webui.frozen_browser_identity import close_frozen_run_browser
-        result = _build_partial_pipeline_result(
-            source_jobs, verdicts, pending_rows, jd_map,
-            profile_summary,
-            source_dropped=source_dropped,
-            total_scraped=source_total_scraped,
-            platform=platform,
-            profile_facts=profile_facts,
-            unfiltered=str(run.get("current_stage") or "") == "scrape",
-        )
-        from webui.screen_flow import build_round_script_params
-        from webui.result_rounds import save_finished_round
-        snapshot_run_id = save_finished_round(
-            ctx.store,
-            result,
-            build_round_script_params(ctx.store, run, run.get("frozen_filters") or {}, platform),
-            scrape_task_id=parent_scrape_task_id,
-            status="partial",
-            execution_config=params.get("execution_config") or {},
-            platform=platform,
-            profile_summary=profile_summary,
-            profile_facts=profile_facts,
-            started_at=run.get("started_at"),
-            finished_at=int(time.time() * 1000),
-        )
-        from webui.task_finish_whitebox import finalize_manual_partial_whitebox_or_none
-        whitebox_integrity = finalize_manual_partial_whitebox_or_none(
-            ctx.store, run, parent_owner_id=parent_scrape_task_id)
-        if whitebox_integrity is None:
-            return jsonify({
-                "ok": False, "error": "whitebox_incomplete",
-                "message": "部分结果已生成，但任务证据未能可靠终结，请重试结束保存",
-            }), 503
-        try:
-            ctx.store.finish_screening_run(run_id)
-        except DiscoveryStoreConflictError as exc:
-            return jsonify({
-                "ok": False, "error": str(exc),
-                "message": {
-                    "already_finished": "任务已结束保存，请勿重复操作",
-                    "already_terminal": "任务已完成，无需结束保存",
-                    "user_cancelled": "用户已取消的任务不能结束保存",
-                }.get(str(exc), "任务状态已变化，无法结束保存"),
-            }), 409
-        except KeyError:
-            return jsonify({"ok": False, "error": "run_not_found"}), 404
-        ctx.clear_auto_screen(run_id)
-        if scrape_task_id and scrape_task_id != run_id:
-            ctx.clear_auto_screen(scrape_task_id)
-        ctx.prune_history_best_effort()
-        # 043：整条进出——结束保存后的定稿清理 + 无主兜底（服务内部 best-effort）。
-        from webui import run_cleanup
-        run_cleanup.prune_after_finalize(ctx.store, str(snapshot_run_id or run_id))
-        append_task_event_best_effort(
-            ctx.store, run_id, "finish", {
-                "snapshot_run_id": snapshot_run_id,
-                "stage": run.get("current_stage") or "", "jobs": len(result["jobs"]),
-                "dropped": len(result["dropped"]),
-            }, logger=_logger,
-        )
-        with ctx.lock:
-            current = ctx.tasks.get(run_id)
-            if current is not None:
-                current["status"] = "completed_with_pending"
-                current["error"] = "用户提前结束，已保存部分结果"
-                current["result"] = result
-                current["finished_at"] = int(time.time() * 1000)
-        cleanup = close_frozen_run_browser(
-            ctx.store, run,
-            accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
-            activate=_facade.set_active_cdp_data_dir,
-            close=_facade.close_debug_chrome,
-        )
-        if not cleanup.ok:
-            append_task_event_best_effort(
-                ctx.store, run_id, "browser_cleanup_failed",
-                cleanup.as_dict(), logger=_logger,
-                context="browser cleanup audit event write failed",
-            )
-            with ctx.lock:
-                current = ctx.tasks.get(run_id)
-                if current is not None:
-                    current["error"] = "结果已保存，但浏览器清理失败"
-        return jsonify({
-            "ok": True, "run_id": run_id, "snapshot_run_id": snapshot_run_id,
-            "platform": platform,
-            "status": "completed_with_pending", "result": result,
-            "integrity": whitebox_integrity,
-            "scrape_task_id": parent_scrape_task_id,
-            "waited_for_batch": waited_for_batch,
-            "message": "任务已结束，已完成结果已保存",
-            "cleanup": cleanup.as_dict(),
-            **({"cleanup_error": "browser_cleanup_failed"}
-               if not cleanup.ok else {}),
-        })
+    from webui.task_continue_finish import register_finish_route
+    register_finish_route(app, ctx, sys.modules[__name__])

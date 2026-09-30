@@ -43,6 +43,7 @@ class StoreRunsMixin:
             )
         return self.get_search_run(rid)
 
+
     def get_search_run(self, run_id) -> dict:
         with self._connection() as conn:
             row = conn.execute("SELECT * FROM search_runs WHERE id = ?", (str(run_id),)).fetchone()

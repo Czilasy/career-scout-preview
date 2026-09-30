@@ -155,6 +155,36 @@ describe("useDiscoveryExecution.restoreRunningTask（026 B078）", () => {
     expect(deps.pollTask).not.toHaveBeenCalled();
   });
 
+  it("卸载期间，已进入恢复请求的晚到任务响应不再写回状态", async () => {
+    let resolveResponse: (value: Record<string, unknown>) => void = () => {};
+    apiRequestMock.mockReturnValue(new Promise((resolve) => {
+      resolveResponse = resolve;
+    }));
+    const state = makeState();
+    state.activeStep.value = "results";
+    const deps = makeDeps();
+    const execution = useDiscoveryExecution(state, deps);
+
+    const restoring = execution.restoreRunningTask();
+    // The coordinator uses this same shared epoch from its unmount hook.
+    state.invalidateWorkflowEpoch();
+    resolveResponse({
+      has_task: true,
+      task_id: "late-unmount-scrape",
+      kind: "scrape",
+      status: "running",
+      platform: "boss",
+    });
+    await restoring;
+
+    expect(state.activeStep.value).toBe("results");
+    expect(state.activeTaskRestored.value).toBe(false);
+    expect(state.scrapeTaskId.value).toBe("");
+    expect(state.scrapeBusy.value).toBe(false);
+    expect(deps.pollTask).not.toHaveBeenCalled();
+    expect(deps.notify).not.toHaveBeenCalled();
+  });
+
   it("T001: 已进 04 页（已结束）+ 后端残留 interrupted → 不恢复、不弹提示", async () => {
     apiRequestMock.mockResolvedValue(interruptedScreenResponse);
     const state = makeState({ resultsPageSeen: ref(true) });

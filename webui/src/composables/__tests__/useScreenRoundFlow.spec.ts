@@ -1,6 +1,7 @@
 import { flushPromises } from "@vue/test-utils";
 import { ref } from "vue";
 import { apiRequest } from "../../api";
+import { reachableStep } from "../useIslandNavigation";
 import { useScreenRoundFlow } from "../useScreenRoundFlow";
 import type { Platform, RoundContext } from "../../types";
 
@@ -12,6 +13,7 @@ vi.mock("../../api", () => ({
 const apiRequestMock = apiRequest as unknown as ReturnType<typeof vi.fn>;
 
 function makeDeps() {
+  const activeStep = ref("screen");
   const refs = {
     draftPlatform: ref<Platform>("boss"),
     filterValues: ref<Record<Platform, Record<string, string[]>>>({ boss: {}, zhilian: {} }),
@@ -36,7 +38,10 @@ function makeDeps() {
     recrawlSnapshot: ref<any>(null),
     finishedPartial: ref(false),
     resultsPageSeen: ref(false),
-    activeStep: ref("screen"),
+    activeStep,
+    // 真机契约：state.navigateStep 返回"实际落点步骤"，DiscoveryView 原样透传，
+    // 假件必须同样返回落点，否则调用方读不到真相。
+    navigateStep: (step: string) => { activeStep.value = step; return step; },
     resultPlatformFilter: ref<"all" | Platform>("all"),
     currentRoundStatus: ref(""),
     uncertainCount: ref(0),
@@ -47,7 +52,7 @@ function makeDeps() {
     recrawlUncertain: vi.fn(async () => {}),
     continueRecrawl: vi.fn(async () => {}),
     finishPausedTask: vi.fn(async () => {}),
-    resetWorkflow: vi.fn(async () => {}),
+    resetWorkflow: vi.fn(async (): Promise<boolean> => true),
     loadLatestResult: vi.fn(async () => {}),
     returnToLatest: vi.fn(async () => {}),
     notify: vi.fn(),
@@ -389,6 +394,18 @@ describe("useScreenRoundFlow", () => {
     expect(api.resetWorkflow).toHaveBeenCalled();
   });
 
+  it("lets Flow-owned cleanup reach reset and preserves the round when it fails", async () => {
+    const { refs, api } = makeDeps();
+    (refs as typeof refs & { flowActive: ReturnType<typeof ref<boolean>> }).flowActive = ref(true);
+    api.resetWorkflow.mockResolvedValue(false);
+    const flow = useScreenRoundFlow({ refs, api });
+
+    const result = await flow.confirmNewRound();
+
+    expect(result).toBe(false);
+    expect(api.resetWorkflow).toHaveBeenCalled();
+  });
+
   it.each([
     ["failed", true],
     ["paused", false],
@@ -559,6 +576,52 @@ describe("useScreenRoundFlow", () => {
     await flow.confirmNewRound();
     expect(api.resetWorkflow).not.toHaveBeenCalled();
     expect(refs.activeStep.value).toBe("screen");
+  });
+
+  // SPEC 046 返修：落点被 reachableStep 收窄（03 不可进 → 回退链落 02/01）时，
+  // 界面停在别处却提示「已回到任务进度」就是当着用户说假话。
+  // 假件按真机契约（navigateStep 返回实际落点）还原这次收窄。
+  function gateReachableSteps(refs: ReturnType<typeof makeDeps>["refs"], enabled: string[]): void {
+    const steps = new Set(enabled);
+    refs.navigateStep = (step: string) => {
+      const landed = reachableStep(step, steps);
+      refs.activeStep.value = landed;
+      return landed;
+    };
+  }
+
+  it("046 返修: 判到有活筛选但 03 不可进 → 落点被收窄，不得谎报已回到任务进度", async () => {
+    const { refs, api } = makeDeps();
+    refs.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    refs.screenTaskId.value = "screen-live";
+    refs.screenSnapshot.value = { status: "running", progress: {}, logs: [] };
+    refs.activeStep.value = "results";
+    gateReachableSteps(refs, ["upload", "search"]);
+    const flow = useScreenRoundFlow({ refs, api });
+
+    const started = await flow.confirmNewRound();
+
+    expect(refs.activeStep.value).toBe("search");
+    expect(api.notify).not.toHaveBeenCalledWith("当前还有任务在跑，已回到任务进度", "info");
+    expect(api.notify).toHaveBeenCalledWith("当前还有任务在跑，新一轮未开始", "info");
+    expect(started).toBe(false);
+    expect(api.resetWorkflow).not.toHaveBeenCalled();
+    expect(api.startAiScreen).not.toHaveBeenCalled();
+  });
+
+  it("046 返修: 可续跑轮请求落 03 却被收窄 → 守卫分支二同样只说事实", async () => {
+    const { refs, api } = makeDeps();
+    const flow = useScreenRoundFlow({ refs, api });
+    flow.registerRoundContext("boss", roundContext());
+    gateReachableSteps(refs, ["upload", "search"]);
+    const started = await flow.confirmNewRound();
+
+    expect(refs.activeStep.value).toBe("search");
+    expect(api.notify).not.toHaveBeenCalledWith("当前还有任务在跑，已回到任务进度", "info");
+    expect(api.notify).toHaveBeenCalledWith("当前还有任务在跑，新一轮未开始", "info");
+    expect(started).toBe(false);
+    expect(api.resetWorkflow).not.toHaveBeenCalled();
+    expect(api.startAiScreen).not.toHaveBeenCalled();
   });
 });
 describe("pauseScreen 批中弹窗分支（025 B076）", () => {

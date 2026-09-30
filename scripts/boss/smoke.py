@@ -5,12 +5,11 @@
 import json
 import time
 from urllib.parse import urlencode
-from scripts.boss.constants import API_JOB_LIST_PATH, BROWSER_NOT_FOUND_HINT, CDP_CMD_ATTACH_TARGET, CDP_CMD_CLOSE_TARGET, CDP_CMD_CREATE_TARGET, DEFAULT_CDP_PORT, DEFAULT_CITY_INPUT, FETCH_API_JS_TEMPLATE, LOGIN_PROBE_QUERY, MSG_BOSS_LOGIN_STATUS, MSG_DEDICATED_BROWSER_STARTED
+from scripts.boss.constants import API_JOB_LIST_PATH, BROWSER_NOT_FOUND_HINT, CDP_CMD_ATTACH_TARGET, CDP_CMD_CLOSE_TARGET, CDP_CMD_CREATE_TARGET, DEFAULT_CDP_PORT, DEFAULT_CITY_INPUT, FETCH_API_JS_TEMPLATE, LOGIN_PROBE_QUERY, MSG_DEDICATED_BROWSER_STARTED
 from scripts.boss.search import build_search_url
 import sys as _sys
 from scripts.boss import city_map
 from scripts.boss import constants as boss_constants
-from scripts.boss import login
 from scripts.boss import runtime
 from scripts.boss import cdp_session
 
@@ -81,7 +80,7 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
     Returns:
         (items, all_pass)
         items: [{
-            "id": "browsers" | "deps" | "cdp" | "boss_login",
+            "id": "browsers" | "deps" | "cdp",
             "name": str,
             "status": "ok" | "fail" | "skip",
             "detail": str,
@@ -128,7 +127,6 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
                f"缺少依赖: {', '.join(missing)}，请运行 uv sync 或 pip install -r requirements.txt")
 
     # 检查 3: CDP 端口连通性（专用浏览器是否已启动）
-    cdp_status = "skip"
     if runtime.requests is None:
         append("cdp", MSG_DEDICATED_BROWSER_STARTED, "skip",
                f"跳过 — 缺少 requests（无法探测 127.0.0.1:{cdp_port}）")
@@ -137,38 +135,14 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
             resp = runtime.requests.get(f"http://127.0.0.1:{cdp_port}/json/version", timeout=5)
             data = resp.json()
             browser = data.get("Browser", "未知")
-            cdp_status = "ok"
             append("cdp", MSG_DEDICATED_BROWSER_STARTED, "ok",
                    f"CDP 端口 {cdp_port} 就绪 — {browser}")
         except (runtime.requests.ConnectionError, runtime.requests.Timeout):
-            cdp_status = "fail"
             append("cdp", MSG_DEDICATED_BROWSER_STARTED, "fail",
                    f"无法连接 127.0.0.1:{cdp_port}（启动任务时会自动拉起浏览器）")
         except (json.JSONDecodeError, KeyError) as e:
-            cdp_status = "fail"
             append("cdp", MSG_DEDICATED_BROWSER_STARTED, "fail",
                    f"CDP 响应异常: {e}")
-
-    # 检查 4: BOSS 登录状态（三态）
-    if not deps_ok or cdp_status != "ok":
-        append("boss_login", MSG_BOSS_LOGIN_STATUS, "skip",
-               "跳过 — 浏览器未就绪，无法探测登录态")
-    else:
-        try:
-            state = login.check_login_state_tri(cdp_port)
-            if state == "logged_in":
-                append("boss_login", MSG_BOSS_LOGIN_STATUS, "ok",
-                       "已登录（接口返回明文薪资）")
-            elif state == "restricted":
-                append("boss_login", MSG_BOSS_LOGIN_STATUS, "fail",
-                       "受限中 — 账号或 IP 命中风控，建议等待后重试")
-            else:
-                append("boss_login", MSG_BOSS_LOGIN_STATUS, "fail",
-                       "未登录 — 请先在专用浏览器中登录 zhipin.com",
-                       "打开专用浏览器登录: python3 scripts/boss_cdp_raw.py --setup-chrome")
-        except Exception as e:
-            append("boss_login", MSG_BOSS_LOGIN_STATUS, "fail",
-                   f"检测失败: {e}")
 
     return items, all_pass
 

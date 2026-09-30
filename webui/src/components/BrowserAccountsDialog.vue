@@ -6,13 +6,8 @@ import BaseDialog from "./BaseDialog.vue";
 import BrowserKernelPicker from "./BrowserKernelPicker.vue";
 import { ApiError, apiRequest, browserRegistryApi, errorMessage } from "../api";
 import type { BrowserRegistryEntryState, BrowserSelection } from "../api";
+import { platformLabel } from "../discovery";
 import type { BrowserAccount, Notice, Platform } from "../types";
-
-// 平台展示标签；与后端 platform-schema display_name 解耦，前端只做稳定键→短标签映射。
-const PLATFORM_LABELS: Record<Platform, string> = {
-  boss: "BOSS",
-  zhilian: "智联",
-};
 
 // 登录态缓存 TTL 与后端 scripts/login_state_cache.py 保持一致（15 分钟）。
 const LOGIN_STATE_TTL_MS = 15 * 60 * 1000;
@@ -304,7 +299,7 @@ async function openPlatform(account: BrowserAccount, platform: Platform) {
       { method: "POST", json: { platform } },
     );
     setLocalNotice({
-      message: data?.message || `已打开 ${PLATFORM_LABELS[platform]} 的自动化浏览器，请登录`,
+      message: data?.message || `已打开 ${platformLabel(platform)} 的自动化浏览器，请登录`,
       tone: "info",
     });
     // 打开窗口会失效登录态缓存（后端 D3 信号），标记待刷新等真实探测。
@@ -313,7 +308,7 @@ async function openPlatform(account: BrowserAccount, platform: Platform) {
     pendingRefresh.value = next;
   } catch (error) {
     setLocalNotice({
-      message: errorMessage(error, `打开${PLATFORM_LABELS[platform]}失败`),
+      message: errorMessage(error, `打开${platformLabel(platform)}失败`),
       tone: "error",
     });
   } finally {
@@ -383,7 +378,7 @@ function formatDeleteError(error: unknown): string {
   const bits: string[] = [];
   const lockedPlatform = details.locked_platform;
   if (typeof lockedPlatform === "string" && lockedPlatform) {
-    const label = PLATFORM_LABELS[lockedPlatform as Platform] || lockedPlatform;
+    const label = platformLabel(lockedPlatform);
     const runId = details.locked_run_id;
     bits.push(typeof runId === "string" && runId
       ? `${label} 被运行中任务 ${runId} 占用`
@@ -391,14 +386,14 @@ function formatDeleteError(error: unknown): string {
   }
   const conflictingPlatform = details.conflicting_platform;
   if (typeof conflictingPlatform === "string" && conflictingPlatform) {
-    const label = PLATFORM_LABELS[conflictingPlatform as Platform] || conflictingPlatform;
+    const label = platformLabel(conflictingPlatform);
     bits.push(`${label} 端口被未知 profile 占用`);
   }
   const busyPlatforms = details.busy_platforms;
   if (Array.isArray(busyPlatforms)) {
     for (const p of busyPlatforms) {
       if (typeof p === "string" && p) {
-        const label = PLATFORM_LABELS[p as Platform] || p;
+        const label = platformLabel(p);
         if (!bits.some((b) => b.startsWith(label))) bits.push(`${label} 被占用`);
       }
     }
@@ -502,7 +497,6 @@ async function confirmRemoveAccount() {
       :pool-busy="poolBusy"
       :busy-account="busyAccount"
       :rate-limit-clear-account="rateLimitClearAccount"
-      :platform-labels="PLATFORM_LABELS"
       :display-name="displayName"
       :platforms-of="platformsOf"
       :platform-badge="platformBadge"

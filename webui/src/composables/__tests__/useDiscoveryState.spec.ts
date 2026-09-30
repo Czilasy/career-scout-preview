@@ -5,6 +5,7 @@ import { reactive, ref } from "vue";
 import {
   deriveLiveTaskStep,
   hasLiveTaskState,
+  hasUnfinishedRound,
   liveTaskStep,
   resultCountsFromPipeline,
   useDiscoveryState,
@@ -225,7 +226,92 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
     expect(capsule?.state).toBe("attention");
     if (capsule?.state === "attention") {
       expect(capsule.attention.kind).toBe("paused");
+      // 用户主动暂停（可恢复）仍是「已暂停」，这条口径不许被中断文案带跑。
+      expect(capsule.attention.message).toContain("已暂停");
     }
+    expect(state.roundStatusPayload.value?.stuckAt).toBe("scrape");
+  });
+
+  // SPEC 046 第五轮：服务重启打断的轮次，03 页 AI 筛选卡写「已中断」、02 页抓取卡写
+  // 「完整成功」，而顶栏灵动岛说「任务已暂停，请处理后继续」——岛谎报了状态性质。
+  it("筛选被服务重启打断 → 岛上说已中断，不再谎报已暂停", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
+    const payload = state.roundStatusPayload.value;
+    const capsule = payload?.capsule;
+    expect(capsule?.state).toBe("attention");
+    if (capsule?.state === "attention") {
+      // kind 仍走既有 paused 通道：胶囊状态枚举与导航落点都不因文案而变。
+      expect(capsule.attention.kind).toBe("paused");
+      expect(capsule.attention.message).toContain("已中断");
+      expect(capsule.attention.message).not.toContain("已暂停");
+      expect(capsule.attention.message).toContain("继续");
+    }
+    expect(payload?.stuckAt).toBe("screen");
+  });
+
+  it("只剩中断断点（interruptedRunId）→ 岛同样说已中断", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.interruptedRunId.value = "interrupted-run-1";
+    const payload = state.roundStatusPayload.value;
+    const capsule = payload?.capsule;
+    expect(capsule?.state).toBe("attention");
+    if (capsule?.state === "attention") {
+      expect(capsule.attention.kind).toBe("paused");
+      expect(capsule.attention.message).toContain("已中断");
+      expect(capsule.attention.message).not.toContain("已暂停");
+    }
+    expect(payload?.stuckAt).toBe("scrape");
+  });
+
+  it("抓取被服务重启打断 → 岛说已中断且落点仍是抓取页", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.scrapeSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
+    const payload = state.roundStatusPayload.value;
+    const capsule = payload?.capsule;
+    expect(capsule?.state).toBe("attention");
+    if (capsule?.state === "attention") {
+      expect(capsule.attention.kind).toBe("paused");
+      expect(capsule.attention.message).toContain("已中断");
+      expect(capsule.attention.message).not.toContain("已暂停");
+    }
+    expect(payload?.stuckAt).toBe("scrape");
+  });
+
+  // SPEC 046 第五轮（通知行）：暂停族只有一条 kind 通道，展开面板的行标题必须知道
+  // 这一轮到底是「可恢复的暂停」还是「被服务重启打断」——性质由这里（唯一判定面）
+  // 一并交给下游，展示端不再判第二次，否则同一行的标题与详情两个说法。
+  it("暂停族把性质一并交给下游：快照中断与中断断点都给 interrupted", () => {
+    const interruptedScreen = useDiscoveryState({ profileId: "test" }, () => {});
+    interruptedScreen.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    interruptedScreen.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
+    const screenCapsule = interruptedScreen.roundStatusPayload.value?.capsule;
+    expect(screenCapsule?.state).toBe("attention");
+    if (screenCapsule?.state === "attention") {
+      expect(screenCapsule.attention.pausedFact).toBe("interrupted");
+    }
+
+    const interruptedRun = useDiscoveryState({ profileId: "test" }, () => {});
+    interruptedRun.interruptedRunId.value = "interrupted-run-1";
+    const runCapsule = interruptedRun.roundStatusPayload.value?.capsule;
+    expect(runCapsule?.state).toBe("attention");
+    if (runCapsule?.state === "attention") {
+      expect(runCapsule.attention.pausedFact).toBe("interrupted");
+    }
+  });
+
+  it("暂停族把性质一并交给下游：可恢复暂停给 paused，kind 与落点不变", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.pausedRunId.value = "run-paused";
+    const payload = state.roundStatusPayload.value;
+    const capsule = payload?.capsule;
+    expect(capsule?.state).toBe("attention");
+    if (capsule?.state === "attention") {
+      expect(capsule.attention.kind).toBe("paused");
+      expect(capsule.attention.pausedFact).toBe("paused");
+    }
+    expect(payload?.stuckAt).toBe("scrape");
   });
 
   it("失败 → attention error", () => {
@@ -387,5 +473,222 @@ describe("useDiscoveryState 城市草稿（「全国」不是城市）", () => {
     const state = makeState();
     state.cityText.value = "上海，全国";
     expect(state.cityList.value).toEqual(["上海"]);
+  });
+});
+
+describe("useDiscoveryState 统一导航守卫", () => {
+  it("活动 Flow Track 时锁住一键入口和平台范围", () => {
+    const state = useDiscoveryState({ profileId: "navigation-flow-active" }, () => {});
+    const navigation = state as typeof state & {
+      setFlowActive: (active: boolean) => void;
+    };
+
+    navigation.setFlowActive(true);
+
+    expect(state.oneClickDisabled.value).toBe(true);
+    expect(state.scopeLocked.value).toBe(true);
+  });
+
+  it("全部平台的 Flow 可达投影放行普通点击，即使旧平台集合尚未解锁", () => {
+    const state = useDiscoveryState({ profileId: "navigation-flow" }, () => {});
+    state.analysisReady.value = true;
+    const navigation = state as typeof state & {
+      setFlowReachableSteps: (steps: Set<string> | null) => void;
+      navigateStep: (step: string) => string;
+    };
+
+    navigation.setFlowReachableSteps(new Set(["search", "screen"]));
+    navigation.navigateStep("screen");
+
+    expect(state.enabledSteps.value).toEqual(["upload", "search", "screen"]);
+    expect(state.activeStep.value).toBe("screen");
+  });
+
+  it("恢复后主动校正不可达页，重复校正保持同一落点", () => {
+    const state = useDiscoveryState({ profileId: "navigation-reconcile" }, () => {});
+    const navigation = state as typeof state & {
+      reconcileActiveStep: (step?: string) => string;
+    };
+
+    state.activeStep.value = "results";
+    expect(navigation.reconcileActiveStep()).toBe("upload");
+    expect(state.activeStep.value).toBe("upload");
+    expect(navigation.reconcileActiveStep()).toBe("upload");
+    expect(state.activeStep.value).toBe("upload");
+  });
+
+  it("画像切换重置导航投影与人工停留态", () => {
+    const state = useDiscoveryState({ profileId: "navigation-reset" }, () => {});
+    const navigation = state as typeof state & {
+      setFlowReachableSteps: (steps: Set<string> | null) => void;
+      setNavigationManualHold: (hold: boolean) => void;
+    };
+
+    navigation.setFlowReachableSteps(new Set(["search", "screen", "results"]));
+    navigation.setNavigationManualHold(true);
+    state.resetForProfileSwitch();
+
+    expect(state.enabledSteps.value).toEqual(["upload"]);
+    expect(state.activeStep.value).toBe("upload");
+    expect((navigation as typeof navigation & { navigationManualHold: { value: boolean } }).navigationManualHold.value).toBe(false);
+  });
+
+  it("人工停留态统一拦截 Flow 与系统自动跳页，但保留用户点击和恢复校正", () => {
+    const state = useDiscoveryState({ profileId: "navigation-manual-hold" }, () => {});
+    state.analysisReady.value = true;
+    state.scrapeCompleted.value = true;
+    state.resultLoaded.value = true;
+    state.activeStep.value = "search";
+    const navigation = state as typeof state & {
+      setNavigationManualHold: (hold: boolean) => void;
+      navigateStep: (step: string, options?: { source?: "user" | "flow" | "restore" | "system" }) => string;
+      reconcileActiveStep: (step?: string) => string;
+    };
+
+    navigation.setNavigationManualHold(true);
+
+    expect(navigation.navigateStep("results", { source: "flow" })).toBe("search");
+    expect(navigation.navigateStep("results", { source: "system" })).toBe("search");
+    expect(navigation.reconcileActiveStep("results")).toBe("results");
+    expect(navigation.navigateStep("search", { source: "user" })).toBe("search");
+  });
+});
+
+// 平台切换被禁用时的提示必须说真话：之前不分原因一律写「任务进行中，平台已锁定」，
+// 流程早已终态、什么都没在跑，顶部平台切换仍被锁着（因为已在第 3/4 步或在看历史轮），
+// 用户被告知有一个并不存在的任务。锁定本身不放宽，只把原因写对。
+describe("useDiscoveryState.scopeLockReason（禁用原因如实说明）", () => {
+  type ReasonState = ReturnType<typeof useDiscoveryState> & {
+    setFlowActive: (active: boolean) => void;
+  };
+
+  it("未锁定 → 不给任何提示", () => {
+    const state = useDiscoveryState({ profileId: "lock-none" }, () => {}) as ReasonState;
+    expect(state.scopeLocked.value).toBe(false);
+    expect(state.scopeLockReason.value).toBe("");
+  });
+
+  it("确有活动 Flow 轨道 → 才说任务进行中", () => {
+    const state = useDiscoveryState({ profileId: "lock-flow" }, () => {}) as ReasonState;
+    // 外壳「已中断」仍算活动线：本轮范围锁死是正确事实，解锁的只有「开始新一轮」。
+    state.setFlowActive(true);
+    expect(state.scopeLocked.value).toBe(true);
+    expect(state.scopeLockReason.value).toBe("任务进行中，平台已锁定");
+  });
+
+  it("有暂停待处理的轮次 → 说已暂停，不说进行中", () => {
+    const state = useDiscoveryState({ profileId: "lock-paused" }, () => {}) as ReasonState;
+    state.pausedRunId.value = "run-paused";
+    expect(state.scopeLocked.value).toBe(true);
+    expect(state.scopeLockReason.value).toBe("任务已暂停，平台已锁定");
+  });
+
+  it("查看历史轮次 → 说历史轮次，不谎称任务进行中", () => {
+    const state = useDiscoveryState({ profileId: "lock-history" }, () => {}) as ReasonState;
+    state.historyRound.value = { runId: "h1", platform: "boss", status: "done", jobCount: 3 };
+    expect(state.scopeLocked.value).toBe(true);
+    expect(state.scopeLockReason.value).toContain("历史轮次");
+    expect(state.scopeLockReason.value).not.toContain("任务进行中");
+  });
+
+  it("只是停在第 4 步、没有任何任务 → 说范围已确认，不谎称任务进行中", () => {
+    const state = useDiscoveryState({ profileId: "lock-results" }, () => {}) as ReasonState;
+    state.activeStep.value = "results";
+    expect(state.scopeLocked.value).toBe(true);
+    expect(state.scopeLockReason.value).not.toContain("任务进行中");
+    expect(state.scopeLockReason.value).toContain("平台已锁定");
+  });
+});
+
+// SPEC 046 第五轮：判活只允许一份口径，落在树干；落点跟随流程投影。
+// 真实现场——并行流程的活动线由协调器投影成 flowActive，本地三个任务快照仍是上一轮
+// 终态、暂停轮次为空：树干 hasLiveTaskState 认这个活，落点派生此前不认，于是
+// 「有活任务」与「没有落点」同时成立，上传简历入口守卫把用户带进开新一轮路径。
+// 落点跟随的是 Flow 投影到 state 的阶段集合（flowReachableSteps），不是被 historyMode
+// 收窄后的 enabledSteps。
+describe("useDiscoveryState 判活与落点同源（SPEC 046 第五轮）", () => {
+  // useDiscoveryState 在函数体内声明全部 ref（:91 起），每个实例各自独立：
+  // 判活用到的事实（流程活动线、任务快照、暂停轮次）没有跨实例通道，
+  // 每个用例直接造自己的现场即可，不需要任何"清场"装置。
+  function makeFlowOnlyState(profileId: string): DiscoveryState {
+    const state = useDiscoveryState({ profileId }, () => {});
+    state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.screenSnapshot.value = { status: "failed", progress: {}, logs: [] };
+    state.setFlowActive(true);
+    return state;
+  }
+
+  it("① 只因流程活动线而活：树干判到活时落点不得为空，且落点在可达清单里", () => {
+    const state = makeFlowOnlyState("same-source-landing");
+    expect(hasLiveTaskState(state)).toBe(true);
+    const step = liveTaskStep(state);
+    expect(step).not.toBe("");
+    expect(state.enabledSteps.value).toContain(step);
+  });
+
+  it("② 落点跟随流程投影的进行中阶段，取最深的一支（screen 优先于 search）", () => {
+    const state = makeFlowOnlyState("same-source-projection");
+    // 投影还没到达：流程活动线的最小开放面只有 02，落点不凭空造 03。
+    expect(liveTaskStep(state)).toBe("search");
+    state.setFlowReachableSteps(new Set(["search", "screen"]));
+    expect(state.enabledSteps.value).toEqual(["upload", "search", "screen"]);
+    // 真实现场：并行流程抓取已完成、AI 筛选正在跑。02 页只渲染抓取列表，
+    // 落 02 就看不到 03 正在跑的筛选进度，落点必须是最深的那一支。
+    expect(liveTaskStep(state)).toBe("screen");
+    // 投影只开到 02（抓取仍在跑）时仍然落 02。
+    state.setFlowReachableSteps(new Set(["search"]));
+    expect(liveTaskStep(state)).toBe("search");
+  });
+
+  it("③ 树干判到没有活任务 → 仍然不给落点，不凭空造一个", () => {
+    const state = makeFlowOnlyState("same-source-idle");
+    state.setFlowActive(false);
+    expect(hasLiveTaskState(state)).toBe(false);
+    expect(liveTaskStep(state)).toBe("");
+  });
+
+  it("④ 真实进度优先：流程活动线之上筛选确实在跑，落点仍是筛选进度页", () => {
+    const state = makeFlowOnlyState("same-source-legacy");
+    state.setFlowReachableSteps(new Set(["search", "screen"]));
+    state.screenSnapshot.value = { status: "running", progress: {}, logs: [] };
+    expect(liveTaskStep(state)).toBe("screen");
+    state.screenSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.scrapeSnapshot.value = { status: "queued", progress: {}, logs: [] };
+    expect(liveTaskStep(state)).toBe("search");
+  });
+
+  it("⑤ 正在看历史轮（enabledSteps 被收窄成 04）：落点仍跟随投影，不造不可达步骤", () => {
+    const state = makeFlowOnlyState("same-source-history");
+    state.setFlowReachableSteps(new Set(["search", "screen"]));
+    state.historyRound.value = { runId: "h1", platform: "boss", status: "done", jobCount: 1 };
+    // 「回到最新」在清掉历史轮之前求值落点：此刻 enabledSteps 只剩 04，
+    // 拿它当判定面会把"有活任务就不去请求最新结果"的守卫判反。
+    expect(state.enabledSteps.value).toEqual(["results"]);
+    expect(hasLiveTaskState(state)).toBe(true);
+    expect(liveTaskStep(state)).toBe("screen");
+  });
+
+  it("⑥ 投影里没有任何进行中阶段 → 不给落点，结果页不当进度页", () => {
+    const state = makeFlowOnlyState("same-source-results-only");
+    state.setFlowReachableSteps(new Set(["results"]));
+    expect(state.enabledSteps.value).toContain("results");
+    expect(liveTaskStep(state)).toBe("");
+  });
+
+  // SPEC 046 收尾守卫：判活（问题 A「此刻有没有活体 worker」）与未结束（问题 B
+  // 「这一轮还没结束」）分派。轨道排队中/运行中 → 页面把 hasLiveWorker 投影成活体 →
+  // 判活为真（04 因此不接本轮结果，见 DiscoveryRecovery「仍有活体轨道时 04 不接本轮结果」）；
+  // 已中断 → 没活体但也没结束 → 判活为假、落点照旧跟随投影、范围与提交仍然锁死。
+  it.each([true, false])("⑦ 活体与未结束分派（页面投影活体轨道=%s）", (liveWorker) => {
+    const state = makeFlowOnlyState(`same-source-dispatch-${liveWorker}`);
+    state.setFlowReachableSteps(new Set(["search", "screen"]));
+    state.setFlowLiveWorker(liveWorker);
+    expect(hasLiveTaskState(state)).toBe(liveWorker);
+    // 两者都属于「这一轮还没结束」：范围与提交守卫不因判活放开而放松。
+    expect(hasUnfinishedRound(state)).toBe(true);
+    expect(state.scopeLocked.value).toBe(true);
+    expect(state.pipelineBusy.value).toBe(true);
+    // 落点问的是未结束，不是活体：已中断的轮也必须有一个可达的真实进度页。
+    expect(liveTaskStep(state)).toBe("screen");
   });
 });

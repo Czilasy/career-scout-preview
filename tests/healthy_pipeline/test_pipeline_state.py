@@ -558,6 +558,112 @@ class JDBatchExceptionClassificationTests(unittest.TestCase):
         self.assertEqual(job["jd_failed_code"], "source_blocked")
         self.assertIn("signal=blocked", job.get("jd_failed_evidence", ""))
 
+    def test_detail_parser_subreason_reaches_job_failure_evidence(self):
+        """详情解析子原因沿 source safe_log 进入岗位失败证据。"""
+        from webui.pipeline_exec import fetch_job_details
+        from webui.source import SourceOutcome
+
+        class InvalidDetailSource:
+            def fetch_details_batch(self, jobs, **_kwargs):
+                return {
+                    job["job_id"]: SourceOutcome.failure(
+                        failed_code="source_invalid_output",
+                        safe_log=(
+                            "platform=zhilian stage=batch "
+                            "failed_code=source_invalid_output reason=jd_missing"
+                        ),
+                        failed_reason="输入校验失败或页面解析异常",
+                    )
+                    for job in jobs
+                }
+
+        with tempfile.TemporaryDirectory() as artifact_dir:
+            result = fetch_job_details(
+                [{"job_id": "j1", "jd": ""}],
+                InvalidDetailSource(), artifact_dir=artifact_dir,
+            )
+
+        self.assertIn("reason=jd_missing", result["jobs"][0]["jd_failed_evidence"])
+
+    def test_detail_batch_receives_distinct_event_and_numeric_progress_callbacks(self):
+        """编排层传给详情源的无参与数值回调必须可分别调用。"""
+        from webui.pipeline_exec import fetch_job_details
+        from webui.source import SourceOutcome
+
+        seen = {}
+
+        class CallbackSource:
+            platform = "zhilian"
+
+            def fetch_details_batch(self, jobs, **kwargs):
+                seen["event"] = kwargs["event_callback"]
+                seen["progress"] = kwargs["on_item_done"]
+                kwargs["event_callback"]()
+                kwargs["on_item_done"](1)
+                return {
+                    jobs[0]["job_id"]: SourceOutcome.success(detail={"jd": "职责"}),
+                }
+
+        with tempfile.TemporaryDirectory() as artifact_dir:
+            result = fetch_job_details(
+                [{"job_id": "j1", "jd": ""}],
+                CallbackSource(), artifact_dir=artifact_dir,
+            )
+
+        self.assertIsNot(seen["event"], seen["progress"])
+        self.assertEqual(result["fetched"], 1)
+
+    def test_detail_event_adapter_accepts_boss_payload_and_zhilian_noarg(self):
+        """两个详情源的事件回调只做心跳，数值进度仍只来自 on_item_done。"""
+        from webui.pipeline_exec import fetch_job_details
+        from webui.source import SourceOutcome
+
+        class HeartbeatGuard:
+            def __init__(self):
+                self.touches = []
+
+            def begin_batch(self, *_args, **_kwargs):
+                return None
+
+            def touch(self, batch_key):
+                self.touches.append(batch_key)
+
+            def complete_batch(self, *_args, **_kwargs):
+                return None
+
+            def should_retry(self, *_args, **_kwargs):
+                return False
+
+            def should_giveup(self, *_args, **_kwargs):
+                return False
+
+        for platform, event_args in (("boss", ({"kind": "detail"},)), ("zhilian", ())):
+            guard = HeartbeatGuard()
+            progress = []
+
+            class CallbackSource:
+                def fetch_details_batch(self, jobs, **kwargs):
+                    kwargs["event_callback"](*event_args)
+                    kwargs["on_item_done"](1)
+                    return {
+                        jobs[0]["job_id"]: SourceOutcome.success(detail={"jd": "职责"}),
+                    }
+
+            source = CallbackSource()
+            source.platform = platform
+            with tempfile.TemporaryDirectory() as artifact_dir:
+                result = fetch_job_details(
+                    [{"job_id": f"{platform}-j1", "jd": ""}],
+                    source,
+                    artifact_dir=artifact_dir,
+                    guard=guard,
+                    progress=lambda done, total: progress.append((done, total)),
+                )
+
+            self.assertEqual(result["fetched"], 1)
+            self.assertEqual(progress, [(1, 1)])
+            self.assertTrue(guard.touches)
+
     def test_captcha_required_outcome_stops_before_next_batch(self):
         from webui.pipeline_exec import fetch_job_details
         from webui.source import SourceOutcome

@@ -230,6 +230,35 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/src/composables/useSearchPackages.ts` — 044 配置包前端领域：列表/选择回填/保存另存/改名删除与原子应用；只经 apiRequest 访问后端
 - `webui/src/components/SavedSearchPackagePicker.vue` — 044 第一页配置包小入口与选择框（选择、重命名、二次确认删除）；只发事件
 - `webui/src/components/SavedSearchPackageSaveActions.vue` — 044 第二页保存/另存为与可编辑默认名称；只发事件
+- `webui/exec_search_scope.py` — 047 搜索范围预览路由的独立校验与响应收口；只写入现有 context 缓存
+- `webui/exec_search_cancel.py` — 047 搜索任务取消路由与任务所属浏览器清理的薄 HTTP 壳
+- `webui/exec_search_resume.py` — 047 搜索断点续跑路由与恢复身份/检查点编排；保持 `ctx.continue_execute_search` 兼容注入
+- `webui/src/components/JobLifecycleDialog.vue` — 047 岗位轨迹弹窗组件；接收既有岗位/画像并转发关闭与反馈事件
+- `webui/flow_api.py` — B096 Flow/Track HTTP 路由：创建、读取、单线操作与流程结果边界
+- `webui/flow_service.py` — B096 Flow/Track 协调：新轮门禁、平台可用性、状态推进、提交补偿与失败留痕
+- `webui/store_flow.py` — B096 Flow store 门面：组装声明式 mixin，不承载业务实现
+- `webui/store_flow_core.py` — B096 Flow store 共享常量、ID/状态/行转换辅助
+- `webui/store_flow_claims.py` — B096 Flow/Track 创建、claim、迁移、运行线状态与绑定
+- `webui/store_flow_preflight.py` — B096 尚未 claim 的 preflight 暂停/失败原子收口
+- `webui/store_flow_results.py` — B096 Flow 结果、历史与当前 Flow 归档投影
+- `webui/store_flow_legacy.py` — B096 legacy run 的只读归属校验与兼容投影
+- `webui/store_flow_runs.py` — B096 抓取 search-run 的 Flow/Track identity 写入
+- `webui/store_migrations_v7.py` — B096 迁移 038/039：Flow/Track 关系及无凭据重试快照列
+- `webui/ai_screen_failure.py` — B096 AI worker 统一失败补偿：task/run/Track/audit 收口
+- `webui/flow_future.py` — B096 Flow AI Future 异常回写与安全日志边界
+- `webui/pipeline_task_outcome.py` — B096 抓取 runner 的终态、暂停与安全失败收口；由 `runners/pipeline_task.py` 单向调用
+- `webui/task_continue_support.py` — 续跑批次状态与等待辅助
+- `webui/task_continue_results.py` — 续跑结果投影辅助
+- `webui/task_continue_finish.py` — 048 结束保存路由与部分结果快照编排
+- `webui/flow_submission_service.py` — B096 抓取 Flow Track claim、run 创建/绑定、lane 提交与失败补偿
+- `webui/flow_ai_coordinator.py` — B096 AI run 创建、Flow claim、白箱、lane 提交与自动筛选协调
+- `webui/flow_task_state.py` — B096 task、screening/search run 与 Flow Track 的状态感知统一收口
+- `webui/store_flow_state.py` — B096 screening/search run 与 Flow Track 失败/暂停状态在同一 SQLite 事务内收口
+- `webui/src/parallelFilterMapping.ts` — B096 V2 统一条件映射：冻结表、简历语义投影、字段级覆盖与快照构造；只依赖类型，不依赖 Vue 页面
+- `webui/src/composables/useDiscoveryFlowPresentation.ts` — B096 V2 Flow 页面投影：真实进度、解锁水位、自动前进与结果签名通知；由视图单向消费
+- `webui/store_migrations_v8.py` — B096 V2 迁移 040：为常用配置增加条件快照列；由迁移门面单向组装
+- `webui/src/composables/useDiscoveryParallelFlow.ts` — B096 双平台 Flow 草稿、确认、轮询与单线操作状态
+- `webui/src/components/ParallelPlatformProgress.vue` — B096 BOSS/智联独立进度与暂停/继续/停止操作展示
 
 ## 文件布局约束
 

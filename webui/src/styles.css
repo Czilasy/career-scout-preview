@@ -1222,6 +1222,14 @@ button:disabled {
   font-size: 11px;
   white-space: nowrap;
 }
+/* The profile confirmation is an explicit action, not editable search scope.
+   Keep it reachable while the surrounding card is visually locked so the
+   button remains usable by mouse and by the browser's native keyboard click. */
+.collapsible-card.locked .profile-confirm-btn {
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
+}
 .one-click-cta {
   min-height: 50px;
   padding: 0 22px;
@@ -1432,6 +1440,7 @@ button:disabled {
   animation: stage-fade .22s ease both;
 }.command-band {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
@@ -1449,11 +1458,21 @@ button:disabled {
   font-size: 13px;
   color: var(--ink-3);
   white-space: nowrap;
+}/* 流程失败/错误通知：任何宽度都必须可见，不得与窄屏可隐藏的装饰提示同类 */
+.flow-failure-notice {
+  flex: 1 1 260px;
+  min-width: 0;
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }.result-tabs {
   display: flex;
   align-items: flex-end;
   gap: 4px;
   padding: 0;
+  min-width: 0;
   overflow-x: auto;
   border: 0;
   border-radius: 0;
@@ -2519,6 +2538,11 @@ body,
     grid-template-rows: auto auto minmax(0, 1fr);
   }.results-view .results-stage.has-pending-capsule {
     grid-template-rows: auto auto minmax(0, 1fr);
+  }
+  /* 引导条与待确认胶囊可以同时为真：那是 4 个子节点。少声明一行，最后一个就落到
+     隐式 auto 行、height:100% 失效，与外层纵向滚动叠成双滚动条、列表被挤出。 */
+  .results-view .results-stage.has-recrawl-guide.has-pending-capsule {
+    grid-template-rows: auto auto auto minmax(0, 1fr);
   }.results-view .job-workspace,
 .results-view .empty-panel {
     height: 100%;

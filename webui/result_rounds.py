@@ -131,6 +131,9 @@ def save_finished_round(
         store, scrape_task_id, script_params)
     parent_run = store.get_screening_run(scrape_task_id) if scrape_task_id else None
     career_profile_id = str((parent_run or {}).get("profile_id") or "") or None
+    parent_flow_id = str(
+        ((parent_run or {}).get("execution_params") or {}).get("flow_id") or ""
+    ).strip() or None
 
     def _write():
         existing = _existing_round_for_flow(store, scrape_task_id, platform)
@@ -158,6 +161,7 @@ def save_finished_round(
             execution_params={
                 "platform": platform,
                 "scrape_task_id": str(scrape_task_id),
+                "flow_id": parent_flow_id,
             },
             profile_id=career_profile_id,
         )

@@ -1,4 +1,7 @@
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 // useTheme 用模块级单例保存 mode/platform + initialized 标志。
 // 每个测试通过 vi.resetModules() + 动态 import 重新加载模块，
 // 确保 initialized 重置为 false，模拟"首次访问"。
@@ -73,6 +76,17 @@ describe("useTheme", () => {
     expect(document.documentElement.getAttribute("data-platform")).toBe("zhilian");
     expect(mode.value).toBe("light");
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+  });
+
+  it("keeps the all-platform scope neutral in both light and dark CSS branches", async () => {
+    const css = readFileSync(path.join(__dirname, "../../styles/theme.css"), "utf8");
+    expect(css).toContain(':root[data-theme="light"][data-platform="all"]');
+    expect(css).toContain(':root[data-theme="dark"][data-platform="all"]');
+    const { setThemePlatform, toggleTheme } = await loadModule();
+    setThemePlatform("all");
+    expect(document.documentElement.getAttribute("data-platform")).toBe("all");
+    toggleTheme("dark");
+    expect(document.documentElement.getAttribute("data-platform")).toBe("all");
   });
 
   it("keeps mode and platform orthogonal: switching platform preserves dark mode", async () => {

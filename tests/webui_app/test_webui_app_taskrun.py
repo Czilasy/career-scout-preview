@@ -2354,7 +2354,8 @@ class FinalizeWindowGuardTests(unittest.TestCase):
         resp = self.client.post(
             f"/api/task/pause/{run_id}", json={"mode": "graceful"})
 
-        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.status_code, 409, resp.get_json())
+        self.assertEqual(resp.get_json()["error"], "finalizing")
         self.assertEqual(resp.get_json()["status"], "finalizing")
         self.assertFalse(task["stop_event"].is_set())
         self.assertNotIn("stop_mode", task)

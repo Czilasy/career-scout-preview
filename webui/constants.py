@@ -36,7 +36,6 @@ LOG_TAIL_LINES = 50
 # --- 共享消息文案（031 B3 归一；任务不存在合并两份漂移定义为信息更全文案） ---
 _MSG_USER_FINISHED = "用户已结束任务"
 _MSG_UNSUPPORTED_PLATFORM = "不支持的招聘平台"
-_MSG_BOSS_LOGIN_STATUS = "BOSS 登录状态"
 _MSG_TASK_NOT_FOUND = "任务不存在或已被移除"
 _MSG_TASK_ALREADY_RUNNING = "该任务正在继续，请勿重复点击"
 _MSG_ACCOUNT_NOT_FOUND = "账号不存在"

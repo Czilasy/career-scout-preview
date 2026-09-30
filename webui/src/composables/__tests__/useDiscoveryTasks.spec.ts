@@ -8,8 +8,7 @@ import { apiRequest } from "../../api";
 import { useDiscoveryTasks } from "../useDiscoveryTasks";
 import { useDiscoverySceneState } from "../useDiscoverySceneState";
 import { useDiscoverySearch } from "../useDiscoverySearch";
-import { useDiscoveryState } from "../useDiscoveryState";
-import { taskProgressFromSnapshot } from "../useDiscoveryState";
+import { hasLiveTaskState, taskProgressFromSnapshot, useDiscoveryState } from "../useDiscoveryState";
 import type { DiscoveryState } from "../useDiscoveryState";
 import type { RoundFlowLike, TasksNeeds } from "../discoveryDeps";
 
@@ -36,6 +35,8 @@ const roundFlowFake: RoundFlowLike = {
 
 // 031 B8 补遗：state fake = 真实状态工厂 + overrides（字段永齐全、类型真实，
 // 消除 as any 兜底）；deps fake 按 TasksNeeds 全量类型化。
+// useDiscoveryState 在函数体内声明全部 ref，每个实例各自独立：用例造自己的现场即可，
+// 判活事实（流程活动线、任务快照、暂停轮次）没有跨实例通道，不需要"清场"装置。
 function makeState(overrides: Partial<DiscoveryState> = {}): DiscoveryState {
   const state = useDiscoveryState({ profileId: "test" }, () => {});
   return Object.assign(state, overrides);
@@ -118,6 +119,104 @@ describe("useDiscoveryTasks 开新一轮现场归档（Spec041 返工）", () =>
     });
     expect(state.pipelineResultRunId.value).toBe("");
   });
+
+  it("reports false and preserves the round when result cleanup is rejected", async () => {
+    const state = makeState({ activeStep: ref("screen") });
+    const deps = makeDeps({ clearLatestResult: vi.fn(async () => false) });
+    const tasks = useDiscoveryTasks(state, deps);
+
+    expect(await tasks.resetWorkflow()).toBe(false);
+    expect(state.activeStep.value).toBe("screen");
+  });
+
+  it("lets a Flow-owned paused task reach the server cleanup before reset", async () => {
+    const state = makeState({
+      activeStep: ref("results"),
+      flowActive: ref(true),
+      screenTaskId: ref("flow-paused-1"),
+      screenSnapshot: ref({ status: "paused", progress: {}, logs: [] }),
+    });
+    const deps = makeDeps();
+    apiRequestMock.mockResolvedValue({
+      ok: true, status: "interrupted", cancellation: "cancelled",
+    });
+    const tasks = useDiscoveryTasks(state, deps);
+
+    expect(await tasks.resetWorkflow()).toBe(true);
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/api/task/cancel/flow-paused-1", { method: "POST" },
+    );
+    expect(state.activeStep.value).toBe("upload");
+  });
+
+  it("uses durable Flow Track run ids when the legacy page has no task snapshot", async () => {
+    const state = makeState({
+      activeStep: ref("results"),
+      flowActive: ref(true),
+    });
+    const deps = makeDeps({
+      getFlowTaskIds: () => ["flow-track-paused-1"],
+    });
+    apiRequestMock.mockResolvedValue({
+      ok: true, status: "interrupted", cancellation: "not_required",
+    });
+    const tasks = useDiscoveryTasks(state, deps);
+
+    expect(await tasks.resetWorkflow()).toBe(true);
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/api/task/cancel/flow-track-paused-1", { method: "POST" },
+    );
+  });
+
+  it("does not reset an active Flow when no durable Track run id can be resolved", async () => {
+    const state = makeState({ activeStep: ref("results"), flowActive: ref(true) });
+    const deps = makeDeps({ getFlowTaskIds: () => [] });
+    const tasks = useDiscoveryTasks(state, deps);
+
+    expect(await tasks.resetWorkflow()).toBe(false);
+    expect(deps.clearLatestResult).not.toHaveBeenCalled();
+    expect(deps.notify).toHaveBeenCalledWith("当前流程状态暂不可确认，请刷新后重试", "error");
+    expect(apiRequestMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps a Flow-owned active task when server cancellation fails", async () => {
+    const state = makeState({
+      activeStep: ref("results"),
+      flowActive: ref(true),
+      screenTaskId: ref("flow-running-1"),
+      screenSnapshot: ref({ status: "running", progress: {}, logs: [] }),
+    });
+    const deps = makeDeps();
+    apiRequestMock.mockRejectedValue(new Error("flow cancellation rejected"));
+    const tasks = useDiscoveryTasks(state, deps);
+
+    expect(await tasks.resetWorkflow()).toBe(false);
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/api/task/cancel/flow-running-1", { method: "POST" },
+    );
+    expect(deps.clearLatestResult).not.toHaveBeenCalled();
+    expect(state.activeStep.value).toBe("results");
+  });
+
+  it("blocks reset when cancel is acknowledged as finalizing but not executed", async () => {
+    const state = makeState({
+      activeStep: ref("results"),
+      screenTaskId: ref("finalizing-run-1"),
+      screenSnapshot: ref({ status: "running", progress: {}, logs: [] }),
+    });
+    const deps = makeDeps();
+    apiRequestMock.mockResolvedValue({
+      ok: true,
+      status: "finalizing",
+      message: "任务正在收尾，取消未执行",
+    });
+    const tasks = useDiscoveryTasks(state, deps);
+
+    expect(await tasks.resetWorkflow()).toBe(false);
+    expect(deps.clearLatestResult).not.toHaveBeenCalled();
+    expect(state.activeStep.value).toBe("results");
+    expect(state.screenSnapshot.value?.status).toBe("running");
+  });
 });
 
 describe("抓取暂停占用与轮询保护", () => {
@@ -161,6 +260,26 @@ describe("抓取暂停占用与轮询保护", () => {
 
     expect(state.scrapeActionBusy.value).toBe("");
     expect(state.scrapeSnapshot.value?.status).toBe("paused");
+  });
+
+  it("does not legacy-auto-start AI for a Flow-owned completed scrape", async () => {
+    const state = makeState();
+    state.autoScreenArmed.value = true;
+    state.autoScreenFields.value = { salary: ["406"] };
+    state.autoScreenProfile.value = "三年后端工程师经验";
+    state.scrapeTaskId.value = "scrape-flow-owned";
+    state.scrapeBusy.value = true;
+    const deps = makeDeps();
+    (deps as TasksNeeds & { isFlowOwnedScrapeTask: (taskId: string) => boolean }).isFlowOwnedScrapeTask =
+      vi.fn((taskId: string) => taskId === "scrape-flow-owned");
+    const tasks = useDiscoveryTasks(state, deps);
+
+    apiRequestMock.mockResolvedValue({
+      status: "completed", progress: {}, logs: [], scraped_count: 3, auto_screen: true,
+    });
+    await tasks.pollTask("scrape-flow-owned", "scrape");
+
+    expect(deps.startAiScreen).not.toHaveBeenCalled();
   });
 });
 
@@ -264,6 +383,20 @@ describe("useDiscoveryTasks.maybeAutoStartNewRound（026 B078）", () => {
     await tasks.maybeAutoStartNewRound();
 
     expect(state.activeStep.value).toBe("upload");
+  });
+
+  it("reports a successful automatic new-round cleanup to the coordinator", async () => {
+    const state = makeState();
+    const deps = makeDeps({
+      fetchMergedLatestResult: vi.fn(async () => ({
+        merged: { ok: true, jobs: [] },
+        newer: { platform: "boss" as const, data: { status: "succeeded" } },
+        platformStatuses: { boss: "succeeded", zhilian: "succeeded" },
+      })),
+    });
+    const tasks = useDiscoveryTasks(state, deps);
+
+    expect(await tasks.maybeAutoStartNewRound()).toBe(true);
   });
 
   it("T004e: 最新历史轮未完成 → 恢复现场，不重置", async () => {
@@ -392,6 +525,19 @@ describe("useDiscoveryTasks.maybeAutoStartNewRound（035 未结束任务保护�
     expect(deps.loadLatestResult).not.toHaveBeenCalled();
   });
 
+  it("B096: 活动 Flow Track → 自动开新轮守卫保留当前现场", async () => {
+    const state = makeState({ resultsPageSeen: ref(true) });
+    state.flowActive.value = true;
+    state.activeStep.value = "results";
+    const deps = makeDeps();
+    const tasks = useDiscoveryTasks(state, deps);
+
+    expect(await tasks.maybeAutoStartNewRound()).toBe(false);
+    expect(deps.fetchMergedLatestResult).not.toHaveBeenCalled();
+    expect(deps.clearLatestResult).not.toHaveBeenCalled();
+    expect(state.activeStep.value).toBe("results");
+  });
+
   it("T003c: 抓取中断标记不再阻塞新一轮探测", async () => {
     const state = makeState({ interruptedRunId: ref("run-2") });
     const deps = makeDeps();
@@ -476,6 +622,23 @@ describe("useDiscoveryTasks.pollTask（035 后台跑完历史冒泡）", () => {
 
     expect(state.taskCompletedToast.value.visible).toBe(false);
     expect(state.activeStep.value).toBe("results");
+  });
+
+  it("人工停留期间 legacy 轮询完成不强制跳到结果页", async () => {
+    const state = makeState({ screenTaskId: ref("run-manual-hold"), activeStep: ref("search") });
+    state.setNavigationManualHold(true);
+    const deps = makeDeps({ fetchMergedLatestResult: vi.fn(async () => null) });
+    const tasks = useDiscoveryTasks(state, deps);
+    apiRequestMock.mockResolvedValue({
+      status: "completed",
+      progress: {},
+      logs: [],
+      result: null,
+    });
+
+    await tasks.pollTask("run-manual-hold", "screen");
+
+    expect(state.activeStep.value).toBe("search");
   });
 
   it("完成响应内联兜底时沿用外层任务平台", async () => {
@@ -594,6 +757,13 @@ describe("useDiscoveryTasks.abandonRound", () => {
     apiRequestMock.mockReset();
   });
 
+  it("reports false when abandon is already busy", async () => {
+    const state = makeState({ cancelBusy: ref(true) });
+    const tasks = useDiscoveryTasks(state, makeDeps());
+
+    expect(await tasks.abandonRound()).toBe(false);
+  });
+
   it("cancels the current task, clears the round, and returns to upload", async () => {
     const state = makeState({
       activeStep: ref("screen"),
@@ -639,6 +809,72 @@ describe("useDiscoveryTasks.abandonRound", () => {
     expect(deps.clearLatestResult).not.toHaveBeenCalled();
     expect(deps.notify).not.toHaveBeenCalledWith("已放弃本轮，已回到第一步", "info");
     expect(state.cancelBusy.value).toBe(false);
+  });
+
+  it("still asks the server about a terminal task left in the round snapshot", async () => {
+    const state = makeState({
+      activeStep: ref("results"),
+      screenTaskId: ref("screen-finished-1"),
+      screenSnapshot: ref({ status: "completed", progress: {}, logs: [] }),
+      pausedRunId: ref("screen-finished-1"),
+    });
+    const deps = makeDeps();
+    apiRequestMock.mockImplementation(async (path: string) => {
+      if (path.startsWith("/api/latest-running-task")) return { has_task: false };
+      if (path === "/api/task/cancel/screen-finished-1") {
+        return { ok: true, status: "completed", cancellation: "not_required" };
+      }
+      throw new Error(`unexpected request: ${path}`);
+    });
+    const tasks = useDiscoveryTasks(state, deps);
+
+    expect(await tasks.resetWorkflow()).toBe(true);
+
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/api/task/cancel/screen-finished-1", { method: "POST" },
+    );
+    expect(state.activeStep.value).toBe("upload");
+  });
+
+  it("does not hide a live sibling projection behind a terminal local snapshot", async () => {
+    const state = makeState({
+      activeStep: ref("results"),
+      screenTaskId: ref("shared-task-1"),
+      screenSnapshot: ref({ status: "completed", progress: {}, logs: [] }),
+      scrapeTaskId: ref("shared-task-1"),
+      scrapeSnapshot: ref({ status: "running", progress: {}, logs: [] }),
+    });
+    const deps = makeDeps();
+    apiRequestMock.mockRejectedValue(new Error("mixed projection cancellation rejected"));
+    const tasks = useDiscoveryTasks(state, deps);
+
+    expect(await tasks.resetWorkflow()).toBe(false);
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/api/task/cancel/shared-task-1", { method: "POST" },
+    );
+    expect(deps.clearLatestResult).not.toHaveBeenCalled();
+  });
+
+  it("sends a historical task id with no local snapshot to the server no-op contract", async () => {
+    const state = makeState({
+      activeStep: ref("results"),
+      screenTaskId: ref("screen-history-without-snapshot"),
+      screenSnapshot: ref(null),
+    });
+    const deps = makeDeps();
+    apiRequestMock.mockImplementation(async (path: string) => {
+      if (path.startsWith("/api/task/cancel/")) {
+        return { ok: true, status: "completed", cancellation: "not_required" };
+      }
+      return { has_task: false };
+    });
+    const tasks = useDiscoveryTasks(state, deps);
+
+    expect(await tasks.resetWorkflow()).toBe(true);
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/api/task/cancel/screen-history-without-snapshot", { method: "POST" },
+    );
+    expect(state.activeStep.value).toBe("upload");
   });
 });
 
@@ -844,6 +1080,78 @@ describe("useDiscoverySearch.analyzeResume（035 入口守卫落点）", () => {
     expect(state.pipelineResult.value).toMatchObject({ jobs: [{ job_id: "history-job" }] });
     expect(state.activeStep.value).toBe("results");
     expect(deps.enterSearchStep).not.toHaveBeenCalled();
+  });
+
+  // SPEC 046 第五轮：判活只有一份口径，落点也必须同源。真实现场——全部平台的流程
+  // 还在跑（流程活动线为真），本地三个任务快照仍是上一轮终态：守卫此前读不到落点，
+  // 于是把用户带进「开新一轮」路径。
+  it("只有流程活动线（本地快照全终态）→ 仍跳回任务进度，不进开新一轮", async () => {
+    const state = makeUploadReadyState();
+    state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.screenSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.setFlowActive(true);
+    const deps = makeSearchDeps();
+    const search = useDiscoverySearch(state, deps);
+
+    await search.analyzeResume();
+
+    expect(hasLiveTaskState(state)).toBe(true);
+    expect(deps.cancelActiveTasksForNewRound).not.toHaveBeenCalled();
+    expect(apiRequestMock).not.toHaveBeenCalled();
+    expect(state.activeStep.value).toBe("search");
+    expect(deps.notify).toHaveBeenCalledWith("当前还有任务在跑，已回到任务进度", "warning");
+  });
+
+  // 缺陷一的用户可感知后果：并行流程抓取已完成、AI 筛选正在跑时，投影已经把 03
+  // 开放出来，落 02 只能看到抓取列表，看不到正在跑的筛选进度。
+  it("流程投影已开到 03（抓取完成、筛选在跑）→ 守卫落 03，不落 02", async () => {
+    const state = makeUploadReadyState();
+    state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.setFlowActive(true);
+    state.setFlowReachableSteps(new Set(["search", "screen"]));
+    const deps = makeSearchDeps();
+    const search = useDiscoverySearch(state, deps);
+
+    await search.analyzeResume();
+
+    expect(state.activeStep.value).toBe("screen");
+    expect(deps.cancelActiveTasksForNewRound).not.toHaveBeenCalled();
+    expect(apiRequestMock).not.toHaveBeenCalled();
+    expect(deps.notify).toHaveBeenCalledWith("当前还有任务在跑，已回到任务进度", "warning");
+  });
+
+  // 缺陷三：navigateStep 在历史轮下会拦下 system 跳转（并另发「历史轮次不可改写」），
+  // 调用方不看落点就通知「已回到任务进度」，等于当着用户说假话。
+  it("守卫没跳成（正在看历史轮）→ 只说事实，不谎报已回到任务进度", async () => {
+    const state = makeUploadReadyState({
+      scrapeSnapshot: ref({ status: "running", progress: {}, logs: [] }),
+    });
+    state.historyRound.value = { runId: "history-run", platform: "boss", status: "done", jobCount: 1 };
+    const deps = makeSearchDeps();
+    const search = useDiscoverySearch(state, deps);
+
+    await search.analyzeResume();
+
+    expect(state.activeStep.value).toBe("upload");
+    expect(apiRequestMock).not.toHaveBeenCalled();
+    expect(deps.notify).not.toHaveBeenCalledWith("当前还有任务在跑，已回到任务进度", "warning");
+    expect(deps.notify).toHaveBeenCalledWith("当前还有任务在跑，简历未开始解析", "warning");
+  });
+
+  it("守卫被人工停留拦住 → 同样不谎报跳转", async () => {
+    const state = makeUploadReadyState({
+      screenSnapshot: ref({ status: "running", progress: {}, logs: [] }),
+    });
+    state.setNavigationManualHold(true);
+    const deps = makeSearchDeps();
+    const search = useDiscoverySearch(state, deps);
+
+    await search.analyzeResume();
+
+    expect(state.activeStep.value).toBe("upload");
+    expect(apiRequestMock).not.toHaveBeenCalled();
+    expect(deps.notify).not.toHaveBeenCalledWith("当前还有任务在跑，已回到任务进度", "warning");
+    expect(deps.notify).toHaveBeenCalledWith("当前还有任务在跑，简历未开始解析", "warning");
   });
 });
 

@@ -72,7 +72,15 @@ function packageBody(overrides: Record<string, unknown> = {}) {
   return {
     id: "pkg-1",
     name: "产品经理 · 上海",
-    payloadVersion: 1,
+    payloadVersion: 2,
+    conditions: {
+      snapshotVersion: 2 as const,
+      mappingVersion: "b096-v2-2026-09-27",
+      unifiedValues: { salary: [], experience: [], degree: [], industry: [], scale: [], recruiter_activity: [] },
+      platformValues: { boss: {}, zhilian: {} },
+      overrides: { boss: {}, zhilian: {} },
+      exclusiveValues: { boss: { stage: [] }, zhilian: { company_nature: [] } },
+    },
     keywords: {
       candidates: [{ word: "产品经理", recommended: true }],
       selected: ["产品经理"],
@@ -118,7 +126,7 @@ describe("useSearchPackages 保存（US1）", () => {
     const [path, options] = apiRequestMock.mock.calls[0];
     expect(path).toBe("/api/search-packages");
     expect(options.method).toBe("POST");
-    expect(options.json.payloadVersion).toBe(1);
+    expect(options.json.payloadVersion).toBe(2);
     expect(options.json.name).toBe("我的配置");
     expect(options.json.keywords.selected).toEqual(["产品经理"]);
     expect(options.json.city).toEqual({ text: "上海", custom: "" });
@@ -252,7 +260,14 @@ describe("useSearchPackages 保存（US1）", () => {
     apiRequestMock.mockClear();
     const pending = deferred<ReturnType<typeof packageBody>>();
     apiRequestMock.mockReturnValueOnce(pending.promise);
-    const restored = setupWithContext(context);
+    const initialConditions = packageBody().conditions;
+    const userConditions = packageBody({
+      conditions: {
+        ...packageBody().conditions,
+        unifiedValues: { salary: ["40k"], experience: [], degree: [], industry: [], scale: [], recruiter_activity: [] },
+      },
+    }).conditions;
+    const restored = setupWithContext(context, { conditionSnapshot: ref(initialConditions) });
     restored.refs.keywords.value = [{ word: "用户关键词", recommended: false }];
     restored.refs.selectedKeywords.value = ["用户关键词"];
     restored.refs.customKeyword.value = "用户自定义词";
@@ -260,6 +275,7 @@ describe("useSearchPackages 保存（US1）", () => {
     restored.refs.customCity.value = "用户区域";
     restored.refs.profileSummary.value = "用户画像";
     restored.refs.profileFacts.value = { degree: "硕士", core_skills: ["用户技能"] };
+    restored.refs.conditionSnapshot!.value = userConditions;
 
     pending.resolve(packageBody({
       id: "pkg-restore-edit",
@@ -275,6 +291,7 @@ describe("useSearchPackages 保存（US1）", () => {
     expect(restored.refs.customCity.value).toBe("用户区域");
     expect(restored.refs.profileSummary.value).toBe("用户画像");
     expect(restored.refs.profileFacts.value).toEqual({ degree: "硕士", core_skills: ["用户技能"] });
+    expect(restored.refs.conditionSnapshot?.value).toEqual(userConditions);
     expect(restored.api.currentPackageId.value).toBeNull();
     expect(localStorage.getItem("career-scout-search-package-identity:profile-restore-edit")).toBeNull();
     expect(restored.hooks.persistDraft).not.toHaveBeenCalled();
@@ -444,7 +461,8 @@ describe("useSearchPackages 列表与选择（US2）", () => {
   });
 
   it("选择有效配置包：完整回填第二页、写共享草稿、最后切页", async () => {
-    const { api, hooks, refs } = setup();
+    const analysisReady = ref(false);
+    const { api, hooks, refs } = setup({ analysisReady });
     apiRequestMock.mockResolvedValueOnce(packageBody({
       id: "pkg-9",
       name: "运营 · 深圳",
@@ -468,12 +486,32 @@ describe("useSearchPackages 列表与选择（US2）", () => {
     expect(refs.profileFacts.value).toEqual({ experience_years: 5, core_skills: ["社群"] });
     expect(api.currentPackageId.value).toBe("pkg-9");
     expect(api.currentPackageName.value).toBe("运营 · 深圳");
+    expect(analysisReady.value).toBe(true);
     expect(hooks.notify).toHaveBeenCalledWith("已使用常用配置", "success");
     // 顺序：先写共享草稿，最后才切页。
     expect(hooks.persistDraft.mock.invocationCallOrder[0])
       .toBeLessThan(hooks.enterSearchStep.mock.invocationCallOrder[0]);
     // 选择不写库、不触发任何写请求（保存必须由用户显式点击）。
     expect(apiRequestMock.mock.calls.every(([, options]) => !options || !options.method)).toBe(true);
+  });
+
+  it("选择配置包失败时保留原有 V2 条件快照", async () => {
+    const originalConditions = packageBody().conditions;
+    const replacementConditions = packageBody({
+      conditions: {
+        ...packageBody().conditions,
+        unifiedValues: { salary: ["30k"], experience: [], degree: [], industry: [], scale: [], recruiter_activity: [] },
+      },
+    }).conditions;
+    const conditionSnapshot = ref(originalConditions);
+    const { api, hooks, refs } = setup({ conditionSnapshot });
+    hooks.persistDraft.mockImplementation(() => {
+      throw new Error("draft persistence failed");
+    });
+    apiRequestMock.mockResolvedValueOnce(packageBody({ conditions: replacementConditions }));
+
+    expect(await api.selectPackage("pkg-condition-rollback")).toBe(false);
+    expect(refs.conditionSnapshot?.value).toEqual(originalConditions);
   });
 
   it("服务端判为不可用时保持第一页且不回填", async () => {
@@ -687,5 +725,45 @@ describe("useSearchPackages 列表与选择（US2）", () => {
     expect(hooks.restoreDraft).toHaveBeenCalledTimes(1);
     expect(hooks.restoreStep).toHaveBeenCalledTimes(1);
     expect(hooks.notify).toHaveBeenCalledWith("切页失败", "error");
+  });
+
+  it("先成功写入 B 再切页失败时恢复 parallelFlow 的 V2 条件快照", async () => {
+    const originalConditions = packageBody().conditions;
+    const replacementConditions = packageBody({
+      conditions: {
+        ...packageBody().conditions,
+        unifiedValues: {
+          salary: ["40k"], experience: [], degree: [], industry: [],
+          scale: [], recruiter_activity: [],
+        },
+        platformValues: {
+          boss: { stage: ["active"] }, zhilian: {},
+        },
+      },
+    }).conditions;
+    const conditionSnapshot = ref(originalConditions);
+    const { api, hooks, refs } = setup({ conditionSnapshot });
+    let parallelConditionState: unknown = originalConditions;
+    const restoreConditions = vi.fn((snapshot: unknown) => {
+      parallelConditionState = snapshot;
+    });
+    (hooks as typeof hooks & {
+      restoreConditions?: (snapshot: unknown) => void;
+    }).restoreConditions = restoreConditions;
+    hooks.persistDraft.mockImplementation(() => {
+      parallelConditionState = refs.conditionSnapshot?.value;
+    });
+    hooks.enterSearchStep.mockImplementationOnce(() => {
+      throw new Error("切页失败");
+    });
+    apiRequestMock.mockResolvedValueOnce(packageBody({
+      id: "pkg-condition-b",
+      conditions: replacementConditions,
+    }));
+
+    expect(await api.selectPackage("pkg-condition-b")).toBe(false);
+    expect(refs.conditionSnapshot?.value).toEqual(originalConditions);
+    expect(restoreConditions).toHaveBeenCalledWith(originalConditions);
+    expect(parallelConditionState).toEqual(originalConditions);
   });
 });

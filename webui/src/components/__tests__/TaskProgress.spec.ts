@@ -43,6 +43,36 @@ describe("TaskProgress accessibility announcement", () => {
     expect(announcement()).toContain("已完成");
     wrapper.unmount();
   });
+
+  // 并行页每张卡各挂一个 aria-live，播报没有主语时听者分不清是哪条线；
+  // 播报必须自带平台名，同时继续排除百分比与用时，避免每秒刷屏。
+  it("announces the platform the task belongs to, without percent or elapsed time", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          platform: "zhilian",
+          progress: { overall_percent: 40, current: 4, total: 10, stage: "scrape" },
+          started_at: Date.now() - 60_000,
+          scraped_count: 40,
+        }) as never,
+        kind: "scrape",
+      },
+    });
+    const announcement = wrapper.get('[data-testid="task-progress-announcement"]').text();
+    expect(announcement).toContain("智联");
+    expect(announcement).not.toContain("%");
+    expect(announcement).not.toContain("秒");
+    wrapper.unmount();
+  });
+
+  // 轨道快照没带平台时（读不到本段状态、走降级链），父组件下发的平台仍需进播报。
+  it("announces the platform handed down by the parent when the snapshot omits it", () => {
+    const wrapper = mount(TaskProgress, {
+      props: { snapshot: snapshot({ platform: undefined }) as never, kind: "scrape", platform: "boss" },
+    });
+    expect(wrapper.get('[data-testid="task-progress-announcement"]').text()).toContain("BOSS");
+    wrapper.unmount();
+  });
 });
 
 describe("TaskProgress 用户结束保存口径", () => {
@@ -70,6 +100,45 @@ describe("TaskProgress 用户结束保存口径", () => {
 });
 
 describe("TaskProgress diagnostics", () => {
+  // 终态口径以后端 flow_tracks 白名单为唯一权威（done/succeeded/failed/stopped/
+  // cancelled）。stopped 是真实写入的终态（store_flow_claims 停止轨道），
+  // 之前漏在终态集合里：停止后仍转圈、仍显示「运行中」、计时继续跳动。
+  it("treats a stopped Track as terminal: no spinner, 已停止, frozen timer", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "stopped",
+          progress: { overall_percent: 42, current: 3, total: 7 },
+          active_elapsed_ms: 5000,
+        }) as never,
+        kind: "scrape",
+      },
+    });
+
+    expect(wrapper.get(".task-status").text()).toContain("已停止");
+    expect(wrapper.find(".task-status .spin").exists()).toBe(false);
+    expect(wrapper.get(".task-elapsed").text()).toContain("用时 5秒");
+    wrapper.unmount();
+  });
+
+  it("treats a succeeded Track as a completed terminal state", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "succeeded",
+          progress: { overall_percent: 42, current: 3, total: 7 },
+          active_elapsed_ms: 5000,
+        }) as never,
+        kind: "screen",
+      },
+    });
+
+    expect(wrapper.get(".task-status").text()).toContain("已完成");
+    expect(wrapper.find(".task-status .spin").exists()).toBe(false);
+    expect(wrapper.get(".task-elapsed").text()).toContain("用时 5秒");
+    wrapper.unmount();
+  });
+
   it("shows inline Chinese reason plus red error field for failed state", () => {
     const wrapper = mount(TaskProgress, {
       props: {
@@ -216,6 +285,34 @@ describe("TaskProgress 033 V2 integrity", () => {
       expect(wrapper.get(".task-status").attributes("data-status")).not.toBe("completed");
     }
     wrapper.unmount();
+  });
+
+  // 轨道头部写「失败」、卡体写「完整成功」时，无障碍朗读会连成
+  // 「智联失败完整成功」：显式状态必须压过完整性结论。
+  it("显式失败与中断不被完整性结论盖掉", () => {
+    const failed = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "failed", integrity: integrity("succeeded", "抓取证据完整"),
+        }) as never,
+        kind: "scrape",
+      },
+    });
+    expect(failed.get(".task-status").text()).toContain("执行失败");
+    expect(failed.get(".task-status").text()).not.toContain("完整成功");
+    failed.unmount();
+
+    const interrupted = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "interrupted", integrity: integrity("succeeded", "抓取证据完整"),
+        }) as never,
+        kind: "scrape",
+      },
+    });
+    expect(interrupted.get(".task-status").text()).toContain("已中断");
+    expect(interrupted.get(".task-status").text()).not.toContain("完整成功");
+    interrupted.unmount();
   });
 
   it("无法确认时同时显示重新执行建议", () => {
@@ -370,6 +467,134 @@ describe("TaskProgress elapsed time: hours and pause-excluded duration", () => {
     expect(wrapper.get(".task-elapsed").text()).toContain("已用 1分34秒");
     wrapper.unmount();
   });
+
+  // 046 第五轮真实复现：后端对 interrupted 的 active_elapsed_ms 已定格（连取两次差值为 0），
+  // 但界面把「已中断」的卡演成还在跑（4.5 秒内「已用 18分57秒」走到「已用 19分01秒」）——
+  // 叠加本地增量只能是真的有活 worker 在跑的状态。
+  it("keeps an interrupted task's elapsed frozen while wall time advances", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
+    const baseTime = new Date("2026-09-14T04:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        // started_at 距当前 20 分钟，其中 18分57秒 是真跑过的累计；定格值不得再被本地时钟拉长。
+        snapshot: snapshot({
+          status: "interrupted",
+          progress: { stage: "screen_b", overall_percent: 62 },
+          started_at: baseTime - 1_200_000,
+          active_elapsed_ms: 1_137_000,
+        }) as never,
+      },
+    });
+    expect(wrapper.get(".task-elapsed").text()).toContain("已用 18分57秒");
+    vi.advanceTimersByTime(4_500);
+    await flushPromises();
+    expect(wrapper.get(".task-elapsed").text()).toContain("已用 18分57秒");
+    wrapper.unmount();
+  });
+
+  // 排队（尚未开始）同样没有活 worker：只有后端定格值，不叠本地增量。
+  it("keeps a queued task's elapsed on the backend value while wall time advances", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
+    const baseTime = new Date("2026-09-14T06:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: snapshot({
+          status: "queued",
+          progress: { stage: "", overall_percent: 0 },
+          started_at: baseTime,
+          active_elapsed_ms: 0,
+        }) as never,
+      },
+    });
+    const first = wrapper.get(".task-elapsed").text();
+    vi.advanceTimersByTime(5_000);
+    await flushPromises();
+    expect(wrapper.get(".task-elapsed").text()).toBe(first);
+    wrapper.unmount();
+  });
+
+  // 反向回归：真有活 worker 在跑时计时必须继续走动。
+  it("keeps advancing the elapsed label twice over while the task is really running", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
+    const baseTime = new Date("2026-09-14T08:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: snapshot({
+          status: "running",
+          progress: { stage: "screen_b", overall_percent: 55 },
+          started_at: baseTime - 600_000,
+          active_elapsed_ms: 90_000,
+        }) as never,
+      },
+    });
+    const seconds = () => {
+      const match = /已用 (?:(\d+)分)?(\d+)秒/.exec(wrapper.get(".task-elapsed").text());
+      return match ? Number(match[1] || 0) * 60 + Number(match[2]) : Number.NaN;
+    };
+    const first = seconds();
+    vi.advanceTimersByTime(3_000);
+    await flushPromises();
+    const second = seconds();
+    expect(first).toBe(90);
+    expect(second).toBe(first + 3);
+    wrapper.unmount();
+  });
+
+  // 046 第五轮：任务快照没有任何计时证据（既无 started_at 也无 active_elapsed_ms）时，
+  // 组件不得用本地 Date.now() 造一个起点、每秒走成「已用 X秒」。
+  // 这类快照来自降级链（fallbackSnapshot），状态可为 unknown／interrupted／queued。
+  // 门的口径与走活表判定同源：discovery.ts 的 elapsedRunsLive。
+  for (const statusWithoutEvidence of ["unknown", "interrupted", "queued"]) {
+    it(`不给没有计时证据的 ${statusWithoutEvidence} 卡造一个会走的钟`, async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
+      const baseTime = new Date("2026-09-14T10:00:00.000Z").getTime();
+      vi.setSystemTime(baseTime);
+      const wrapper = mount(TaskProgress, {
+        props: {
+          kind: "scrape",
+          snapshot: snapshot({ status: statusWithoutEvidence, progress: { overall_percent: 30 } }) as never,
+        },
+      });
+      expect(wrapper.find(".task-elapsed").exists()).toBe(false);
+      vi.advanceTimersByTime(5_000);
+      await flushPromises();
+      expect(wrapper.find(".task-elapsed").exists()).toBe(false);
+      expect(wrapper.text()).not.toContain("已用");
+      expect(wrapper.text()).not.toContain("用时");
+      wrapper.unmount();
+    });
+  }
+
+  // 反向保护：真的在跑、后端又没给任何计时字段时，本地回退钟仍是唯一的时间来源，必须走动。
+  for (const liveStatus of ["running", "pausing"]) {
+    it(`${liveStatus} 时后端没给计时字段，本地回退钟照样每秒走动`, async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
+      const baseTime = new Date("2026-09-14T12:00:00.000Z").getTime();
+      vi.setSystemTime(baseTime);
+      const wrapper = mount(TaskProgress, {
+        props: {
+          kind: "screen",
+          snapshot: snapshot({ status: liveStatus, progress: { overall_percent: 55 } }) as never,
+        },
+      });
+      const seconds = () => {
+        const match = /已用 (?:(\d+)分)?(\d+)秒/.exec(wrapper.get(".task-elapsed").text());
+        return match ? Number(match[1] || 0) * 60 + Number(match[2]) : Number.NaN;
+      };
+      const first = seconds();
+      vi.advanceTimersByTime(3_000);
+      await flushPromises();
+      expect(first).toBe(0);
+      expect(seconds()).toBe(first + 3);
+      wrapper.unmount();
+    });
+  }
 
   it("falls back to started_at delta when active_elapsed_ms is absent", () => {
     const wrapper = mount(TaskProgress, {
@@ -605,6 +830,69 @@ describe("TaskProgress 039 settled counts", () => {
     expect(counts).toContain("已完成 4 / 14");
     expect(counts).toContain("进行中 1");
     expect(counts).toContain("未开始 9");
+    wrapper.unmount();
+  });
+});
+
+// interrupted 是后端公开的**可恢复**状态（task_status.py 公开枚举、
+// store_flow_core.py 把它归入活动态），之前既没有文案分支也没有图标分支：
+// 同一张卡上轨道头部写「已中断」、卡体写「运行中」还挂着转圈动画。
+describe("TaskProgress 可恢复中断态与排队态", () => {
+  it("裸 interrupted 显示「已中断」且不转圈，但计时仍按未结束呈现", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "interrupted",
+          progress: { overall_percent: 42, current: 3, total: 7 },
+          active_elapsed_ms: 5000,
+        }) as never,
+        kind: "scrape",
+      },
+    });
+
+    expect(wrapper.get(".task-status").text()).toContain("已中断");
+    expect(wrapper.get(".task-status").text()).not.toContain("运行中");
+    expect(wrapper.find(".task-status .spin").exists()).toBe(false);
+    // 不得把 interrupted 当终态：用时仍是「已用」（继续后还能接着跑）
+    expect(wrapper.get(".task-elapsed").text()).toContain("已用");
+    wrapper.unmount();
+  });
+
+  it("queued 显示「等待开始」而不是「运行中」", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "queued",
+          progress: { overall_percent: 0, current: 0, total: 0 },
+        }) as never,
+        kind: "scrape",
+      },
+    });
+
+    expect(wrapper.get(".task-status").text()).toContain("等待开始");
+    // 「等待开始」没有证据可说，不得用转圈把它演成在跑。
+    expect(wrapper.find(".task-status .spin").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  // 本段跑过（有 run 身份）但这一轮读不到状态：既不能说没开始，也不能编一句
+  // 「正在准备任务…」的进行中旁白，更不能转圈演成在跑。
+  it("读不到状态的段只说「状态更新中」，不写「正在准备任务…」也不转圈", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "unknown",
+          progress: {},
+          total: 0,
+        }) as never,
+        kind: "scrape",
+      },
+    });
+
+    expect(wrapper.get(".task-status").text()).toContain("状态更新中");
+    expect(wrapper.get(".task-status").text()).not.toContain("运行中");
+    expect(wrapper.text()).not.toContain("正在准备任务");
+    expect(wrapper.find(".task-status .spin").exists()).toBe(false);
     wrapper.unmount();
   });
 });

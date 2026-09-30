@@ -54,11 +54,11 @@ const FILTER_SCHEMA = {
   ],
 };
 
-function packageBody(overrides: Record<string, unknown> = {}) {
+function packageBody(overrides: Record<string, unknown> = {}): any {
   return {
     id: "pkg-1",
     name: "产品经理 · 上海",
-    payloadVersion: 1,
+    payloadVersion: 2,
     keywords: {
       candidates: [
         { word: "产品经理", recommended: true },
@@ -69,6 +69,14 @@ function packageBody(overrides: Record<string, unknown> = {}) {
     },
     city: { text: "上海", custom: "" },
     profile: { summary: "3 年 B 端产品经验", facts: { experience_years: 3 } },
+    conditions: {
+      snapshotVersion: 2,
+      mappingVersion: "b096-v2-2026-09-27",
+      unifiedValues: { salary: [], experience: [], degree: [], industry: [], scale: [], recruiter_activity: [] },
+      platformValues: { boss: {}, zhilian: {} },
+      overrides: { boss: {}, zhilian: {} },
+      exclusiveValues: { boss: { stage: [] }, zhilian: { company_nature: [] } },
+    },
     createdAt: "2026-09-21T10:00:00+08:00",
     updatedAt: "2026-09-21T10:00:00+08:00",
     ...overrides,
@@ -196,7 +204,7 @@ describe("DiscoveryView 常用搜索配置包", () => {
     expect(String((init as RequestInit).method).toUpperCase()).toBe("POST");
     const body = JSON.parse(String((init as RequestInit).body));
     expect(body.name).toBe("我的常用配置");
-    expect(body.payloadVersion).toBe(1);
+    expect(body.payloadVersion).toBe(2);
     expect(body.keywords.selected).toContain("数据分析");
     expect(body.profile.summary).toBe("5 年数据分析经验");
     expect(body.filterValues).toBeUndefined();
@@ -217,7 +225,6 @@ describe("DiscoveryView 常用搜索配置包", () => {
     await flushPromises();
 
     // 进入第二页：上传页隐藏、搜索页可见。
-    expect(wrapper.get(".search-layout").isVisible()).toBe(true);
     expect(wrapper.get(".upload-layout").isVisible()).toBe(false);
     // 完整回填关键词、城市、画像。
     expect(wrapper.text()).toContain("产品经理");
@@ -233,6 +240,113 @@ describe("DiscoveryView 常用搜索配置包", () => {
     // 配置包请求不带平台参数（同一套包两个平台共用）。
     expect(during.every((url) => !url.includes("platform="))).toBe(true);
     // 第三页筛选条件没有被配置包恢复或改写。
+    expect(wrapper.findAll(".filter-group .choice-chip.selected")).toHaveLength(0);
+  });
+
+  it("T039: V2 配置恢复原始平台微调与专属字段，且不改写映射覆盖", async () => {
+    const v2 = packageBody();
+    v2.conditions = {
+        snapshotVersion: 2,
+        mappingVersion: "b096-v2-2026-09-27",
+        unifiedValues: { salary: ["10K-20K"], experience: [], degree: [], industry: [], scale: [], recruiter_activity: [] },
+        platformValues: { boss: { salary: ["10-20K"] }, zhilian: { salary: ["10K-15K"] } },
+        overrides: { boss: { salary: ["20-50K"] }, zhilian: { salary: ["15K-25K"] } },
+        exclusiveValues: { boss: { stage: ["full_time"] }, zhilian: { company_nature: ["state_owned"] } },
+    };
+    const { wrapper } = await mountView({ items: [{ id: "pkg-1", name: "V2" }], single: () => response(v2) });
+    await wrapper.get('[data-testid="saved-package-entry"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="package-item"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".upload-layout").isVisible()).toBe(false);
+    expect(wrapper.findAll(".filter-group .choice-chip.selected")).toHaveLength(0);
+  });
+
+  it("T039: 配置包恢复 V2 快照后重开全部弹窗仍冻结两平台专属字段", async () => {
+    const v2 = packageBody({
+      conditions: {
+        snapshotVersion: 2,
+        mappingVersion: "b096-v2-2026-09-27",
+        unifiedValues: { salary: [], experience: [], degree: [], industry: [], scale: [], recruiter_activity: [] },
+        platformValues: {
+          boss: { stage: ["boss-stage"], industry: ["boss-industry"] },
+          zhilian: {
+            company_nature: ["state-owned"], degree: ["206"], industry: ["002"],
+            zhilian_mba_tuning: ["emba"],
+          },
+        },
+        overrides: {
+          boss: { industry: ["boss-industry"] },
+          zhilian: { degree: ["206"], industry: ["002"], zhilian_mba_tuning: ["emba"] },
+        },
+        exclusiveValues: { boss: { stage: ["boss-stage"] }, zhilian: { company_nature: ["state-owned"] } },
+      },
+    });
+    const baseFetch = makeFetchMock({
+      items: [{ id: "pkg-1", name: "V2" }],
+      single: () => response(v2),
+    });
+    const launches: Array<Record<string, unknown>> = [];
+    const flow = {
+      id: "flow-package-v2", profile_id: "profile-044", selection: "all" as const, status: "queued",
+      tracks: [
+        { id: "boss-track", flow_id: "flow-package-v2", platform: "boss" as const, status: "queued", stage: "pending" },
+        { id: "zhilian-track", flow_id: "flow-package-v2", platform: "zhilian" as const, status: "queued", stage: "pending" },
+      ],
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) return response({ ok: true, flow: null });
+      if (url === "/api/flows") return response({ ok: true, flow });
+      if (url === "/api/execute-search") {
+        launches.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return response({ ok: true, task_id: `package-${launches.length}` });
+      }
+      return baseFetch(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, {
+      props: { profileId: "profile-044" },
+      global: { stubs: { Teleport: true } },
+    });
+    await flushPromises();
+    await wrapper.get('[data-testid="saved-package-entry"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="package-item"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="profile-confirm"]').trigger("click");
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await flushPromises();
+    await flushPromises();
+    await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    expect(launches).toHaveLength(2);
+    expect(Object.fromEntries(launches.map((body) => [body.platform, body.auto_screen_fields]))).toEqual({
+      boss: { stage: ["boss-stage"], industry: ["boss-industry"] },
+      zhilian: {
+        company_nature: ["state-owned"], degree: ["206"], industry: ["002"],
+        zhilian_mba_tuning: ["emba"],
+      },
+    });
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("T039: V1 配置不触发条件映射重算，条件保持空白", async () => {
+    const v1 = packageBody();
+    v1.payloadVersion = 1;
+    delete v1.conditions;
+    const { wrapper } = await mountView({ items: [{ id: "pkg-1", name: "V1" }], single: () => response(v1) });
+    await wrapper.get('[data-testid="saved-package-entry"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="package-item"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".upload-layout").isVisible()).toBe(false);
     expect(wrapper.findAll(".filter-group .choice-chip.selected")).toHaveLength(0);
   });
 

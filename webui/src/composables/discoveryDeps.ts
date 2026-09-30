@@ -90,6 +90,8 @@ export interface SearchDeps {
 }
 
 export interface ExecutionDeps {
+  /** True only when the current all-platform Flow owns this scrape task. */
+  isFlowOwnedScrapeTask?: (taskId: string) => boolean;
   startScrape: (options?: OneClickLaunch) => Promise<void>;
   pauseScrape: () => Promise<void>;
   openOneClickDialog: () => void;
@@ -102,6 +104,10 @@ export interface ExecutionDeps {
 }
 
 export interface TasksDeps {
+  /** True only when the current all-platform Flow owns this scrape task. */
+  isFlowOwnedScrapeTask?: (taskId: string) => boolean;
+  /** Durable run ids owned by the current Flow, including runs absent locally. */
+  getFlowTaskIds?: () => string[];
   abandonRound: () => Promise<void>;
   cancelActiveTasksForNewRound: () => Promise<boolean>;
   mergeRecrawlUpdates: (updates: Record<string, unknown>) => void;
@@ -174,6 +180,7 @@ export type SearchNeeds = Pick<
 
 export type ExecutionNeeds = Pick<
   DiscoveryDeps,
+  | "isFlowOwnedScrapeTask"
   | "clearWorkflowState"
   | "emit"
   | "enrichPausedSnapshot"
@@ -203,6 +210,8 @@ export type ExecutionNeeds = Pick<
 
 export type TasksNeeds = Pick<
   DiscoveryDeps,
+  | "isFlowOwnedScrapeTask"
+  | "getFlowTaskIds"
   | "cancelScrape"
   | "clearFinishedState"
   | "emit"

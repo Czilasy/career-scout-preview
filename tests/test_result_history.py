@@ -202,8 +202,8 @@ class ResultHistoryApiTests(unittest.TestCase):
     def test_archive_latest_and_delete(self):
         run_id = _save_round(self.store, "boss")
         archive = self.client.post("/api/result-history/archive-latest")
-        self.assertEqual(archive.status_code, 200)
-        self.assertEqual(archive.get_json()["archived_run_ids"], [run_id])
+        self.assertEqual(archive.status_code, 422)
+        self.assertEqual(archive.get_json()["error"], "flow_scope_required")
 
         deleted = self.client.delete(f"/api/result-history/{run_id}")
         self.assertEqual(deleted.status_code, 200)

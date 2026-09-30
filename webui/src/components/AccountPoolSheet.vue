@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Check, ExternalLink, LoaderCircle, Trash2, X } from "@lucide/vue";
+import { platformLabel } from "../discovery";
 import type { BrowserAccount, Platform } from "../types";
 
 interface PlatformBadge {
@@ -14,7 +15,6 @@ const props = defineProps<{
   poolBusy: boolean;
   busyAccount: string;
   rateLimitClearAccount: string;
-  platformLabels: Record<Platform, string>;
   displayName: (account: BrowserAccount) => string;
   platformsOf: (account: BrowserAccount) => Platform[];
   platformBadge: (account: BrowserAccount, platform: Platform) => PlatformBadge;
@@ -53,14 +53,19 @@ const emit = defineEmits<{
       <div class="account-sheet-identity">
         <div class="account-sheet-name">
           <strong :class="{ 'rate-limited-name': account.rate_limited }">{{ props.displayName(account) }}</strong>
+          <span
+            v-if="account.id === props.activeAccount"
+            class="account-sheet-badge active-account"
+            :data-testid="`active-account-badge-${account.id}`"
+          >当前账号</span>
           <span v-if="account.rate_limited" class="account-sheet-badge rate-limited" :data-testid="`rate-limited-${account.id}`">
             限流
             <button
               type="button"
               class="rate-limited-clear rate-limited-clear-compact rate-limited-clear-always-visible"
               :data-testid="`clear-rate-limited-${account.id}`"
-              aria-label="清除限流标记"
-              title="清除限流标记"
+              :aria-label="`清除「${props.displayName(account)}」的限流标记`"
+              :title="`清除「${props.displayName(account)}」的限流标记`"
               :disabled="props.rateLimitClearAccount === account.id"
               @click="emit('clear-rate-limited', account)"
             >
@@ -77,6 +82,7 @@ const emit = defineEmits<{
           :checked="account.pool?.selected ?? true"
           :disabled="props.poolBusy"
           :data-testid="`pool-selected-${account.id}`"
+          :aria-label="`让「${props.displayName(account)}」参与轮询`"
           @change="emit('toggle-pool', account)"
         >
         <span>参与轮询</span>
@@ -94,6 +100,7 @@ const emit = defineEmits<{
             class="account-sheet-quota-input account-sheet-quota-input-fill"
             :disabled="props.poolBusy"
             :data-testid="`pool-r1-quota-${account.id}`"
+            :aria-label="`「${props.displayName(account)}」的 R1 配额`"
             @change="emit('update-quota', account, 'r1_quota', Number(($event.target as HTMLInputElement).value))"
           >
         </label>
@@ -108,6 +115,7 @@ const emit = defineEmits<{
             class="account-sheet-quota-input account-sheet-quota-input-fill"
             :disabled="props.poolBusy"
             :data-testid="`pool-r2-quota-${account.id}`"
+            :aria-label="`「${props.displayName(account)}」的 R2 配额`"
             @change="emit('update-quota', account, 'r2_quota', Number(($event.target as HTMLInputElement).value))"
           >
         </label>
@@ -115,7 +123,7 @@ const emit = defineEmits<{
 
       <ul class="account-sheet-platforms" :data-testid="`account-platforms-${account.id}`">
         <li v-for="platform in props.platformsOf(account)" :key="platform" :data-platform="platform">
-          <span class="account-sheet-platform-label">{{ props.platformLabels[platform] }}</span>
+          <span class="account-sheet-platform-label">{{ platformLabel(platform) }}</span>
           <span
             class="account-sheet-state"
             :data-tone="props.platformBadge(account, platform).tone"
@@ -125,8 +133,8 @@ const emit = defineEmits<{
             type="button"
             class="account-sheet-open"
             :data-testid="`open-${platform}-${account.id}`"
-            :aria-label="`打开${props.platformLabels[platform]}浏览器`"
-            :title="`打开${props.platformLabels[platform]}浏览器`"
+            :aria-label="`打开「${props.displayName(account)}」的${platformLabel(platform)}浏览器`"
+            :title="`打开「${props.displayName(account)}」的${platformLabel(platform)}浏览器`"
             :disabled="!props.canOpenPlatform(account.id, platform)"
             @click="emit('open-platform', account, platform)"
           >
@@ -142,8 +150,8 @@ const emit = defineEmits<{
           type="button"
           class="icon-button activate-toggle"
           :data-testid="`activate-${account.id}`"
-          aria-label="设为当前账号"
-          title="设为当前账号"
+          :aria-label="`将「${props.displayName(account)}」设为当前账号`"
+          :title="`将「${props.displayName(account)}」设为当前账号`"
           :disabled="!props.canManage(account.id)"
           @click="emit('activate', account.id)"
         >
@@ -155,8 +163,8 @@ const emit = defineEmits<{
           type="button"
           class="icon-button danger-icon"
           :data-testid="`delete-${account.id}`"
-          aria-label="删除账号"
-          title="删除账号"
+          :aria-label="`删除「${props.displayName(account)}」`"
+          :title="`删除「${props.displayName(account)}」`"
           :disabled="!props.canManage(account.id)"
           @click="emit('remove', account.id)"
         ><Trash2 :size="17" aria-hidden="true" /></button>
@@ -167,7 +175,9 @@ const emit = defineEmits<{
 </template>
 
 <style scoped>
-.account-sheet{border:1px solid var(--hair);border-radius:10px;overflow:auto;max-height:min(420px,52vh);margin-bottom:18px}.account-sheet-header{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:34px;padding:0 11px;border-bottom:1px solid var(--hair);background:var(--panel-2);color:var(--muted);font-size:11px;letter-spacing:.03em}.account-sheet-header strong{color:var(--ink-1);font-size:13px;letter-spacing:0}.account-sheet-row{display:grid;grid-template-columns:minmax(120px,1.15fr) 68px 116px minmax(118px,1fr) auto;gap:8px;align-items:center;padding:10px 11px;border-top:1px solid var(--hair);background:var(--panel)}.account-sheet-row:first-of-type{border-top:0}.account-sheet-row[data-active="true"]{border-color:var(--brand-edge);background:var(--brand-wash)}.account-sheet-row[data-rate-limited="true"]{border-color:var(--danger-edge,#f0a0a0);background:var(--danger-wash,rgba(220,60,60,.06))}.account-sheet-identity{display:flex;align-items:center;gap:6px;min-width:0}.account-sheet-icon{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;color:var(--brand-strong);background:var(--brand-wash)}.account-sheet-name{display:flex;align-items:center;gap:5px;min-width:0}.account-sheet-name>strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account-sheet-badge{padding:2px 7px;border:1px solid var(--brand-edge);border-radius:999px;color:var(--brand-ink);background:var(--brand-wash);font-size:11px;font-weight:700;white-space:nowrap}.account-sheet-badge.muted{color:var(--ink-3);border-color:var(--hair);background:var(--hair-2)}.rate-limited-name{color:#c01818}.account-sheet-badge.rate-limited{display:inline-flex;align-items:center;position:relative;padding-right:21px;color:#c01818;border-color:#e04040;background:rgba(220,60,60,.1)}.rate-limited-clear{position:absolute;right:2px;top:1px;display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;padding:0;border:0;border-radius:4px;background:transparent;color:currentColor;opacity:0;cursor:pointer;transition:opacity 140ms ease,background 140ms ease}.rate-limited:hover .rate-limited-clear,.rate-limited:focus-within .rate-limited-clear{opacity:1}.rate-limited-clear:hover:not(:disabled),.rate-limited-clear:focus-visible{background:rgba(192,24,24,.14);outline:1px solid currentColor}.rate-limited-clear:disabled{cursor:wait}.pool-toggle{display:inline-flex;align-items:center;gap:5px;color:var(--ink-1);font-size:12px;cursor:pointer}.pool-toggle input{margin:0}.account-sheet-quotas{display:grid;grid-template-columns:1fr 1fr;gap:5px}.pool-quota{display:flex;align-items:center;gap:4px;color:var(--muted);font-size:12px}.pool-quota input{width:45px;padding:3px 5px;border:1px solid var(--hair);border-radius:5px;background:var(--panel-2);color:var(--ink-1);font:inherit;font-size:12px}.pool-quota input:disabled{opacity:.6;cursor:not-allowed}.account-sheet-platforms{display:grid;gap:3px;margin:0;padding:0;list-style:none}.account-sheet-platforms li{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:5px;color:var(--muted);font-size:11px;line-height:1.4}.account-sheet-platform-label{font-weight:600;color:var(--ink-1)}.account-sheet-state{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 5px;border-radius:999px;font-size:10px;font-weight:700}.account-sheet-state[data-tone="ok"]{color:var(--match-deep);background:var(--match-wash)}.account-sheet-state[data-tone="warn"],.account-sheet-state[data-tone="refresh"]{color:var(--unsure-deep);background:var(--unsure-wash)}.account-sheet-state[data-tone="restricted"]{color:var(--reject-deep);background:var(--reject-wash)}.account-sheet-state[data-tone="empty"]{color:var(--ink-3);background:var(--hair-2)}.account-sheet-open{display:inline-flex;align-items:center;gap:3px;min-height:22px;padding:2px 5px;border:1px solid var(--brand-edge);border-radius:5px;color:var(--brand-strong);background:var(--panel);font:inherit;font-size:11px;font-weight:600;cursor:pointer}.account-sheet-open:hover:not(:disabled){color:var(--brand-ink);background:var(--brand-wash)}.account-sheet-open:disabled{opacity:.55;cursor:not-allowed}.account-sheet-actions{display:flex;align-items:center;gap:4px}.activate-toggle{color:var(--match-deep)}.danger-icon{color:var(--reject-deep)}.account-sheet-empty{margin:0;padding:24px 0;color:var(--muted);text-align:center}@media (max-width:640px){.account-sheet-row{grid-template-columns:minmax(120px,1fr) auto;align-items:start}.pool-toggle,.account-sheet-quotas,.account-sheet-platforms{grid-column:1 / -1}.account-sheet-actions{grid-column:2;grid-row:1}.account-sheet-platforms{grid-template-columns:1fr 1fr}.account-sheet-header span{display:none}}
+.account-sheet{border:1px solid var(--hair);border-radius:10px;overflow:auto;max-height:min(420px,52vh);margin-bottom:18px}.account-sheet-header{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:34px;padding:0 11px;border-bottom:1px solid var(--hair);background:var(--panel-2);color:var(--muted);font-size:11px;letter-spacing:.03em}.account-sheet-header strong{color:var(--ink-1);font-size:13px;letter-spacing:0}.account-sheet-row{display:grid;grid-template-columns:minmax(120px,1.15fr) 68px 116px minmax(118px,1fr) auto;gap:8px;align-items:center;padding:10px 11px;border-top:1px solid var(--hair);background:var(--panel)}.account-sheet-row:first-of-type{border-top:0}.account-sheet-row[data-active="true"]{border-color:var(--brand-edge);background:var(--brand-wash)}.account-sheet-row[data-rate-limited="true"]{border-color:var(--danger-edge,#f0a0a0);background:var(--danger-wash,rgba(220,60,60,.06))}.account-sheet-identity{display:flex;align-items:center;gap:6px;min-width:0}.account-sheet-icon{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;color:var(--brand-strong);background:var(--brand-wash)}.account-sheet-name{display:flex;align-items:center;gap:5px;min-width:0}.account-sheet-name>strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account-sheet-badge{padding:2px 7px;border:1px solid var(--brand-edge);border-radius:999px;color:var(--brand-ink);background:var(--brand-wash);font-size:11px;font-weight:700;white-space:nowrap}.account-sheet-badge.muted{color:var(--ink-3);border-color:var(--hair);background:var(--hair-2)}.account-sheet-badge.active-account{flex:0 0 auto;background:var(--panel)}.rate-limited-name{color:#c01818}.account-sheet-badge.rate-limited{display:inline-flex;align-items:center;position:relative;padding-right:21px;color:#c01818;border-color:#e04040;background:rgba(220,60,60,.1)}.rate-limited-clear{position:absolute;right:2px;top:1px;display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;padding:0;border:0;border-radius:4px;background:transparent;color:currentColor;opacity:0;cursor:pointer;transition:opacity 140ms ease,background 140ms ease}.rate-limited:hover .rate-limited-clear,.rate-limited:focus-within .rate-limited-clear{opacity:1}.rate-limited-clear:hover:not(:disabled),.rate-limited-clear:focus-visible{background:rgba(192,24,24,.14);outline:1px solid currentColor}.rate-limited-clear:disabled{cursor:wait}.pool-toggle{display:inline-flex;align-items:center;gap:5px;color:var(--ink-1);font-size:12px;cursor:pointer}.pool-toggle input{margin:0}.account-sheet-quotas{display:grid;grid-template-columns:1fr 1fr;gap:5px}.pool-quota{display:flex;align-items:center;gap:4px;color:var(--muted);font-size:12px}.pool-quota input{width:45px;padding:3px 5px;border:1px solid var(--hair);border-radius:5px;background:var(--panel-2);color:var(--ink-1);font:inherit;font-size:12px}.pool-quota input:disabled{opacity:.6;cursor:not-allowed}.account-sheet-platforms{display:grid;gap:3px;margin:0;padding:0;list-style:none}.account-sheet-platforms li{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:5px;color:var(--muted);font-size:11px;line-height:1.4}.account-sheet-platform-label{font-weight:600;color:var(--ink-1)}.account-sheet-state{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 5px;border-radius:999px;font-size:10px;font-weight:700}.account-sheet-state[data-tone="ok"]{color:var(--match-deep);background:var(--match-wash)}.account-sheet-state[data-tone="warn"],.account-sheet-state[data-tone="refresh"]{color:var(--unsure-deep);background:var(--unsure-wash)}.account-sheet-state[data-tone="restricted"]{color:var(--reject-deep);background:var(--reject-wash)}.account-sheet-state[data-tone="empty"]{color:var(--ink-3);background:var(--hair-2)}.account-sheet-open{display:inline-flex;align-items:center;gap:3px;min-height:22px;padding:2px 5px;border:1px solid var(--brand-edge);border-radius:5px;color:var(--brand-strong);background:var(--panel);font:inherit;font-size:11px;font-weight:600;cursor:pointer}.account-sheet-open:hover:not(:disabled){color:var(--brand-ink);background:var(--brand-wash)}.account-sheet-open:disabled{opacity:.55;cursor:not-allowed}.account-sheet-actions{display:flex;align-items:center;gap:4px}.activate-toggle{color:var(--match-deep)}.danger-icon{color:var(--reject-deep)}.account-sheet-empty{margin:0;padding:24px 0;color:var(--muted);text-align:center}
+/* 窄屏（≤640px）样式统一在后面的结构化块里声明：媒体查询不加特异度，
+   这里重复写只会变成永远不生效的死声明，故本块不再保留 @media (max-width:640px)。 */
 </style>
 
 <style scoped>
@@ -250,18 +260,45 @@ const emit = defineEmits<{
   opacity: 1;
 }
 @media (max-width: 640px) {
+  /* 窄屏：账号行从五列收到两列（账号名一列、动作一列），本块是窄屏的唯一权威 */
+  .account-sheet-row {
+    grid-template-columns: minmax(120px, 1fr) auto;
+    align-items: start;
+  }
+  /* 勾选 / 配额 / 平台跨整行，动作列留在首行末列，不掉出可视区 */
+  .pool-toggle,
+  .account-sheet-quotas,
+  .account-sheet-platforms {
+    grid-column: 1 / -1;
+  }
+  .account-sheet-actions {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .account-sheet-platforms {
+    grid-template-columns: 1fr 1fr;
+  }
+  /* 「当前账号」与「限流」并存时标识另起一行，账号名仍占满第一列（不被压成纯省略号） */
+  .account-sheet-name {
+    flex-wrap: wrap;
+  }
+  .account-sheet-badge.active-account {
+    padding: 1px 5px;
+  }
   .account-sheet-columns {
     grid-template-columns: minmax(120px, 1fr) auto;
   }
+  /* 表头与账号行是两个独立 grid，末列 auto 各按自身内容算宽：表头末列是「操作」二字，
+     行末列是两枚图标按钮，宽窄不同，标签会浮在按钮组右侧而不是正上方。
+     窄屏两列布局下列标题本就不是必需，故末列标签与对不上列的中间两格一并隐藏，
+     只留「账号」压在账号名那一列上；末列不加下限，免得换成横向滚动。 */
   .account-sheet-columns span:nth-child(2),
-  .account-sheet-columns span:nth-child(3) {
+  .account-sheet-columns span:nth-child(3),
+  .account-sheet-columns span:last-child {
     display: none;
   }
   .account-sheet-columns span:first-child {
     grid-column: 1;
-  }
-  .account-sheet-columns span:last-child {
-    grid-column: 2;
   }
 }
 </style>

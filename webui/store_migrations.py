@@ -17,6 +17,8 @@ from webui.store_migrations_v1 import (
 from webui.store_migrations_v4 import StoreMigrationsV4Mixin
 from webui.store_migrations_v5 import StoreMigrationsV5Mixin
 from webui.store_migrations_v6 import StoreMigrationsV6Mixin
+from webui.store_migrations_v7 import StoreMigrationsV7Mixin
+from webui.store_migrations_v8 import StoreMigrationsV8Mixin
 from webui.store_migrations_v3 import StoreMigrationsV3Mixin
 from webui.store_migrations_v2 import StoreMigrationsV2Mixin
 from webui.store_migrations_v1 import StoreMigrationsV1Mixin
@@ -31,6 +33,8 @@ class MigrationBackupError(RuntimeError):
 
 
 class StoreMigrationsMixin(
+    StoreMigrationsV8Mixin,
+    StoreMigrationsV7Mixin,
     StoreMigrationsV6Mixin,
     StoreMigrationsV5Mixin,
     StoreMigrationsV4Mixin,
@@ -38,4 +42,4 @@ class StoreMigrationsMixin(
     StoreMigrationsV2Mixin,
     StoreMigrationsV1Mixin,
 ):
-    """迁移 mixin 组装；版本段 001-035/036/037 物理归组。"""
+    """迁移 mixin 组装；版本段 001-035/036/037/038 物理归组。"""

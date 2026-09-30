@@ -2,6 +2,13 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { CircleCheck, CircleX, LoaderCircle, Octagon, PauseCircle } from "@lucide/vue";
 import type { IntegritySnapshot, Platform } from "../types";
+import {
+  STAGE_COMPLETED_STATUSES,
+  UNREADABLE_STAGE_STATUS,
+  elapsedRunsLive,
+  platformLabel as platformDisplayName,
+  stageStatusLabel,
+} from "../discovery";
 import { ERROR_MESSAGES } from "../errorCodes";
 
 interface PauseInfo {
@@ -38,7 +45,7 @@ interface TaskSnapshot {
   // 由父组件从 /api/latest-running-task 或 /api/task-state 透传；草稿平台切换不影响此处。
   platform?: Platform;
   // 后端从 task_logs 的 pause/resume 事件推导的累计实际运行时长（排除暂停），
-  // 单位毫秒；运行中包含当前段，暂停/终态为定格累计。
+  // 单位毫秒；只有真有活 worker 在跑的状态包含当前段，其余状态都是定格累计。
   active_elapsed_ms?: number;
   integrity?: IntegritySnapshot | null;
 }
@@ -47,16 +54,24 @@ const props = defineProps<{
   snapshot: TaskSnapshot | null;
   kind?: "scrape" | "screen" | "";
   taskId?: string;
+  /** 本卡所属平台：轨道快照没带平台时由父组件下发，播报与徽章共用这一个主体。 */
+  platform?: Platform | null;
   /** 本轮是用户主动「结束并保存」收尾的：不把 interrupted 当异常展示。 */
   userFinished?: boolean;
 }>();
 
-const COMPLETED_STATUSES = new Set(["done", "completed", "completed_with_pending", "partial"]);
+// 终态与完成态口径以后端 flow_tracks 状态白名单为唯一权威
+//（webui/store_flow_core.py：终态 = done / succeeded / failed / stopped / cancelled）；
+// completed / completed_with_pending 是任务状态接口对同一事实的公开别名。
+// 完成族清单的唯一一份在 discovery.ts（状态词与轨道头部共用同一份计算）。
+const COMPLETED_STATUSES = new Set<string>(STAGE_COMPLETED_STATUSES);
 const TERMINAL_STATUSES = new Set([
   ...COMPLETED_STATUSES,
   "failed",
   "cancelled",
+  "stopped",
   "paused",
+  "unavailable",
 ]);
 
 // 016：与后端 SYSTEMIC_BLOCK_CODES 对齐（统一正名 + 历史别名兼容）
@@ -105,6 +120,14 @@ const integrity = computed<IntegritySnapshot | null>(() => {
   return raw;
 });
 const integrityConclusion = computed(() => integrity.value?.conclusion || "");
+// 显式状态优先于完整性结论：轨道失败而抓取证据「完整成功」时，
+// 文案与图标都必须跟状态一致，否则朗读会连成「失败完整成功」。
+const explicitStatus = computed(() => String(props.snapshot?.status || ""));
+const statusOverridesIntegrity = computed(() => ["failed", "interrupted", "cancelled", "stopped", "unavailable", "paused"]
+  .includes(explicitStatus.value));
+const iconConclusion = computed(() => (
+  statusOverridesIntegrity.value ? explicitStatus.value : (integrityConclusion.value || explicitStatus.value)
+));
 const integrityStatus = computed(() => {
   switch (integrityConclusion.value) {
     case "succeeded":
@@ -131,8 +154,11 @@ const integritySuccess = computed(() => integrityConclusion.value
 // snapshot 从 null→非 null 时记开始时间；status 进入终态（done/failed/cancelled）时定格。
 // 完成后显示绝对用时；运行中每秒刷新显示"已用 X 秒"。
 // 后端 active_elapsed_ms 提供"排除暂停的累计实际运行时长"时优先使用：
-// 运行中显示"累计 + 当前段"（active_elapsed_ms 已含当前段，随轮询刷新），
-// 暂停/终态显示定格累计；刷新页面后仍由后端事件推导，暂停时长不回流。
+// 走活表的状态显示"累计 + 当前段"（active_elapsed_ms 已含当前段，随轮询刷新），
+// 其余状态（已中断／已暂停／尚未开始／终态）显示定格累计，不再叠本地增量。
+// 刷新页面后仍由后端事件推导，暂停时长不回流。
+// 后端两个计时字段都没有时，本地回退钟只在树干判定「真有活 worker 在跑」的状态下才成立
+//（见 elapsedRunsLive）；没有证据的段不造起点、不显示时间。
 const startedAt = ref<number | null>(null);
 const finishedAt = ref<number | null>(null);
 const activeElapsedMs = ref<number | null>(null);
@@ -192,8 +218,14 @@ watch(
         clearInterval(intervalId);
         intervalId = undefined;
       }
-    } else if (next && startedAt.value !== null && finishedAt.value === null && intervalId === undefined) {
-      intervalId = window.setInterval(() => { tickTok.value++; }, 1000);
+    } else if (next && startedAt.value !== null && finishedAt.value === null && elapsedRunsLive(next.status)) {
+      // 只有走活表的状态需要每秒 tick；定格的时间没有可走的东西，不空转。
+      if (intervalId === undefined) {
+        intervalId = window.setInterval(() => { tickTok.value++; }, 1000);
+      }
+    } else if (intervalId !== undefined) {
+      clearInterval(intervalId);
+      intervalId = undefined;
     }
   },
   { immediate: true },
@@ -202,14 +234,18 @@ watch(
 const elapsedMs = computed(() => {
   void tickTok.value; // 每秒递增，强制 computed 重新求值
   // 后端提供排除暂停的累计实际运行时长时优先使用：
-  // 暂停/终态为定格累计；运行中叠加当前运行段的本地增量。
+  // 只有走活表的状态（真有活 worker 在跑）才叠加当前段的本地增量；
+  // 已中断／已暂停／尚未开始／终态一律停在后端定格值，状态口径来自 discovery.ts。
   if (activeElapsedMs.value !== null) {
-    if (isTerminalStatus(props.snapshot?.status)) return activeElapsedMs.value;
+    if (!elapsedRunsLive(props.snapshot?.status)) return activeElapsedMs.value;
     return activeElapsedMs.value + Math.max(0, Date.now() - activeElapsedAt.value);
   }
   if (startedAt.value === null) return 0;
-  const end = finishedAt.value ?? Date.now();
-  return Math.max(0, end - startedAt.value);
+  if (finishedAt.value !== null) return Math.max(0, finishedAt.value - startedAt.value);
+  // 后端没给任何计时字段、这一段又没有活 worker：不拿本地时钟造一个会走的时间，
+  // 门用树干的 elapsedRunsLive，与 timeLabel 同一道判定，不在组件里另抄状态清单。
+  if (!elapsedRunsLive(props.snapshot?.status)) return 0;
+  return Math.max(0, Date.now() - startedAt.value);
 });
 
 function formatDuration(ms: number): string {
@@ -248,7 +284,7 @@ const realAnchor = computed(() => {
   if (!Number.isNaN(overall) && overall >= 0) {
     return Math.min(100, Math.max(0, overall));
   }
-  if (["failed", "cancelled"].includes(props.snapshot?.status || "")) return 0;
+  if (["failed", "cancelled", "stopped", "unavailable"].includes(props.snapshot?.status || "")) return 0;
   if (total.value > 0) {
     return Math.min(100, Math.max(0, (current.value * 100) / total.value));
   }
@@ -319,30 +355,33 @@ const integrityMessage = computed(() => {
   if (conclusion === "empty") return "已完成，没有找到岗位";
   return String(integrity.value?.primary_reason || integrity.value?.recommendation || "");
 });
-const statusLabel = computed(() => {
-  if (integrityConclusion.value) {
-    return {
-      succeeded: "完整成功",
-      empty: "已完成，没有找到岗位",
-      partial: "部分完成，部分结果可能缺失",
-      failed: "执行失败",
-      unverifiable: "无法确认是否完成",
-      interrupted: "任务已中断",
-    }[integrityConclusion.value] || "运行中";
-  }
-  if (["completed_with_pending", "partial"].includes(String(props.snapshot?.status || ""))) return "完成，但有待确认";
-  if (isCompletedStatus(props.snapshot?.status)) return "已完成";
-  if (props.snapshot?.status === "failed") return "执行失败";
-  if (props.snapshot?.status === "cancelled") return "已停止";
-  if (props.snapshot?.status === "paused") return "已暂停";
-  if (props.snapshot?.status === "pausing") return "正在暂停";
-  return "运行中";
+// 状态词出自树干的那一份计算（discovery.ts）：轨道头部徽章与卡体共用同一个函数，
+// 同一张卡不会头部说「完成，但有待确认」、卡体说「无法确认是否完成」。
+// 白箱完整性结论仍然由这里说话，头部跟着说同一句，不丢信号。
+const statusLabel = computed(() => stageStatusLabel(explicitStatus.value, integrityConclusion.value));
+
+// 没有证据的段不演成在跑：排队（等待开始）与读不到状态（状态更新中）都用静止图标。
+const idleStageStatus = computed(() =>
+  explicitStatus.value === UNREADABLE_STAGE_STATUS || explicitStatus.value === "queued",
+);
+
+// 本段跑过但这一轮读不到状态：不编「正在准备任务…」这种没依据的进行中旁白，
+// 徽章已经说了「状态更新中」，这一行不再重复一句。
+const cardMessage = computed(() => {
+  if (explicitStatus.value === UNREADABLE_STAGE_STATUS) return "";
+  return String(props.snapshot?.error || integrityMessage.value || message.value || "");
 });
 
-// 无障碍播报只包含状态/阶段/关键计数，百分比、用时与进度文案不参与，
-// 因此每秒 tick 不会触发 aria-live 重复播报。
+// 播报主体与可见徽章同源：平台显示名唯一权威是 discovery.ts 的 platformLabel。
+const platformLabel = computed(() => platformDisplayName(props.platform || props.snapshot?.platform));
+
+// 无障碍播报只包含平台主体/状态/阶段/关键计数，百分比、用时与进度文案不参与，
+// 因此每秒 tick 不会触发 aria-live 重复播报。并行页每张卡各挂一个 aria-live，
+// 少了主体就是两句没有主语的「进行中」，听者分不清是哪条平台的线。
 const announcementText = computed(() => {
-  const parts: string[] = [statusLabel.value];
+  const parts: string[] = [];
+  if (platformLabel.value) parts.push(platformLabel.value);
+  parts.push(statusLabel.value);
   if (stageLabel.value && stageLabel.value !== "处理中") parts.push(stageLabel.value);
   if (scrapedCount.value > 0) parts.push(`已抓取 ${scrapedCount.value} 个岗位`);
   if (currentCompletedCount.value > 0) parts.push(`已完成 ${currentCompletedCount.value}`);
@@ -351,11 +390,6 @@ const announcementText = computed(() => {
   if (pendingCount.value > 0) parts.push(`待确认 ${pendingCount.value}`);
   if (failCount.value > 0) parts.push(`失败 ${failCount.value}`);
   return parts.join("，");
-});
-
-const platformLabel = computed(() => {
-  if (!props.snapshot?.platform) return "";
-  return props.snapshot.platform === "boss" ? "BOSS" : "智联";
 });
 
 // 阶段中文标签：所有已知内部阶段都映射为中文，未知阶段使用中文兜底，
@@ -397,7 +431,7 @@ const stageLabel = computed(() => {
 
 const failureVisible = computed(() => {
   const status = props.snapshot?.status;
-  return status === "failed" || status === "paused"
+  return status === "failed" || status === "paused" || status === "unavailable"
     || ["failed", "unverifiable", "interrupted"].includes(integrityConclusion.value);
 });
 
@@ -440,6 +474,14 @@ const failureLine = computed(() => {
     const code = pi?.error_code || "";
     return {
       reason: pi?.error_reason || props.snapshot?.error || ERROR_MESSAGES[code] || message.value || "执行失败",
+      code,
+    };
+  }
+  if (status === "unavailable") {
+    const pi = props.snapshot?.pause_info;
+    const code = pi?.error_code || "";
+    return {
+      reason: pi?.error_reason || props.snapshot?.error || ERROR_MESSAGES[code] || "平台运行线暂不可用",
       code,
     };
   }
@@ -529,7 +571,11 @@ const timeLabel = computed(() => {
     return terminal ? `用时 ${elapsedLabel.value}` : `已用 ${elapsedLabel.value}`;
   }
   if (startedAt.value === null) return "";
-  if (terminal && finishedAt.value === null) return "";
+  // 后端两个计时字段都没有时，本地回退钟只有两种拿得住的证据：后端真实结束时间
+  //（定格成用时），或树干判定这段真有活 worker 在跑（可以往下走）。
+  // 都没有就是没有任何时间可说：整行收起，不凭空长出一个会走的钟。
+  // 没有真实结束时间的历史数据同样不伪造，避免出现"用时 0秒"。
+  if (finishedAt.value === null && !elapsedRunsLive(props.snapshot?.status)) return "";
   return terminal ? `用时 ${elapsedLabel.value}` : `已用 ${elapsedLabel.value}`;
 });
 </script>
@@ -539,24 +585,26 @@ const timeLabel = computed(() => {
     <p class="sr-only" aria-live="polite" data-testid="task-progress-announcement">{{ announcementText }}</p>
     <header>
       <span class="task-status" :data-status="integrityStatus" :style="integrityStyle">
-        <CircleCheck v-if="integritySuccess" :size="17" aria-hidden="true" />
-        <CircleX v-else-if="['failed', 'unverifiable'].includes(integrityConclusion || snapshot.status || '')" :size="17" aria-hidden="true" />
-        <PauseCircle v-else-if="snapshot.status === 'paused' || integrityConclusion === 'interrupted'" :size="17" aria-hidden="true" />
-        <Octagon v-else-if="snapshot.status === 'cancelled'" :size="17" aria-hidden="true" />
+        <CircleCheck v-if="!statusOverridesIntegrity && integritySuccess" :size="17" aria-hidden="true" />
+        <CircleX v-else-if="['failed', 'unverifiable', 'unavailable'].includes(iconConclusion)" :size="17" aria-hidden="true" />
+        <PauseCircle v-else-if="explicitStatus === 'paused' || explicitStatus === 'interrupted' || integrityConclusion === 'interrupted'" :size="17" aria-hidden="true" />
+        <Octagon v-else-if="snapshot.status === 'cancelled' || snapshot.status === 'stopped'" :size="17" aria-hidden="true" />
+        <!-- 排队 / 读不到状态：这一段没有证据可说，图标静止，不用转圈把它演成在跑。 -->
+        <LoaderCircle v-else-if="idleStageStatus" :size="17" aria-hidden="true" />
         <LoaderCircle v-else class="spin" :size="17" aria-hidden="true" />
         {{ statusLabel }}
       </span>
       <span
         v-if="platformLabel"
         class="task-platform"
-        :data-platform="snapshot.platform"
+        :data-platform="snapshot.platform || platform"
         data-testid="task-platform-badge"
       >· {{ platformLabel }}</span>
       <span v-if="stageLabel" class="task-stage">· {{ stageLabel }}</span>
       <span v-if="timeLabel" class="task-elapsed">· {{ timeLabel }}</span>
-      <span class="task-percentage">{{ percentage }}%</span>
+      <span v-if="snapshot.status !== 'unavailable'" class="task-percentage">{{ percentage }}%</span>
     </header>
-    <div class="progress-track" aria-hidden="true">
+    <div v-if="snapshot.status !== 'unavailable'" class="progress-track" aria-hidden="true">
       <span :style="{ width: `${percentage}%` }" />
     </div>
     <!-- B052：暂停/失败统一内联原因 + 红色错误字段；无独立诊断盒、无复制按钮 -->
@@ -564,7 +612,7 @@ const timeLabel = computed(() => {
       <PauseCircle v-if="snapshot.status === 'paused'" :size="14" aria-hidden="true" />
       {{ failureLine.reason }}<span v-if="failureLine.code" class="error-field" data-testid="error-field"> · {{ failureLine.code }}</span>
     </p>
-    <p v-else class="task-message">{{ snapshot.error || integrityMessage || message }}</p>
+    <p v-else-if="cardMessage" class="task-message">{{ cardMessage }}</p>
     <!-- 切片7：完整计数画面（FR-037）。按语义分组：来源 / 粗筛 / 当前阶段 / 待确认 / 失败 -->
     <div v-if="showCounts" class="task-counts" data-testid="task-counts">
       <div v-if="scrapedCount > 0" class="count-group count-scraped">

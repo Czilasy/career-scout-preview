@@ -195,6 +195,19 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertGreaterEqual(row["version"], 1)
 
+    def test_b096_migration_039_adds_preflight_retry_snapshot_idempotently(self):
+        store = TaskStore(self.db_path)
+        reopened = TaskStore(self.db_path)
+        with reopened._connection() as conn:
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(flow_tracks)")
+            }
+            count = conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 39"
+            ).fetchone()[0]
+        self.assertGreaterEqual(reopened.schema_version(), 39)
+        self.assertIn("submission_snapshot_json", columns)
+        self.assertEqual(count, 1)
     def test_old_tables_preserved_after_migration(self):
         store = TaskStore(self.db_path)
         store.create_task("old-1", "scrape", {"k": "v"}, output_path="a.json", detail_output_path="b.json")
@@ -1055,7 +1068,8 @@ class Migration037SearchPackagesTests(unittest.TestCase):
             self._table_columns(store),
             {
                 "id", "name", "payload_version", "keywords_json", "city_json",
-                "profile_summary", "profile_facts_json", "created_at", "updated_at",
+                "profile_summary", "profile_facts_json", "condition_snapshot_json",
+                "created_at", "updated_at",
             },
         )
 
@@ -1094,7 +1108,8 @@ class Migration037SearchPackagesTests(unittest.TestCase):
             self._table_columns(reopened),
             {
                 "id", "name", "payload_version", "keywords_json", "city_json",
-                "profile_summary", "profile_facts_json", "created_at", "updated_at",
+                "profile_summary", "profile_facts_json", "condition_snapshot_json",
+                "created_at", "updated_at",
             },
         )
 
@@ -1104,5 +1119,215 @@ class Migration037SearchPackagesTests(unittest.TestCase):
         with reopened._connection() as conn:
             count = conn.execute(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version = 37"
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+
+class Migration38FlowSchemaTests(unittest.TestCase):
+    """B096 migration 038 contract and transaction-boundary tests."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(
+            prefix=_PROCESS_TMP_PREFIX, ignore_cleanup_errors=True,
+        )
+        self.db_path = pathlib.Path(self.temp.name) / "state" / "webui.db"
+        self._cleanup_shared_backup_dir()
+
+    def tearDown(self):
+        self._cleanup_shared_backup_dir()
+        self.temp.cleanup()
+
+    @staticmethod
+    def _cleanup_shared_backup_dir():
+        dummy = TaskStore.__new__(TaskStore)
+        backup_dir = TaskStore._migration_backup_dir(dummy)
+        if backup_dir.exists():
+            for path in backup_dir.iterdir():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _drop_migration_038(store):
+        with store._connection() as conn:
+            conn.execute("DROP TABLE IF EXISTS flow_tracks")
+            conn.execute("DROP TABLE IF EXISTS flows")
+            conn.execute("DELETE FROM schema_migrations WHERE version = 38")
+            conn.execute("DELETE FROM schema_migrations WHERE version = 39")
+            conn.execute("DELETE FROM schema_migrations WHERE version = 40")
+
+    def test_migration_038_creates_flow_and_track_schema(self):
+        store = TaskStore(self.db_path)
+
+        with store._connection() as conn:
+            tables = {
+                row["name"]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            flow_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(flows)")
+            }
+            track_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(flow_tracks)")
+            }
+            migration = conn.execute(
+                "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 38"
+            ).fetchone()["count"]
+
+        self.assertEqual(store.schema_version(), 40)
+        self.assertTrue({"flows", "flow_tracks"} <= tables)
+        self.assertEqual(
+            flow_columns,
+            {"id", "profile_id", "selection", "start_key", "created_at", "updated_at"},
+        )
+        self.assertEqual(
+            track_columns,
+            {
+                "id", "flow_id", "platform", "scrape_run_id", "screen_run_id",
+                "result_run_id", "confirmed_filters_snapshot", "submission_snapshot_json",
+                "status", "stage",
+                "error_code", "reason", "created_at", "updated_at",
+            },
+        )
+        self.assertEqual(migration, 1)
+
+    def test_migration_038_upgrades_legacy_database_and_is_idempotent(self):
+        with patch.object(TaskStore, "_migration_038", return_value=None):
+            legacy = TaskStore(self.db_path)
+        with legacy._connection() as conn:
+            profile = conn.execute(
+                "SELECT id FROM candidate_profiles ORDER BY created_at LIMIT 1"
+            ).fetchone()
+            profile_id = profile["id"] if profile else "profile-preserved"
+            if profile is None:
+                conn.execute(
+                    "INSERT INTO candidate_profiles "
+                    "(id, name, confirmed_fields_json, ai_preference_json, created_at, updated_at) "
+                    "VALUES (?, 'migration test', '{}', '{}', ?, ?)",
+                    (profile_id, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+                )
+            conn.execute(
+                "INSERT INTO search_runs "
+                "(id, profile_id, profile_snapshot_json, mode, status, created_at, updated_at) "
+                "VALUES (?, ?, '{}', 'ai', 'done', ?, ?)",
+                (
+                    "legacy-run",
+                    profile_id,
+                    "2026-01-01T00:00:00Z",
+                    "2026-01-01T00:00:00Z",
+                ),
+            )
+
+        upgraded = TaskStore(self.db_path)
+        reopened = TaskStore(self.db_path)
+        with reopened._connection() as conn:
+            migrations = conn.execute(
+                "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 38"
+            ).fetchone()["count"]
+            flow = conn.execute(
+                "SELECT id FROM search_runs WHERE id = 'legacy-run'"
+            ).fetchone()
+        self.assertEqual(upgraded.schema_version(), 40)
+        self.assertEqual(reopened.schema_version(), 40)
+        self.assertEqual(migrations, 1)
+        self.assertIsNotNone(flow)
+        self.assertEqual(dict(flow), {"id": "legacy-run"})
+
+    def test_migration_038_rolls_back_all_ddl_when_one_statement_fails(self):
+        legacy = TaskStore(self.db_path)
+        self._drop_migration_038(legacy)
+        self.assertTrue(hasattr(TaskStore, "_migration_038"))
+
+        with patch.object(
+            TaskStore,
+            "_flow_migration_statements",
+            return_value=(
+                "CREATE TABLE flows (id TEXT PRIMARY KEY)",
+                "CREATE TABLE flow_tracks (",
+            ),
+        ), self.assertRaises(sqlite3.OperationalError):
+            TaskStore(self.db_path)
+
+        with sqlite3.connect(self.db_path) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            version = conn.execute(
+                "SELECT MAX(version) FROM schema_migrations"
+            ).fetchone()[0]
+        self.assertNotIn("flows", tables)
+        self.assertNotIn("flow_tracks", tables)
+        self.assertEqual(version, 37)
+class Migration040ConditionSnapshotTests(unittest.TestCase):
+    """T003: migration 040 adds a durable condition snapshot to packages."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(
+            prefix=_PROCESS_TMP_PREFIX, ignore_cleanup_errors=True,
+        )
+        self.db_path = pathlib.Path(self.temp.name) / "state" / "webui.db"
+        self._cleanup_shared_backup_dir()
+
+    def tearDown(self):
+        self._cleanup_shared_backup_dir()
+        self.temp.cleanup()
+
+    @staticmethod
+    def _cleanup_shared_backup_dir():
+        dummy = TaskStore.__new__(TaskStore)
+        backup_dir = TaskStore._migration_backup_dir(dummy)
+        if backup_dir.exists():
+            for path in backup_dir.iterdir():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    def _columns(self, store) -> set:
+        with store._connection() as conn:
+            return {
+                row["name"] for row in conn.execute("PRAGMA table_info(search_packages)")
+            }
+
+    def test_new_database_has_condition_snapshot_default(self):
+        store = TaskStore(self.db_path)
+        self.assertGreaterEqual(store.schema_version(), 40)
+        self.assertIn("condition_snapshot_json", self._columns(store))
+        created = store.create_search_package(
+            name="v2",
+            payload_version=2,
+            keywords={"candidates": [], "selected": [], "custom": ""},
+            city={"text": "上海", "custom": ""},
+            profile_summary="画像",
+            profile_facts={},
+        )
+        self.assertEqual(created["condition_snapshot"], {})
+
+    def test_legacy_database_upgrades_with_condition_snapshot_default(self):
+        with patch.object(TaskStore, "_migration_040", return_value=None):
+            legacy = TaskStore(self.db_path)
+        self.assertLess(legacy.schema_version(), 40)
+        reopened = TaskStore(self.db_path)
+        self.assertGreaterEqual(reopened.schema_version(), 40)
+        self.assertIn("condition_snapshot_json", self._columns(reopened))
+        with reopened._connection() as conn:
+            rows = conn.execute(
+                "SELECT condition_snapshot_json FROM search_packages"
+            ).fetchall()
+        self.assertTrue(all(row["condition_snapshot_json"] == "{}" for row in rows))
+
+    def test_migration_040_is_idempotent(self):
+        TaskStore(self.db_path)
+        reopened = TaskStore(self.db_path)
+        with reopened._connection() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 40"
             ).fetchone()[0]
         self.assertEqual(count, 1)

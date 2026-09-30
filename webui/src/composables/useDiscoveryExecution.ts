@@ -71,18 +71,19 @@ function cleanupFailureMessage(
 async function saveCancelledScrapeResult(
   saveScrapedOnlySnapshot: (markViewed?: boolean) => Promise<"saved" | "zero" | "failed">,
   activeCategory: Ref<string>,
-  activeStep: Ref<string>,
+  navigateStep: (step: string) => void,
 ): Promise<"saved" | "zero" | "failed"> {
   const outcome = await saveScrapedOnlySnapshot(true);
   if (outcome !== "failed") {
     activeCategory.value = "matched";
-    activeStep.value = "results";
+    navigateStep("results");
   }
   return outcome;
 }
 
 export function useDiscoveryExecution(state: DiscoveryState, deps: ExecutionNeeds) {
-  const { activeCategory, activeStep, activeTaskRestored, advancedPanelsOpen, analysisReady, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityList, currentRoundStatus, draftPlatform, effectiveSearchCities, filterValues, finishSaveBusy, finishedPartial, historyDetail, historyMode, historyRound, historyScreenBusy, interruptedRunId, locationDraft, nationalScopeConfirm, oneClickOpen, pausedRunId, pipelineBusy, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, pollRetryCount, pollTimer, profileConfirmed, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, restoredTaskHint, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resumeAnalysisPhase, resumeAnalysisRestore, resumeError, schemaRef, scrapeActionBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, uploadBusy, workflowEpoch } = state;
+  const { activeCategory, activeTaskRestored, advancedPanelsOpen, analysisReady, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityList, currentRoundStatus, draftPlatform, effectiveSearchCities, filterValues, finishSaveBusy, finishedPartial, historyDetail, historyMode, historyRound, historyScreenBusy, interruptedRunId, locationDraft, nationalScopeConfirm, oneClickOpen, pausedRunId, pipelineBusy, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, pollRetryCount, pollTimer, profileConfirmed, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, restoredTaskHint, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resumeAnalysisPhase, resumeAnalysisRestore, resumeError, schemaRef, scrapeActionBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, uploadBusy, workflowEpoch } = state;
+  const navigateStep = (step: string, options?: Parameters<DiscoveryState["navigateStep"]>[1]) => state.navigateStep(step, options);
   const { clearWorkflowState, enrichPausedSnapshot, enterScreenStep, enterSearchStep, isCompletedTaskStatus, isLoginErrorCode, loadCityCatalog, loadFilterLabels, loadLatestResult, notify, pollRecrawl, pollTask, refreshScopePreview, requireProfileConfirmed, restoreLocationsFromContext, returnToLatest, setDraftPlatform, setPipelineResult, showLoginGuide, validateProfileForScreen } = deps;
 
   /** Spec041 返工：任务状态查询一律带当前画像（后端按归属校验，跨画像按不存在处理）。 */
@@ -174,13 +175,13 @@ async function restoreRunningTask() {
       if (["failed", "error", "cancelled", "interrupted"].includes(status)) {
         phase = "failed";
         failure = data.error || "简历分析失败";
-        activeStep.value = "upload";
+        navigateStep("upload", { source: "system" });
       } else if (["completed", "done", "succeeded", "success"].includes(status)) {
         // 结果由 flow 从任务状态接回（与首次等待共用同一投影路径）。
         phase = "succeeded";
-        activeStep.value = "search";
+        navigateStep("search", { source: "system" });
       } else {
-        activeStep.value = "upload";
+        navigateStep("upload", { source: "system" });
       }
       resumeAnalysisRestore.value?.(phase, failure, taskId);
       resumeAnalysisPhase.value = phase;
@@ -259,14 +260,17 @@ async function restoreRunningTask() {
       deps.enterScreenStep();
       restoredTaskHint.value = "检测到一键任务已抓取完成，正在自动接续 AI 筛选";
       if (data.round_context) deps.restoreLocationsFromContext(data.round_context);
-      void startAiScreen({ consumeAutoScreen: true, fields: drafts, profile: profileSummary.value });
+      const flowOwnedScrape = deps.isFlowOwnedScrapeTask?.(data.scrape_task_id || data.task_id) === true;
+      if (!flowOwnedScrape) {
+        void startAiScreen({ consumeAutoScreen: true, fields: drafts, profile: profileSummary.value });
+      }
       return;
     }
     if (kind === "scrape" && deps.isCompletedTaskStatus(data.status) && !data.auto_screen) {
       scrapeTaskId.value = data.task_id;
       scrapeCompleted.value = true;
       analysisReady.value = true;
-      activeStep.value = "search";
+      navigateStep("search", { source: "system" });
       profileSummary.value = data.profile_summary || "";
       profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
         ? (data.profile_facts as Record<string, unknown>) : {};
@@ -352,7 +356,7 @@ async function restoreRunningTask() {
         interruptedRunId.value = "";
         scrapeTaskId.value = data.task_id;
         analysisReady.value = true;
-        activeStep.value = "search";
+        navigateStep("search", { source: "system" });
         restoredTaskHint.value = "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取";
         // 039（用户拍板·单一来源）：恢复出的面板与实时面板同一口径——完成/跳过/
         // 未开始/已抓从该任务真实快照补齐，不让计数行整行消失（与暂停恢复同一条路径）。
@@ -375,7 +379,7 @@ async function restoreRunningTask() {
         recrawlTaskId.value = data.task_id;
         resultLoaded.value = true;
         activeCategory.value = "uncertain";
-        activeStep.value = "results";
+        navigateStep("results", { source: "system" });
         recrawlSnapshot.value = {
           ...snapshot,
           progress: {
@@ -394,7 +398,7 @@ async function restoreRunningTask() {
       scrapeBusy.value = false;
       scrapeTaskId.value = data.task_id;
       analysisReady.value = true;
-      activeStep.value = "search";
+      navigateStep("search", { source: "system" });
       // 039（用户拍板·单一来源）：失败轮同样按真实任务快照补齐计数与失败留痕，
       // 不允许「已抓 N 个岗位」等数字随失败整行收起。
       await deps.enrichPausedSnapshot(data.task_id, snapshot, kind);
@@ -416,7 +420,7 @@ async function restoreRunningTask() {
       recrawlSnapshot.value = snapshot;
       resultLoaded.value = true;
       activeCategory.value = "uncertain";
-      activeStep.value = "results";
+      navigateStep("results", { source: "system" });
       restoredTaskHint.value = "检测到失败的重抓任务；已保留错误信息，可重新开始重抓";
       return;
     }
@@ -428,7 +432,7 @@ async function restoreRunningTask() {
         // 指向这次断点，不能只保留 pausedRunId 导致按钮进入“无任务”分支。
         scrapeTaskId.value = data.task_id;
         scrapeCompleted.value = Boolean(data.scrape_completed);
-        activeStep.value = "search";
+        navigateStep("search", { source: "system" });
         autoScreenArmed.value = Boolean(data.auto_screen);
         if (data.auto_screen_fields) {
           const autoDrafts = filterValues.value[filterPlatform];
@@ -479,7 +483,7 @@ async function restoreRunningTask() {
         recrawlTaskId.value = data.task_id;
         resultLoaded.value = true;
         activeCategory.value = "uncertain";
-        activeStep.value = "screen";
+        navigateStep("screen", { source: "system" });
       }
       // 拉 /api/task-state 拿完整计数画面（success/fail/unstarted/total）
       await deps.enrichPausedSnapshot(data.task_id, snapshot, kind);
@@ -505,7 +509,7 @@ async function restoreRunningTask() {
       scrapeBusy.value = true;
       scrapeSnapshot.value = snapshot;
       restoredTaskHint.value = "检测到抓取任务仍在后台运行，已自动接回";
-      activeStep.value = "search";
+      navigateStep("search", { source: "system" });
       autoScreenArmed.value = Boolean(data.auto_screen);
       if (data.auto_screen_fields) {
         autoScreenFields.value = Object.fromEntries(
@@ -548,7 +552,7 @@ async function restoreRunningTask() {
       resultLoaded.value = true;
       activeCategory.value = "uncertain";
       // 重抓运行中进度在 03 页展示；04 保持结果展示，用户可切回看旧结果。
-      activeStep.value = "screen";
+        navigateStep("screen", { source: "system" });
       restoredTaskHint.value = "检测到重抓任务仍在后台运行，已自动接回";
       void deps.pollRecrawl(data.task_id);
     }
@@ -666,7 +670,7 @@ async function cancelScrape() {
     const resultOutcome = await saveCancelledScrapeResult(
       deps.saveScrapedOnlySnapshot,
       activeCategory,
-      activeStep,
+      (step) => navigateStep(step, { source: "system" }),
     );
     // 后端会立刻关浏览器并标 cancelled；这里直接复位，不等下一次轮询
     scrapeBusy.value = false;
@@ -989,7 +993,7 @@ async function continueAiScreen(platform?: Platform) {
   const ctx = platform ? deps.roundFlow.roundContexts[platform] : deps.roundFlow.roundContext;
   const status = String(ctx?.status || screenSnapshot.value?.status || "");
   const isPausedResume = Boolean(pausedRunId.value) || status === "paused";
-  activeStep.value = "screen";
+  navigateStep("screen", { source: "system" });
   if (!isPausedResume) {
     await startAiScreen({
       fields: ctx?.screening_fields || filterValues.value[draftPlatform.value],
@@ -1166,7 +1170,7 @@ async function cancelPausedTask(runId: string) {
     const isScrapeRun = runId === scrapeTaskId.value;
     const previousScrapeSnapshot = scrapeSnapshot.value;
     const resultOutcome = isScrapeRun
-      ? await saveCancelledScrapeResult(deps.saveScrapedOnlySnapshot, activeCategory, activeStep)
+      ? await saveCancelledScrapeResult(deps.saveScrapedOnlySnapshot, activeCategory, (step) => navigateStep(step, { source: "system" }))
       : "failed" as const;
     scrapeBusy.value = false;
     screenBusy.value = false;

@@ -74,6 +74,7 @@ from webui.store_jobs import StoreJobsMixin
 from webui.store_tasks import StoreTasksMixin
 from webui.store_profiles import StoreProfilesMixin
 from webui.store_runs import StoreRunsMixin
+from webui.store_flow_runs import StoreFlowRunIdentityMixin
 from webui.store_scrape_runs import StoreScrapeRunsMixin
 from webui.store_job_catalog import StoreJobCatalogMixin
 from webui.store_tuning_experiments import StoreTuningExperimentsMixin
@@ -81,6 +82,7 @@ from webui.store_tuning_rounds import StoreTuningRoundsMixin
 from webui.store_tuning_reports import StoreTuningReportsMixin
 from webui.store_whitebox import StoreWhiteboxMixin
 from webui.store_search_packages import StoreSearchPackagesMixin
+from webui.store_flow import FlowConflictError, StoreFlowMixin
 
 from webui.logging_setup import get_logger
 
@@ -112,6 +114,7 @@ class TaskStore(
     StoreTasksMixin,
     StoreProfilesMixin,
     StoreRunsMixin,
+    StoreFlowRunIdentityMixin,
     StoreScrapeRunsMixin,
     StoreJobCatalogMixin,
     StoreTuningExperimentsMixin,
@@ -119,6 +122,7 @@ class TaskStore(
     StoreTuningReportsMixin,
     StoreWhiteboxMixin,
     StoreSearchPackagesMixin,
+    StoreFlowMixin,
     ResultHistoryStoreMixin,
     ScrapeOnlyStoreMixin,
     StoreMigrationsMixin,

@@ -18,7 +18,7 @@ import { hydratePage2Draft } from "./composables/useSearchDraftSlots";
 import DiscoveryView from "./views/DiscoveryView.vue";
 import { apiRequest, currentRuntimeMode, errorMessage, GITHUB_REPO_URL, initializeSession, openExternalLink, updateApi, type UpdateCheckResult } from "./api";
 import { safeCanonicalUrl } from "./jobFeedback";
-import type { RoundStatusPayload } from "./discovery";
+import { platformLabel, type RoundStatusPayload } from "./discovery";
 import { useTheme } from "./composables/useTheme";
 import ThemePickerOptions from "./themes/ThemePickerOptions.vue";
 import KaleidoField from "./themes/kaleido/KaleidoField.vue";
@@ -69,7 +69,7 @@ function handleIslandNavigate(target: CapsuleTarget) {
 const pageTitle = computed(() => {
   if (roundStatus.value?.phase === "judged") return "Career Scout · 职位工作台";
   if (roundStatus.value?.phase === "scraping" || roundStatus.value?.phase === "screening") {
-    const label = roundStatus.value.platform === "zhilian" ? "智联" : "BOSS";
+    const label = platformLabel(roundStatus.value.platform);
     return `Career Scout · ${label}工作台`;
   }
   return "Career Scout 工作台";
@@ -894,7 +894,6 @@ function handleIslandExpand() {
     <EnvCheckDialog
       :open="envCheckOpen"
       @close="envCheckOpen = false"
-      @open-browser-accounts="browserAccountsOpen = true; envCheckOpen = false"
       @open-ai-settings="aiSettingsOpen = true; envCheckOpen = false"
     />
     <UpdateDialog

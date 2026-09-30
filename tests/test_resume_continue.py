@@ -1,8 +1,10 @@
 import pathlib
 import tempfile
+import threading
 import unittest
 from unittest import mock
 from types import SimpleNamespace
+from concurrent.futures import CancelledError
 
 from webui.app import create_app
 from webui.resume_identity import (
@@ -277,6 +279,403 @@ class ResumeContinueApiTests(unittest.TestCase):
         self.store.update_screening_run(
             run_id, status="paused", current_stage="scrape",
             error_code=error_code,
+        )
+
+    def _seed_flow_scrape_paused(self, run_id, platform="zhilian"):
+        profile = self.store.create_profile(f"Flow resume {run_id}")
+        flow = self.store.create_flow(
+            profile_id=profile["id"], selection=platform,
+            start_key=f"flow-resume-{run_id}",
+            confirmed_filters={platform: {}},
+        )
+        track = flow["tracks"][0]
+        params = {
+            "platform": platform,
+            "flow_id": flow["id"],
+            "track_id": track["id"],
+            "script_params": {"keyword": "Python", "city": ["上海"], "pages": 1},
+            "browser_account": "a",
+            "cdp_port": 9223,
+            "profile_key": f"{platform}:a",
+        }
+        self.store.create_screening_run(
+            run_id, profile_id=profile["id"], source_count=1,
+            execution_params=params,
+        )
+        self.store.create_scrape_search_run(
+            run_id, profile["id"], platform=platform,
+            flow_id=flow["id"], track_id=track["id"],
+        )
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape",
+        )
+        self.store.save_checkpoint(run_id, "scrape", [])
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="scrape",
+            error_code="source_login_required",
+        )
+        self.store.update_flow_track(
+            flow["id"], platform, profile_id=profile["id"],
+            status="running", stage="scrape", scrape_run_id=run_id,
+        )
+        self.store.update_flow_track(
+            flow["id"], platform, profile_id=profile["id"],
+            status="paused", stage="scrape",
+        )
+        return flow, track, profile
+
+    def _seed_flow_ai_paused(self, run_id, platform="zhilian"):
+        """Create an AI Flow run whose source is already durably complete."""
+        profile = self.store.create_profile(f"Flow AI resume {run_id}")
+        flow = self.store.create_flow(
+            profile_id=profile["id"], selection=platform,
+            start_key=f"flow-ai-resume-{run_id}",
+            confirmed_filters={platform: {}},
+        )
+        track = flow["tracks"][0]
+        scrape_id = f"{run_id}-scrape"
+        self.store.create_screening_run(
+            scrape_id, profile_id=profile["id"], source_count=1,
+            execution_params={
+                "platform": platform, "flow_id": flow["id"],
+                "track_id": track["id"],
+            },
+        )
+        self.store.create_scrape_search_run(
+            scrape_id, profile["id"], platform=platform,
+            flow_id=flow["id"], track_id=track["id"],
+        )
+        self.store.save_scrape_combo_result(
+            scrape_id, "前端|上海",
+            [{"job_id": "job-1", "title": "前端工程师", "platform_job_id": "z-1"}],
+            ["前端|上海"],
+        )
+        self.store.update_screening_run(
+            scrape_id, status="succeeded", current_stage="scrape",
+        )
+        ai_params = {
+            "platform": platform, "flow_id": flow["id"],
+            "track_id": track["id"], "scrape_task_id": scrape_id,
+            "profile_summary": "前端工程师", "browser_account": "a",
+            "cdp_port": 9223, "profile_key": f"{platform}:a",
+            "execution_config": {},
+        }
+        self.store.create_screening_run(
+            run_id, profile_id=profile["id"], source_count=1,
+            frozen_filters={"city": ["上海"]}, execution_params=ai_params,
+        )
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="ai_rough",
+        )
+        self.store.update_screening_run(
+            run_id, status="paused", error_code="source_cdp_unavailable",
+            current_stage="ai_rough",
+        )
+        self.store.update_flow_track(
+            flow["id"], platform, profile_id=profile["id"],
+            status="running", stage="ai", scrape_run_id=scrape_id,
+            screen_run_id=run_id,
+        )
+        self.store.update_flow_track(
+            flow["id"], platform, profile_id=profile["id"],
+            status="paused", stage="ai",
+        )
+        return flow, track, profile, scrape_id
+
+    def test_flow_resume_cancelled_future_during_rollback_stays_paused(self):
+        """Rollback cancellation must not invoke the failure closure callback."""
+        run_id = "flow-resume-cancelled-future-rollback"
+        flow, _track, profile = self._seed_flow_scrape_paused(run_id)
+        context = self.app.config["PIPELINE_CONTEXT"]
+        context.tasks[run_id] = {
+            "kind": "scrape", "status": "paused", "result": None,
+        }
+
+        class CancelOnRollbackFuture:
+            def __init__(self):
+                self.callback = None
+                self.cancel_calls = 0
+
+            def add_done_callback(self, callback):
+                self.callback = callback
+
+            def result(self):
+                raise CancelledError()
+
+            def cancel(self):
+                self.cancel_calls += 1
+                if self.callback is not None:
+                    self.callback(self)
+                return True
+
+        future = CancelOnRollbackFuture()
+        with mock.patch.object(context, "activate_run_browser"), \
+                mock.patch.object(context, "check_resume_block", return_value=(True, "", "")), \
+                mock.patch(
+                    "webui.exec_search_resume.submit_platform_task",
+                    return_value=future,
+                ), mock.patch.object(
+                    self.store, "claim_paused_screening_run", return_value=False,
+                ):
+            response = self.client.post(
+                f"/api/execute-search/continue/{run_id}"
+            )
+
+        self.assertEqual(response.status_code, 500, response.get_json())
+        self.assertEqual(future.cancel_calls, 1)
+        self.assertEqual(
+            self.store.get_screening_run(run_id)["status"], "paused",
+        )
+        self.assertEqual(
+            self.store.get_search_run(run_id)["status"], "paused",
+        )
+        self.assertEqual(
+            self.store.get_flow(flow["id"], profile_id=profile["id"])
+            ["tracks"][0]["status"], "paused",
+        )
+
+    def test_flow_ai_continue_syncs_before_gate_and_rolls_back_without_worker(self):
+        """AI continuation must not release its worker before Track sync."""
+        run_id = "flow-ai-continue-gate-order"
+        flow, _track, profile, _scrape_id = self._seed_flow_ai_paused(run_id)
+        context = self.app.config["PIPELINE_CONTEXT"]
+        context.tasks[run_id] = {
+            "kind": "ai_screen", "status": "paused", "result": None,
+        }
+        submitted = {}
+        worker_started = threading.Event()
+
+        class DeferredFuture:
+            def __init__(self):
+                self.callbacks = []
+
+            def add_done_callback(self, callback):
+                self.callbacks.append(callback)
+
+            def cancel(self):
+                return True
+
+        def submit(_ctx, _flow_id, _platform, worker, *args, **kwargs):
+            future = DeferredFuture()
+            submitted["future"] = future
+            submitted["thread"] = threading.Thread(
+                target=worker, args=args, kwargs=kwargs, daemon=True,
+            )
+            submitted["thread"].start()
+            return future
+
+        def fail_sync(*_args, **_kwargs):
+            from webui.flow_task_coordinator import FlowTaskOperationError
+
+            raise FlowTaskOperationError("Track sync failed")
+
+        def run_ai(*_args, **_kwargs):
+            worker_started.set()
+
+        with mock.patch.object(context, "activate_run_browser"), \
+                mock.patch.object(context, "check_resume_block", return_value=(True, "", "")), \
+                mock.patch("webui.task_continue_api.submit_platform_task", side_effect=submit), \
+                mock.patch("webui.flow_task_coordinator.sync_flow_track_for_run", side_effect=fail_sync), \
+                mock.patch.object(context, "run_ai_screen_task", side_effect=run_ai), \
+                mock.patch("webui.task_continue_api.attach_ai_future_failure") as attach:
+            response = self.client.post(f"/api/task/continue/{run_id}")
+
+        thread = submitted.get("thread")
+        if thread is not None:
+            thread.join(timeout=2)
+        self.assertEqual(response.status_code, 503, response.get_json())
+        self.assertFalse(worker_started.is_set())
+        attach.assert_not_called()
+        self.assertEqual(
+            self.store.get_screening_run(run_id)["status"], "paused",
+        )
+        self.assertEqual(
+            self.store.get_flow(flow["id"], profile_id=profile["id"])
+            ["tracks"][0]["status"], "paused",
+        )
+
+    def test_flow_ai_resume_normalizes_ai_substage_for_both_platforms(self):
+        """AI sub-stages must keep Flow Track on the screen lane, not scrape."""
+        context = self.app.config["PIPELINE_CONTEXT"]
+        for platform in ("boss", "zhilian"):
+            run_id = f"flow-ai-substage-{platform}"
+            flow, _track, profile, _scrape_id = self._seed_flow_ai_paused(
+                run_id, platform=platform,
+            )
+            # Exercise a refresh/restart: the durable Flow binding is the only
+            # source of the target Track and platform identity.
+            context.tasks.pop(run_id, None)
+            future = mock.Mock()
+            with mock.patch.object(context, "activate_run_browser"), \
+                    mock.patch.object(
+                        context, "check_resume_block", return_value=(True, "", ""),
+                    ), mock.patch(
+                        "webui.task_continue_api.submit_platform_task",
+                        return_value=future,
+                    ), mock.patch(
+                        "webui.task_continue_api.attach_ai_future_failure",
+                    ):
+                response = self.client.post(
+                    f"/api/task/continue/{run_id}"
+                )
+
+            self.assertEqual(response.status_code, 200, response.get_json())
+            current = self.store.get_flow(flow["id"], profile_id=profile["id"])
+            current_track = current["tracks"][0]
+            self.assertEqual(current_track["status"], "running")
+            self.assertEqual(current_track["stage"], "ai")
+            self.assertEqual(current_track["screen_run_id"], run_id)
+            self.assertNotEqual(current_track["scrape_run_id"], run_id)
+
+    def test_flow_bound_ai_scrape_stage_uses_screen_binding_for_pause_retry_resume(self):
+        """A hard-stopped AI run must stay on the AI lane after a restart.
+
+        ``current_stage='scrape'`` is a worker checkpoint detail here, not the
+        durable lane identity.  The Track's ``screen_run_id`` must therefore
+        control pause/retry publication and the post-refresh continuation.
+        """
+        from webui.flow_task_coordinator import FlowTaskOperationError
+
+        context = self.app.config["PIPELINE_CONTEXT"]
+        for platform in ("boss", "zhilian"):
+            with self.subTest(platform=platform):
+                run_id = f"flow-ai-hard-stop-{platform}"
+                flow, _track, profile, _scrape_id = self._seed_flow_ai_paused(
+                    run_id, platform=platform,
+                )
+                self.store.update_screening_run(
+                    run_id, status="running", current_stage="scrape",
+                    error_code=None, error_reason=None,
+                )
+                self.store.update_flow_track(
+                    flow["id"], platform, profile_id=profile["id"],
+                    status="running", stage="scrape",
+                )
+                stop_event = threading.Event()
+                task = {
+                    # Deliberately retain the stale scrape declaration too:
+                    # durable screen_run_id is the source of truth.
+                    "kind": "scrape", "status": "running",
+                    "stop_event": stop_event,
+                }
+                context.tasks[run_id] = task
+                original_update = self.store.update_flow_track
+                writes = {"count": 0}
+
+                def fail_first_track_write(*args, **kwargs):
+                    writes["count"] += 1
+                    if writes["count"] == 1:
+                        raise FlowTaskOperationError("track write unavailable")
+                    return original_update(*args, **kwargs)
+
+                with mock.patch.object(
+                    self.store, "update_flow_track",
+                    side_effect=fail_first_track_write,
+                ):
+                    first_pause = self.client.post(
+                        f"/api/task/pause/{run_id}",
+                    )
+                    self.assertEqual(first_pause.status_code, 503)
+                    self.assertTrue(stop_event.is_set())
+                    # The worker has now reached its safe pause boundary;
+                    # retry must publish the durable Track fact.
+                    task["status"] = "paused"
+                    self.store.update_screening_run(
+                        run_id, status="paused", current_stage="scrape",
+                        error_code="user_paused",
+                    )
+                    retry_pause = self.client.post(
+                        f"/api/task/pause/{run_id}",
+                    )
+
+                self.assertEqual(retry_pause.status_code, 200)
+                paused_track = self.store.get_flow(
+                    flow["id"], profile_id=profile["id"],
+                )["tracks"][0]
+                self.assertEqual(paused_track["status"], "paused")
+                self.assertEqual(paused_track["stage"], "ai")
+
+                # Refresh/restart: no process-local task remains.  The resume
+                # must still select the AI lane and never invoke source crawl.
+                context.tasks.pop(run_id, None)
+                future = mock.Mock()
+                with mock.patch.object(context, "activate_run_browser"), \
+                        mock.patch.object(
+                            context, "check_resume_block",
+                            return_value=(True, "", ""),
+                        ), mock.patch(
+                            "webui.task_continue_api.submit_platform_task",
+                            return_value=future,
+                        ) as submit, mock.patch(
+                            "webui.task_continue_api.attach_ai_future_failure",
+                        ), mock.patch.object(
+                            context, "continue_execute_search",
+                            side_effect=AssertionError("AI resume ran scrape lane"),
+                        ):
+                    response = self.client.post(
+                        f"/api/task/continue/{run_id}",
+                    )
+
+                self.assertEqual(response.status_code, 200, response.get_json())
+                self.assertEqual(
+                    submit.call_args.args[1:3], (flow["id"], platform),
+                )
+                resumed_track = self.store.get_flow(
+                    flow["id"], profile_id=profile["id"],
+                )["tracks"][0]
+                self.assertEqual(resumed_track["status"], "running")
+                self.assertEqual(resumed_track["stage"], "ai")
+                self.assertEqual(resumed_track["screen_run_id"], run_id)
+
+    def test_flow_resume_uses_durable_zhilian_lane_and_publishes_track_running(self):
+        run_id = "flow-zhilian-resume-lane"
+        flow, _track, profile = self._seed_flow_scrape_paused(run_id)
+        context = self.app.config["PIPELINE_CONTEXT"]
+        context.tasks[run_id] = {
+            "kind": "scrape", "status": "paused", "result": None,
+        }
+        future = mock.Mock()
+        with mock.patch.object(context, "activate_run_browser"), \
+                mock.patch.object(context, "check_resume_block", return_value=(True, "", "")), \
+                mock.patch(
+                    "webui.exec_search_resume.submit_platform_task",
+                    return_value=future,
+                ) as submit, \
+                mock.patch("webui.exec_search_resume.attach_scrape_future_failure"):
+            response = self.client.post(f"/api/execute-search/continue/{run_id}")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(submit.call_args.args[1:3], (flow["id"], "zhilian"))
+        self.assertEqual(
+            self.store.get_flow(flow["id"], profile_id=profile["id"])
+            ["tracks"][0]["status"],
+            "running",
+        )
+
+    def test_flow_resume_submit_failure_restores_paused_track_and_run(self):
+        run_id = "flow-zhilian-resume-failure"
+        flow, _track, profile = self._seed_flow_scrape_paused(run_id)
+        context = self.app.config["PIPELINE_CONTEXT"]
+        context.tasks[run_id] = {
+            "kind": "scrape", "status": "paused", "result": None,
+        }
+        with mock.patch.object(context, "activate_run_browser"), \
+                mock.patch.object(context, "check_resume_block", return_value=(True, "", "")), \
+                mock.patch(
+                    "webui.exec_search_resume.submit_platform_task",
+                    side_effect=RuntimeError("lane unavailable"),
+                ), mock.patch(
+                    "webui.exec_search_resume.mark_scrape_submission_failed",
+                ), mock.patch("webui.exec_search_resume.attach_scrape_future_failure"):
+            response = self.client.post(f"/api/execute-search/continue/{run_id}")
+
+        self.assertEqual(response.status_code, 500, response.get_json())
+        self.assertEqual(self.store.get_screening_run(run_id)["status"], "paused")
+        self.assertEqual(self.store.get_search_run(run_id)["status"], "paused")
+        self.assertEqual(
+            self.store.get_flow(flow["id"], profile_id=profile["id"])
+            ["tracks"][0]["status"],
+            "paused",
         )
 
     def test_scrape_continue_corrupt_checkpoint_finishes_failed_without_worker(self):

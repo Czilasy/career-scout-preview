@@ -272,6 +272,7 @@ def delete_browser_account(account_id: str, path: str | os.PathLike[str] | None 
 
 
 _ACTIVE_CDP_DATA_DIR: str | None = None
+_CDP_THREAD_STATE = threading.local()
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +321,10 @@ def set_active_cdp_data_dir(account_or_dir: str) -> None:
         _ACTIVE_CDP_DATA_DIR = os.path.abspath(os.path.expanduser(account))
     else:
         _ACTIVE_CDP_DATA_DIR = None
+    # A parallel Flow has one executor lane per platform.  Keep the legacy
+    # process-wide mirror for old callers, but resolve Chrome paths from the
+    # worker's frozen identity so BOSS and Zhilian cannot race each other.
+    _CDP_THREAD_STATE.profile_dir = _ACTIVE_CDP_DATA_DIR
     # 门面曾直接持有该全局（外部以 webui.pipeline_exec._ACTIVE_CDP_DATA_DIR
     # 读写），拆分后权威值在本模块；同步回写门面命名空间保持可 patch 语义。
     _facade = sys.modules.get("webui.pipeline_exec")
@@ -335,6 +340,9 @@ def _cdp_data_dir() -> str:
     命名空间——启动、关闭、profile 校验共用本漏斗，保证三者指向一致。
     """
     from webui import pipeline_exec as _facade
+    thread_profile_dir = getattr(_CDP_THREAD_STATE, "profile_dir", None)
+    if thread_profile_dir:
+        return effective_data_dir(thread_profile_dir, browser_data_dir_key())
     if _ACTIVE_CDP_DATA_DIR:
         return effective_data_dir(_ACTIVE_CDP_DATA_DIR, browser_data_dir_key())
     accounts = load_browser_accounts()

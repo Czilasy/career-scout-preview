@@ -69,9 +69,6 @@ CDP_ABOUT_BLANK = "about:blank"
 HIDDEN_DEFINE_JS = "Object.defineProperty(document, 'hidden', {get: () => false});"
 
 
-MSG_BOSS_LOGIN_STATUS = "BOSS 登录状态"
-
-
 MSG_DEDICATED_BROWSER_STARTED = "专用浏览器已启动"
 
 

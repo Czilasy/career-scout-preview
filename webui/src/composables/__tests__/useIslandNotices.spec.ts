@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ref } from "vue";
 import { createIslandNotices } from "../useIslandNotices";
+import { useDiscoveryState } from "../useDiscoveryState";
 import type { CapsuleStatusPayload } from "../useDiscoveryState";
 
 function makeStatus(capsule: CapsuleStatusPayload["capsule"], overrides: Partial<CapsuleStatusPayload> = {}): CapsuleStatusPayload {
@@ -345,5 +346,96 @@ describe("useIslandNotices — 状态跃迁派生通知", () => {
     // reset 后即便直接给一个 completed 也不应产通知（prev=null 初始观察语义）
     status.value = makeStatus({ state: "completed", platform: "boss", results: { matched: 9, pending: 0 } });
     expect(api.notices.value).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SPEC 046 第五轮：展开面板里那一行的标题。
+// 真实浏览器现场——AI 筛选被服务重启打断（轨道 status=interrupted）时，同一屏的阶段卡
+// 与顶栏胶囊都写「已中断」，唯独通知行的标题按 kind 硬映射成「任务已暂停」，
+// 同一行里标题与 detail 两个说法。kind 只有一条暂停通道（去重、落点、未读都挂它），
+// 性质必须由生产端一并传下来，行标题与胶囊共用同一份口径，不在此判第二次。
+// ---------------------------------------------------------------------------
+describe("useIslandNotices — 暂停族行标题与事实一致", () => {
+  it("被打断的暂停通道：行标题说已中断，与 detail 不打架", () => {
+    const status = ref<CapsuleStatusPayload | null>(
+      makeStatus({ state: "running", platform: "boss", progress: { phase: "screening", done: 5 } }),
+    );
+    const api = createIslandNotices(status);
+    status.value = makeStatus({
+      state: "attention", platform: "boss",
+      attention: {
+        kind: "paused", pausedFact: "interrupted",
+        message: "任务已中断，请处理后继续",
+      },
+    });
+    const row = api.notices.value[0];
+    // 行为语义不变：kind / 落点 / 未读照旧。
+    expect(row.kind).toBe("paused");
+    expect(row.target).toBe("attention");
+    expect(api.unreadCount.value).toBe(1);
+    expect(row.title).toContain("已中断");
+    expect(row.title).not.toContain("已暂停");
+    expect(row.detail).toContain("已中断");
+    expect(row.detail).not.toContain("已暂停");
+  });
+
+  it("可恢复暂停：行标题仍说已暂停，不被中断口径带跑", () => {
+    const status = ref<CapsuleStatusPayload | null>(
+      makeStatus({ state: "running", platform: "boss", progress: { phase: "screening", done: 5 } }),
+    );
+    const api = createIslandNotices(status);
+    status.value = makeStatus({
+      state: "attention", platform: "boss",
+      attention: {
+        kind: "paused", pausedFact: "paused",
+        message: "任务已暂停，请处理后继续",
+      },
+    });
+    const row = api.notices.value[0];
+    expect(row.kind).toBe("paused");
+    expect(row.title).toContain("已暂停");
+    expect(row.title).not.toContain("已中断");
+    expect(row.detail).toContain("已暂停");
+  });
+
+  it("现场回归：胶囊判定为服务重启打断时，行标题跟着说已中断", () => {
+    const state = useDiscoveryState({ profileId: "notice-paused-family" }, () => {});
+    state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    const status = ref<CapsuleStatusPayload | null>(
+      makeStatus({ state: "running", platform: "boss", progress: { phase: "screening", done: 5 } }),
+    );
+    const api = createIslandNotices(status);
+
+    state.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
+    const payload = state.roundStatusPayload.value;
+    expect(payload?.capsule.state).toBe("attention");
+    status.value = payload;
+
+    const row = api.notices.value[0];
+    expect(row.kind).toBe("paused");
+    expect(row.title).toContain("已中断");
+    expect(row.title).not.toContain("已暂停");
+    expect(row.detail).toContain("已中断");
+    expect(row.detail).not.toContain("已暂停");
+  });
+
+  it("现场回归：用户主动暂停的轮次，行标题仍说已暂停", () => {
+    const state = useDiscoveryState({ profileId: "notice-paused-user" }, () => {});
+    const status = ref<CapsuleStatusPayload | null>(
+      makeStatus({ state: "running", platform: "boss", progress: { phase: "screening", done: 5 } }),
+    );
+    const api = createIslandNotices(status);
+
+    state.screenSnapshot.value = { status: "paused", progress: {}, logs: [] };
+    const payload = state.roundStatusPayload.value;
+    expect(payload?.capsule.state).toBe("attention");
+    status.value = payload;
+
+    const row = api.notices.value[0];
+    expect(row.kind).toBe("paused");
+    expect(row.title).toContain("已暂停");
+    expect(row.title).not.toContain("已中断");
+    expect(row.detail).toContain("已暂停");
   });
 });

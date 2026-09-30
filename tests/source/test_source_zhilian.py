@@ -3,6 +3,7 @@ import unittest
 from unittest import mock
 
 from scripts.zhilian import cdp as zhilian_cdp
+from scripts.zhilian import detail as zhilian_detail
 from scripts.zhilian import search as zhilian_search
 from webui.source import (
     SourceCircuitBreaker,
@@ -118,6 +119,73 @@ class ZhilianPageReadinessTests(unittest.TestCase):
                 "a", "zhilian", 9223, preflight=lambda: False,
             )
         self.assertFalse(ready)
+
+
+class ZhilianCdpCloseTests(unittest.TestCase):
+    def test_close_accepts_empty_or_text_response_without_json_decode(self):
+        """CDP /json/close 是清理端点，不应要求 JSON 响应。"""
+        class Response:
+            status = 204
+
+            class Headers:
+                def get_content_type(self):
+                    return "text/plain"
+
+            headers = Headers()
+
+            def __init__(self, body):
+                self._body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return self._body
+
+        with mock.patch.object(
+            zhilian_cdp.urllib.request, "urlopen",
+            side_effect=[Response(b""), Response(b"not-json")],
+        ), mock.patch.object(
+            zhilian_cdp.json, "loads", side_effect=AssertionError("must not parse close body"),
+        ), mock.patch.object(zhilian_cdp._logger, "debug") as debug:
+            zhilian_cdp._close_background_tab(9223, "target-1")
+            zhilian_cdp._close_background_tab(9223, "target-2")
+
+        diagnostic = " ".join(str(call.args[0]) for call in debug.call_args_list)
+        self.assertIn("status=204", diagnostic)
+        self.assertIn("content_type=text/plain", diagnostic)
+        self.assertIn("body_len=0", diagnostic)
+        self.assertIn("body_len=8", diagnostic)
+
+
+class ZhilianDetailDiagnosticTests(unittest.TestCase):
+    def _scrape(self, value):
+        job = {
+            "platform_job_id": "job-1",
+            "canonical_url": "https://www.zhaopin.com/jobdetail/job-1.htm",
+        }
+        with mock.patch.object(zhilian_detail, "_navigate"), \
+                mock.patch.object(zhilian_detail, "_wait_expression", return_value=True), \
+                mock.patch.object(zhilian_detail, "_evaluate", return_value=value):
+            return zhilian_detail._scrape_detail_on_ws(object(), job)
+
+    def test_invalid_output_has_stable_value_non_dict_reason(self):
+        signal, detail = self._scrape([])
+        self.assertEqual(signal, "invalid_output")
+        self.assertEqual(detail.get("_failure_reason"), "value_non_dict")
+
+    def test_invalid_output_has_stable_id_mismatch_reason(self):
+        signal, detail = self._scrape({"number": "other", "jd": "jd"})
+        self.assertEqual(signal, "invalid_output")
+        self.assertEqual(detail.get("_failure_reason"), "id_mismatch")
+
+    def test_invalid_output_has_stable_jd_missing_reason(self):
+        signal, detail = self._scrape({"number": "job-1", "jd": ""})
+        self.assertEqual(signal, "invalid_output")
+        self.assertEqual(detail.get("_failure_reason"), "jd_missing")
 
 
 # ===========================================================================
@@ -626,7 +694,9 @@ class ZhilianCdpSourceFetchDetailTests(unittest.TestCase):
     def test_fetch_detail_returns_invalid_output_on_parse_failure(self):
         source = ZhilianCdpSource(
             browser_account="a", cdp_port=9223,
-            detail_runner=lambda job, **kw: _fake_detail(signal="invalid_output"),
+            detail_runner=lambda job, **kw: (
+                "invalid_output", {"_failure_reason": "jd_missing"},
+            ),
         )
         outcome = source.fetch_detail({
             "platform": "zhilian",
@@ -635,6 +705,7 @@ class ZhilianCdpSourceFetchDetailTests(unittest.TestCase):
         })
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.failed_code, "source_invalid_output")
+        self.assertIn("reason=jd_missing", outcome.safe_log)
 
     def test_fetch_detail_returns_timeout(self):
         source = ZhilianCdpSource(
@@ -1118,6 +1189,52 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
         self.assertTrue(all(r.ok for r in results.values()))
         self.assertEqual(done, [1, 2, 3])
 
+    def test_batch_parallel_keeps_event_callback_separate_from_numeric_progress(self):
+        """事件心跳无参、条级进度有参，二者不得混用。"""
+        callbacks = []
+
+        def batch_runner(list_data, **kw):
+            callbacks.append(kw["event_callback"])
+            kw["event_callback"]()
+            jobs = list_data.get("jobs", [])
+            return [("ok", {"jd": "jd"}) for _ in jobs], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [{
+            "platform": "zhilian", "platform_job_id": "j0",
+            "canonical_url": "https://www.zhaopin.com/jobdetail/j0.htm",
+        }]
+        events = []
+        done = []
+        results = source.fetch_details_batch(
+            jobs, tab_pool_size=2, event_callback=lambda: events.append("event"),
+            on_item_done=done.append,
+        )
+
+        self.assertTrue(results["j0"].ok)
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(events, ["event"])
+        self.assertEqual(done, [1])
+
+    def test_batch_invalid_detail_keeps_safe_subreason(self):
+        def batch_runner(list_data, **_kw):
+            return [("invalid_output", {"_failure_reason": "id_mismatch"})], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        result = source.fetch_details_batch([{
+            "platform": "zhilian", "platform_job_id": "j0",
+            "canonical_url": "https://www.zhaopin.com/jobdetail/j0.htm",
+        }], tab_pool_size=2)["j0"]
+
+        self.assertEqual(result.failed_code, "source_invalid_output")
+        self.assertIn("reason=id_mismatch", result.safe_log)
+
     def test_batch_reports_item_done_after_each_job(self):
         """智联串行逐条抓取必须逐条回调 on_item_done，供前端实时进度。
 
@@ -1188,6 +1305,76 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
         self.assertFalse(results["j1"].ok)
         self.assertEqual(results["j1"].failed_code, "source_invalid_output")
         self.assertEqual([j["platform_job_id"] for j in runner_inputs[0]], ["j0", "j2"])
+
+    def test_batch_parallel_item_done_is_monotonic_when_invalid_item_precedes_valid_items(self):
+        """预校验失败项先完成时，条级进度仍按完成数单调递增。"""
+        def batch_runner(list_data, **_kw):
+            return [("ok", {"jd": f"jd-{job['platform_job_id']}"})
+                    for job in list_data.get("jobs", [])], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": "j0",
+             "canonical_url": "https://www.zhaopin.com/jobdetail/j0.htm"},
+            {"platform": "zhilian", "platform_job_id": "j1"},
+            {"platform": "zhilian", "platform_job_id": "j2",
+             "canonical_url": "https://www.zhaopin.com/jobdetail/j2.htm"},
+        ]
+        done = []
+        results = source.fetch_details_batch(jobs, tab_pool_size=2, on_item_done=done.append)
+
+        self.assertEqual(done, [1, 2, 3])
+        self.assertEqual(results["j0"].detail["jd"], "jd-j0")
+        self.assertFalse(results["j1"].ok)
+        self.assertEqual(results["j2"].detail["jd"], "jd-j2")
+
+    def test_batch_parallel_item_done_is_monotonic_when_duplicate_item_precedes_valid_item(self):
+        """重复岗位被隔离后，剩余并发结果仍不倒退进度。"""
+        def batch_runner(list_data, **_kw):
+            return [("ok", {"jd": f"jd-{job['platform_job_id']}"})
+                    for job in list_data.get("jobs", [])], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        duplicate_url = "https://www.zhaopin.com/jobdetail/same.htm"
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": "j0", "canonical_url": duplicate_url},
+            {"platform": "zhilian", "platform_job_id": "j1", "canonical_url": duplicate_url},
+            {"platform": "zhilian", "platform_job_id": "j2",
+             "canonical_url": "https://www.zhaopin.com/jobdetail/j2.htm"},
+        ]
+        done = []
+        results = source.fetch_details_batch(jobs, tab_pool_size=2, on_item_done=done.append)
+
+        self.assertEqual(done, [1, 2, 3])
+        self.assertTrue(results["j0"].ok)
+        self.assertFalse(results["j1"].ok)
+        self.assertTrue(results["j2"].ok)
+
+    def test_batch_parallel_item_done_reaches_total_when_runner_raises(self):
+        """并发 runner 异常转为逐项失败时，进度仍覆盖全部输入。"""
+        def batch_runner(_list_data, **_kw):
+            raise RuntimeError("runner failed")
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(3)
+        ]
+        done = []
+        results = source.fetch_details_batch(jobs, tab_pool_size=2, on_item_done=done.append)
+
+        self.assertEqual(done, [1, 2, 3])
+        self.assertEqual(len(results), 3)
 
     def test_batch_parallel_duplicate_url_isolated(self):
         """并行分支重复 canonical_url 的 job 单独判失败，不触发错位。"""

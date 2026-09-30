@@ -30,6 +30,7 @@ import type {
 import { deriveTarget, type NavInput } from "../composables/useIslandNavigation";
 import type { CapsuleTarget as SharedCapsuleTarget, IntegrityConclusion } from "../types";
 import { useIslandValueTransition } from "../composables/useIslandValueTransition";
+import { platformLabel as platformDisplayName } from "../discovery";
 import IslandNoticePanel from "./IslandNoticePanel.vue";
 
 // 对外保留旧的两种通知目标作为兼容适配；真正的落点仍由新目标派生，
@@ -89,9 +90,8 @@ const liveTotal = computed(() => mainLaneState.value.total);
 const liveCounts = computed(() => mainLaneState.value.counts);
 const glow = computed(() => mainLaneState.value.glow ?? "none");
 
-const platformLabel = computed(() =>
-  capsule.value.platform === "zhilian" ? "智联" : "BOSS",
-);
+// 平台显示名走唯一权威：未登记的身份给「其它平台」，不默认成 BOSS。
+const platformLabel = computed(() => platformDisplayName(capsule.value.platform));
 
 const isScrapedPhase = computed(() => props.status?.phase === "scraped");
 const navigationInput = computed<NavInput>(() => {

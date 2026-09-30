@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Check, LoaderCircle, ScrollText, Trash2, X } from "@lucide/vue";
-import { formatHistoryTime, type HistoryRoundItem } from "../composables/resultHistory";
+import { formatHistoryTime, type FlowHistoryItem, type FlowHistoryTrack, type HistoryRoundItem } from "../composables/resultHistory";
 import type { HistoryRoundDetail } from "../composables/resultHistory";
-import { historyStatusLabel } from "../discovery";
+import { historyStatusLabel, platformLabel } from "../discovery";
 
 const props = defineProps<{
   open: boolean;
@@ -13,6 +13,7 @@ const props = defineProps<{
   deleting: boolean;
   deleteTarget: HistoryRoundItem | null;
   detail?: HistoryRoundDetail | null;
+  flowItems?: FlowHistoryItem[];
 }>();
 
 const emit = defineEmits<{
@@ -29,15 +30,111 @@ const panelEl = ref<HTMLElement | null>(null);
 let previousFocus: HTMLElement | null = null;
 
 const activePlatform = ref<"boss" | "zhilian">("boss");
-const bossItems = computed(() => props.items.filter((item) => item.platform === "boss"));
-const zhilianItems = computed(() => props.items.filter((item) => item.platform === "zhilian"));
+// Flow 卡片视图只承载有 durable flow 身份的真实流程；后端会把每一条旧结果轮
+// 合成为 legacy Flow（flowItems 因此恒非空），legacy 轮必须继续走平铺轮次列表，
+// 否则 043 的「删除轮次」「查看运行日志」与计数明细会在界面上整块消失。
+const flowCardItems = computed(() => (props.flowItems || []).filter((flow) => flow.legacy !== true));
+// 真实流程已经拥有结果轮的轮次不再重复铺一份平铺行。
+const flowOwnedRunIds = computed(() => new Set(
+  flowCardItems.value
+    .flatMap((flow) => (flow.tracks || []).map((track) => flowTrackRunId(track)))
+    .filter(Boolean),
+));
+const roundItems = computed(() => (props.items || []).filter((item) => !flowOwnedRunIds.value.has(item.run_id)));
+const bossItems = computed(() => roundItems.value.filter((item) => item.platform === "boss"));
+const zhilianItems = computed(() => roundItems.value.filter((item) => item.platform === "zhilian"));
 const platformCounts = computed(() => ({
   boss: bossItems.value.length,
   zhilian: zhilianItems.value.length,
 }));
 
-function platformLabel(platform: "boss" | "zhilian"): string {
-  return platform === "boss" ? "BOSS" : "智联";
+function flowTrackRunId(track: FlowHistoryTrack): string {
+  // Only a persisted result snapshot can answer the history-detail request.
+  // Task IDs are useful for status/log presentation, but opening them as
+  // round detail would fabricate a result for failed or partial tracks.
+  return String(track.result_run_id || "");
+}
+
+function flowTrackJobCount(track: FlowHistoryTrack): number {
+  const jobs = Array.isArray(track.jobs) ? track.jobs.length : 0;
+  const dropped = Array.isArray(track.dropped) ? track.dropped.length : 0;
+  return jobs + dropped;
+}
+
+const NO_RESULT_LABEL = "无结果";
+const UNSCREENED_LABEL = "已抓取，未筛选";
+const UNKNOWN_STATUS_LABEL = "状态未知";
+// 只有这三种结论在声称「这一轮有结果」，结果轮被删后必须降级。
+const RESULT_BEARING_LABELS = new Set(["完成", "部分结果"]);
+// 树干 historyStatusLabel 之外的流程态：抽屉用到的状态在这里补齐中文，
+// 缺项一律给中性可读文案，绝不把后端枚举原样吐给用户。
+const FLOW_EXTRA_STATUS_LABELS: Record<string, string> = {
+  queued: "排队中",
+  running: "进行中",
+  paused: "已暂停",
+  interrupted: "已中断",
+  failed: "失败",
+  stopped: "已停止",
+  cancelled: "已停止",
+  empty: NO_RESULT_LABEL,
+  unknown: UNKNOWN_STATUS_LABEL,
+};
+
+function flowStatusLabel(status: unknown): string {
+  const key = String(status || "").trim().toLowerCase();
+  // 完成 / 部分结果 / 已抓取，未筛选三种结论口径仍由树干那一份决定。
+  const trunkLabel = historyStatusLabel(key, 0);
+  if (trunkLabel) return trunkLabel;
+  return FLOW_EXTRA_STATUS_LABELS[key] || UNKNOWN_STATUS_LABEL;
+}
+
+// 结果轮被删（flow_tracks.result_run_id 被外键清空）之后不能再谎称「完成」：
+// 岗位也没了就是无结果，只剩抓取台账就如实说已抓取、未筛选。
+function flowResultBearingStatus(status: unknown, hasResultRound: boolean, jobCount: number): string {
+  const label = flowStatusLabel(status);
+  if (!RESULT_BEARING_LABELS.has(label) || hasResultRound) return label;
+  return jobCount ? UNSCREENED_LABEL : NO_RESULT_LABEL;
+}
+
+// Flow 内层平台块与平铺轮次行共用同一套删除/日志事件：载荷仍是这一轮的
+// 轮次身份（run id + 抓取任务 id），不新增第二套历史动作入口。
+function flowRoundItem(track: FlowHistoryTrack): HistoryRoundItem {
+  const jobs = Array.isArray(track.jobs) ? track.jobs.length : 0;
+  const dropped = Array.isArray(track.dropped) ? track.dropped.length : 0;
+  return {
+    run_id: flowTrackRunId(track),
+    platform: track.platform,
+    status: String(track.status || ""),
+    scrape_task_id: String(track.scrape_run_id || ""),
+    created_at: "",
+    started_at: null,
+    finished_at: null,
+    total_scraped: jobs + dropped,
+    total_kept: jobs,
+    total_matched: 0,
+    mismatch_count: 0,
+    total_dropped: dropped,
+    pending_count: 0,
+    keyword_summary: "",
+    profile_summary_preview: "",
+    archived_at: null,
+    is_latest: false,
+  };
+}
+
+function flowTrackStatus(track: FlowHistoryTrack): string {
+  return flowResultBearingStatus(track.status, Boolean(flowTrackRunId(track)), flowTrackJobCount(track));
+}
+
+// 卡片外层状态看的是「这个流程还有没有结果」：任一轨道还有结果轮就按流程态
+// 说话，全被删光就如实降级，不再另立第二套状态口径。
+function flowCardStatus(flow: FlowHistoryItem): string {
+  const tracks = Array.isArray(flow.tracks) ? flow.tracks : [];
+  return flowResultBearingStatus(
+    flow.status,
+    tracks.some((track) => Boolean(flowTrackRunId(track))),
+    tracks.reduce((count, track) => count + flowTrackJobCount(track), 0),
+  );
 }
 
 const focusableSelector = [
@@ -82,7 +179,7 @@ watch(() => props.open, (open) => {
   }
 }, { immediate: true });
 
-watch(() => props.items, () => {
+watch(roundItems, () => {
   const hasBoss = bossItems.value.length > 0;
   const hasZhilian = zhilianItems.value.length > 0;
   const currentHasItems = activePlatform.value === "boss" ? hasBoss : hasZhilian;
@@ -101,6 +198,17 @@ const countParts = (item: HistoryRoundItem) => [
   { label: "待确认", value: item.pending_count, tone: "unsure" },
   { label: "剔除", value: item.total_dropped, tone: "reject" },
 ] as const;
+
+// 整行可开（点击已存在），键盘必须等价可达：Tab 落到行、Enter/Space 打开该轮。
+// 行内有日志/删除两个按钮，所以不能换成 button 套 button；改为只认行本身的
+// 按键（event.target 必须是行自己），行内按钮的 Enter/Space 仍归它们自己。
+function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
+  if (event.target !== event.currentTarget) return;
+  if (event.key !== "Enter" && event.key !== " ") return;
+  if (props.deleteTarget?.run_id === item.run_id) return;
+  event.preventDefault();
+  emit("open-round", item.run_id);
+}
 </script>
 
 <template>
@@ -123,7 +231,8 @@ const countParts = (item: HistoryRoundItem) => [
         <header class="history-drawer-header">
           <div class="history-drawer-heading">
             <h2 id="history-drawer-title" tabindex="-1">历史轮次</h2>
-            <p v-if="items.length" class="history-drawer-total">共 {{ items.length }} 轮</p>
+            <p v-if="flowCardItems.length" class="history-drawer-total">共 {{ flowCardItems.length }} 个流程</p>
+            <p v-if="roundItems.length" class="history-drawer-total">共 {{ roundItems.length }} 轮</p>
           </div>
           <button
             ref="closeEl"
@@ -143,128 +252,237 @@ const countParts = (item: HistoryRoundItem) => [
             <p>{{ error }}</p>
             <button class="button secondary" type="button" @click="emit('close')">关闭</button>
           </div>
-          <div v-else-if="!items.length" class="history-drawer-state" data-testid="history-empty">
+          <div v-else-if="!roundItems.length && !flowCardItems.length" class="history-drawer-state" data-testid="history-empty">
             暂无历史轮次
           </div>
           <template v-else>
-            <div
-              class="history-platform-tabs"
-              role="tablist"
-              aria-label="按平台查看历史轮次"
-            >
-              <button
+            <template v-if="flowCardItems.length">
+              <article
+                v-for="flow in flowCardItems"
+                :key="flow.flow_id"
+                class="history-flow-card"
+                data-testid="history-flow-card"
+                :data-flow-id="flow.flow_id"
+              >
+                <header class="history-flow-head">
+                  <strong>流程 · {{ flow.selection === 'all' ? '全部' : platformLabel(flow.selection) }}</strong>
+                  <span class="history-flow-time">{{ formatHistoryTime(flow.updated_at || flow.created_at) || "时间未知" }}</span>
+                  <span class="history-round-status">{{ flowCardStatus(flow) }}</span>
+                </header>
+                <div
+                  v-for="track in flow.tracks"
+                  :key="`${flow.flow_id}-${track.platform}`"
+                  class="history-flow-track"
+                  data-testid="history-flow-track"
+                  :data-platform="track.platform"
+                >
+                  <Transition name="delete-confirm">
+                    <div
+                      v-if="deleteTarget && deleteTarget.run_id === flowTrackRunId(track)"
+                      class="history-delete-confirm"
+                      data-testid="history-delete-confirm"
+                      @click.stop
+                    >
+                      <span class="history-delete-title">确认删除</span>
+                      <span class="history-delete-actions">
+                        <button
+                          class="icon-button history-delete-action history-delete-yes"
+                          type="button"
+                          :disabled="deleting"
+                          aria-label="确认删除该轮次"
+                          data-testid="history-delete-confirm-yes"
+                          @click.stop="emit('delete-round', flowRoundItem(track))"
+                        >
+                          <LoaderCircle v-if="deleting" class="spin" :size="18" aria-hidden="true" />
+                          <Check v-else :size="18" aria-hidden="true" />
+                        </button>
+                        <button
+                          class="icon-button history-delete-action history-delete-no"
+                          type="button"
+                          aria-label="取消删除"
+                          data-testid="history-delete-confirm-no"
+                          @click.stop="emit('cancel-delete')"
+                        >
+                          <X :size="18" aria-hidden="true" />
+                        </button>
+                      </span>
+                    </div>
+                    <div v-else class="history-flow-track-line">
+                      <button
+                        v-if="flowTrackRunId(track)"
+                        class="history-flow-track-button"
+                        type="button"
+                        @click="emit('open-round', flowTrackRunId(track))"
+                      >
+                        <span>{{ platformLabel(track.platform) }}</span>
+                        <span data-testid="history-flow-track-status">{{ flowTrackStatus(track) }}</span>
+                        <span>岗位 {{ Array.isArray(track.jobs) ? track.jobs.length : 0 }}</span>
+                        <span v-if="track.message" class="history-flow-track-message">{{ track.message }}</span>
+                      </button>
+                      <div v-else class="history-flow-track-button history-flow-track-button--static">
+                        <span>{{ platformLabel(track.platform) }}</span>
+                        <span data-testid="history-flow-track-status">{{ flowTrackStatus(track) }}</span>
+                        <span>岗位 {{ Array.isArray(track.jobs) ? track.jobs.length : 0 }}</span>
+                        <span v-if="track.message" class="history-flow-track-message">{{ track.message }}</span>
+                      </div>
+                      <!-- 三个入口各自按自己的依据判定：详情只认结果轮、日志认该
+                           轨道的抓取任务线、删除只在确实还有可删轮次时给出。结果轮
+                           被删后日志仍可看，也不再有删不掉的幽灵行。 -->
+                      <span
+                        v-if="track.scrape_run_id || flowTrackRunId(track)"
+                        class="history-flow-track-actions"
+                        @click.stop
+                      >
+                        <button
+                          v-if="track.scrape_run_id"
+                          class="icon-button history-log"
+                          type="button"
+                          :aria-label="`查看 ${platformLabel(track.platform)} 该轮运行日志`"
+                          data-testid="history-log-trigger"
+                          @click="emit('view-log', flowRoundItem(track))"
+                        >
+                          <ScrollText :size="16" aria-hidden="true" />
+                        </button>
+                        <button
+                          v-if="flowTrackRunId(track)"
+                          class="icon-button history-delete"
+                          type="button"
+                          :aria-label="`删除 ${platformLabel(track.platform)} 该轮次`"
+                          data-testid="history-delete-trigger"
+                          @click="emit('confirm-delete', flowRoundItem(track))"
+                        >
+                          <Trash2 :size="16" aria-hidden="true" />
+                        </button>
+                      </span>
+                    </div>
+                  </Transition>
+                </div>
+              </article>
+            </template>
+
+            <template v-if="roundItems.length">
+              <div
+                class="history-platform-tabs"
+                role="tablist"
+                aria-label="按平台查看历史轮次"
+              >
+                <button
+                  v-for="platform in (['boss', 'zhilian'] as const)"
+                  :key="platform"
+                  type="button"
+                  role="tab"
+                  :aria-selected="activePlatform === platform"
+                  :class="['history-platform-tab', { active: activePlatform === platform }]"
+                  :data-testid="`history-platform-tab-${platform}`"
+                  @click="activePlatform = platform"
+                >
+                  <span>{{ platformLabel(platform) }}</span>
+                  <span class="history-platform-count">{{ platformCounts[platform] }}</span>
+                </button>
+              </div>
+
+              <section
                 v-for="platform in (['boss', 'zhilian'] as const)"
                 :key="platform"
-                type="button"
-                role="tab"
-                :aria-selected="activePlatform === platform"
-                :class="['history-platform-tab', { active: activePlatform === platform }]"
-                :data-testid="`history-platform-tab-${platform}`"
-                @click="activePlatform = platform"
+                v-show="activePlatform === platform"
+                class="history-platform-group"
+                :data-platform="platform"
+                :aria-hidden="activePlatform !== platform"
               >
-                <span>{{ platformLabel(platform) }}</span>
-                <span class="history-platform-count">{{ platformCounts[platform] }}</span>
-              </button>
-            </div>
-
-            <section
-              v-for="platform in (['boss', 'zhilian'] as const)"
-              :key="platform"
-              v-show="activePlatform === platform"
-              class="history-platform-group"
-              :data-platform="platform"
-              :aria-hidden="activePlatform !== platform"
-            >
-              <h3 class="history-platform-title">{{ platformLabel(platform) }}</h3>
-              <div
-                v-for="item in platform === 'boss' ? bossItems : zhilianItems"
-                :key="item.run_id"
-                :class="['history-round-row', { 'history-round-row--confirming': deleteTarget?.run_id === item.run_id }]"
-                data-testid="history-round-row"
-                :data-run-id="item.run_id"
-                @click="emit('open-round', item.run_id)"
-              >
-                <span class="history-round-head">
-                  <span class="history-round-time">{{ formatHistoryTime(item.finished_at || item.created_at) || "时间未知" }}</span>
-                  <span v-if="item.is_latest" class="history-latest-badge" data-testid="history-latest-badge">最新</span>
-                </span>
-                <span class="history-round-status" :data-status="item.status">
-                  {{ historyStatusLabel(item.status, item.total_kept) }}
-                </span>
-                <span class="history-round-total" data-testid="history-round-total">
-                  共 {{ item.total_scraped }} 个岗位
-                </span>
-                <span class="history-round-meta" data-testid="history-round-meta">
-                  <template v-for="part in countParts(item)" :key="part.label">
-                    <span class="history-metric" :data-tone="part.tone">
-                      <span class="history-metric-dot" aria-hidden="true"></span>
-                      <span>{{ part.label }} {{ part.value }}</span>
-                    </span>
-                  </template>
-                </span>
-                <span class="history-round-keyword">{{ item.keyword_summary || "未记录关键词" }}</span>
-                <Transition name="delete-confirm">
-                <span
-                  v-if="deleteTarget?.run_id === item.run_id"
-                  class="history-delete-confirm"
-                  data-testid="history-delete-confirm"
-                  @click.stop
+                <h3 class="history-platform-title">{{ platformLabel(platform) }}</h3>
+                <div
+                  v-for="item in platform === 'boss' ? bossItems : zhilianItems"
+                  :key="item.run_id"
+                  :class="['history-round-row', { 'history-round-row--confirming': deleteTarget?.run_id === item.run_id }]"
+                  data-testid="history-round-row"
+                  :data-run-id="item.run_id"
+                  role="button"
+                  tabindex="0"
+                  @click="emit('open-round', item.run_id)"
+                  @keydown="onRoundRowKeydown($event, item)"
                 >
-                  <span class="history-delete-title">确认删除</span>
-                  <span class="history-delete-actions">
+                  <span class="history-round-head">
+                    <span class="history-round-time">{{ formatHistoryTime(item.finished_at || item.created_at) || "时间未知" }}</span>
+                    <span v-if="item.is_latest" class="history-latest-badge" data-testid="history-latest-badge">最新</span>
+                  </span>
+                  <span class="history-round-status" :data-status="item.status">
+                    {{ historyStatusLabel(item.status, item.total_kept) }}
+                  </span>
+                  <span class="history-round-total" data-testid="history-round-total">
+                    共 {{ item.total_scraped }} 个岗位
+                  </span>
+                  <span class="history-round-meta" data-testid="history-round-meta">
+                    <template v-for="part in countParts(item)" :key="part.label">
+                      <span class="history-metric" :data-tone="part.tone">
+                        <span class="history-metric-dot" aria-hidden="true"></span>
+                        <span>{{ part.label }} {{ part.value }}</span>
+                      </span>
+                    </template>
+                  </span>
+                  <span class="history-round-keyword">{{ item.keyword_summary || "未记录关键词" }}</span>
+                  <Transition name="delete-confirm">
+                  <span
+                    v-if="deleteTarget?.run_id === item.run_id"
+                    class="history-delete-confirm"
+                    data-testid="history-delete-confirm"
+                    @click.stop
+                  >
+                    <span class="history-delete-title">确认删除</span>
+                    <span class="history-delete-actions">
+                      <button
+                        class="icon-button history-delete-action history-delete-yes"
+                        type="button"
+                        :disabled="deleting"
+                        aria-label="确认删除该轮次"
+                        data-testid="history-delete-confirm-yes"
+                        @click.stop="emit('delete-round', item)"
+                      >
+                        <LoaderCircle v-if="deleting" class="spin" :size="18" aria-hidden="true" />
+                        <Check v-else :size="18" aria-hidden="true" />
+                      </button>
+                      <button
+                        class="icon-button history-delete-action history-delete-no"
+                        type="button"
+                        aria-label="取消删除"
+                        data-testid="history-delete-confirm-no"
+                        @click.stop="emit('cancel-delete')"
+                      >
+                        <X :size="18" aria-hidden="true" />
+                      </button>
+                    </span>
+                  </span>
+                  <span
+                    v-else
+                    class="history-row-actions"
+                    @click.stop
+                  >
                     <button
-                      class="icon-button history-delete-action history-delete-yes"
+                      v-if="item.scrape_task_id"
+                      class="icon-button history-log"
                       type="button"
-                      :disabled="deleting"
-                      aria-label="确认删除该轮次"
-                      data-testid="history-delete-confirm-yes"
-                      @click.stop="emit('delete-round', item)"
+                      :aria-label="`查看 ${formatHistoryTime(item.finished_at || item.created_at) || '该轮次'} 运行日志`"
+                      data-testid="history-log-trigger"
+                      @click="emit('view-log', item)"
                     >
-                      <LoaderCircle v-if="deleting" class="spin" :size="18" aria-hidden="true" />
-                      <Check v-else :size="18" aria-hidden="true" />
+                      <ScrollText :size="16" aria-hidden="true" />
                     </button>
                     <button
-                      class="icon-button history-delete-action history-delete-no"
+                      class="icon-button history-delete"
                       type="button"
-                      aria-label="取消删除"
-                      data-testid="history-delete-confirm-no"
-                      @click.stop="emit('cancel-delete')"
+                      :aria-label="`删除 ${formatHistoryTime(item.finished_at || item.created_at) || '该轮次'}`"
+                      data-testid="history-delete-trigger"
+                      @click="emit('confirm-delete', item)"
                     >
-                      <X :size="18" aria-hidden="true" />
+                      <Trash2 :size="16" aria-hidden="true" />
                     </button>
                   </span>
-                </span>
-                <span
-                  v-else
-                  class="history-row-actions"
-                  @click.stop
-                >
-                  <button
-                    v-if="item.scrape_task_id"
-                    class="icon-button history-log"
-                    type="button"
-                    :aria-label="`查看 ${formatHistoryTime(item.finished_at || item.created_at) || '该轮次'} 运行日志`"
-                    data-testid="history-log-trigger"
-                    @click="emit('view-log', item)"
-                  >
-                    <ScrollText :size="16" aria-hidden="true" />
-                  </button>
-                  <button
-                    class="icon-button history-delete"
-                    type="button"
-                    :aria-label="`删除 ${formatHistoryTime(item.finished_at || item.created_at) || '该轮次'}`"
-                    data-testid="history-delete-trigger"
-                    @click="emit('confirm-delete', item)"
-                  >
-                    <Trash2 :size="16" aria-hidden="true" />
-                  </button>
-                </span>
-                </Transition>
-              </div>
-              <p v-if="!platformCounts[platform]" class="history-platform-empty">
-                暂无{{ platformLabel(platform) }}历史轮次
-              </p>
-            </section>
+                  </Transition>
+                </div>
+                <p v-if="!platformCounts[platform]" class="history-platform-empty">
+                  暂无{{ platformLabel(platform) }}历史轮次
+                </p>
+              </section>
+            </template>
           </template>
         </div>
       </aside>
@@ -418,6 +636,79 @@ const countParts = (item: HistoryRoundItem) => [
   text-align: center;
 }
 
+.history-flow-card {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 10px;
+  border: 1px solid var(--hair);
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+
+.history-flow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--ink-2);
+  font-size: 0.84rem;
+}
+
+.history-flow-track {
+  min-width: 0;
+}
+
+/* Flow 内层的确认层跟着这一层的高度自然铺开，不像整行轮次那样浮在上面。 */
+.history-flow-track .history-delete-confirm {
+  position: relative;
+  inset: auto;
+  margin: 2px 0;
+}
+
+.history-flow-track-line {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.history-flow-track-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.history-flow-track-button {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--hair);
+  border-radius: 7px;
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history-flow-track-button--static {
+  cursor: default;
+}
+
+.history-flow-track-button:hover {
+  border-color: var(--brand-edge);
+}
+
+.history-flow-track-message {
+  grid-column: 1 / -1;
+  color: var(--unsure-deep);
+  font-size: 0.78rem;
+}
+
 .history-round-row {
   position: relative;
   display: grid;
@@ -439,6 +730,12 @@ const countParts = (item: HistoryRoundItem) => [
 
 .history-round-row:hover {
   border-color: var(--brand-edge);
+}
+
+/* 行本身可用键盘打开，焦点落点必须看得见（与平台页签同一档焦点环）。 */
+.history-round-row:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
 }
 
 .history-round-row--confirming {

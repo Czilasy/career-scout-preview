@@ -44,9 +44,38 @@ export interface HistoryRoundDetail {
   result: PipelineResult;
 }
 
+export interface FlowHistoryTrack {
+  platform: Platform;
+  status: string;
+  stage?: string;
+  result_run_id?: string | null;
+  scrape_run_id?: string | null;
+  screen_run_id?: string | null;
+  jobs?: Array<Record<string, unknown>>;
+  dropped?: Array<Record<string, unknown>>;
+  screened_count?: number;
+  unfinished_ai_screening?: boolean;
+  message?: string;
+  [key: string]: unknown;
+}
+
+export interface FlowHistoryItem {
+  flow_id: string;
+  profile_id: string;
+  selection: "all" | Platform;
+  status: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+  legacy?: boolean;
+  screened_count?: number;
+  tracks: FlowHistoryTrack[];
+  [key: string]: unknown;
+}
+
 interface ResultHistoryState {
   open: boolean;
   items: HistoryRoundItem[];
+  flowItems: FlowHistoryItem[];
   loading: boolean;
   error: string;
   detail: HistoryRoundDetail | null;
@@ -58,6 +87,7 @@ interface ResultHistoryState {
 const state = reactive<ResultHistoryState>({
   open: false,
   items: [],
+  flowItems: [],
   loading: false,
   error: "",
   detail: null,
@@ -67,6 +97,8 @@ const state = reactive<ResultHistoryState>({
 });
 
 let loadSeq = 0;
+let cancelActiveLoad: (() => void) | null = null;
+const LOAD_CANCELLED = Symbol("history-load-cancelled");
 
 /**
  * 历史浏览的用户意图序号：每次「点开另一轮」或「回到最新」都 +1。
@@ -95,9 +127,12 @@ export function setHistoryProfile(nextProfileId: string): void {
   const next = String(nextProfileId || "").trim();
   if (next === currentProfileId) return;
   currentProfileId = next;
+  cancelActiveLoad?.();
+  cancelActiveLoad = null;
   loadSeq += 1;
   viewIntentSeq += 1;
   state.items = [];
+  state.flowItems = [];
   state.detail = null;
   state.error = "";
   state.loading = false;
@@ -120,17 +155,44 @@ export function formatHistoryTime(value: string | number | null | undefined): st
 }
 
 async function loadHistory(options: { silent?: boolean } = {}): Promise<void> {
+  cancelActiveLoad?.();
   const seq = ++loadSeq;
+  let cancelThisLoad: (() => void) | null = null;
+  const cancellation = new Promise<typeof LOAD_CANCELLED>((resolve) => {
+    cancelThisLoad = () => resolve(LOAD_CANCELLED);
+  });
+  cancelActiveLoad = cancelThisLoad;
   if (!options.silent) {
     state.loading = true;
     state.error = "";
   }
   try {
-    const data = await apiRequest<{ ok: boolean; items?: HistoryRoundItem[] }>(
-      `/api/result-history${profileQuery()}`,
-    );
+    const settled = await Promise.race([
+      Promise.allSettled([
+        apiRequest<{ ok: boolean; items?: HistoryRoundItem[] }>(
+          `/api/result-history${profileQuery()}`,
+        ),
+        apiRequest<{ ok: boolean; items?: FlowHistoryItem[] }>(
+          `/api/result-history/flows${profileQuery()}`,
+        ),
+      ]),
+      cancellation,
+    ]);
+    if (settled === LOAD_CANCELLED) return;
+    const [legacyResult, flowResult] = settled;
+    if (legacyResult.status === "rejected") throw legacyResult.reason;
+    const data = legacyResult.value;
+    // Flow history is additive.  A legacy server may not expose it, but a
+    // slow valid response must remain part of the same load so the outer Flow
+    // and its two platform tracks are never silently dropped.
+    const flowData = flowResult.status === "fulfilled"
+      ? flowResult.value
+      : { ok: false, items: [] as FlowHistoryItem[] };
     if (seq !== loadSeq) return;
     state.items = data.items || [];
+    state.flowItems = (flowData.items || []).filter(
+      (item): item is FlowHistoryItem => Boolean(item && typeof item.flow_id === "string"),
+    );
     state.error = "";
     if (!options.silent) {
       state.loading = false;
@@ -141,6 +203,8 @@ async function loadHistory(options: { silent?: boolean } = {}): Promise<void> {
       state.loading = false;
       state.error = error instanceof Error ? error.message : "历史列表读取失败";
     }
+  } finally {
+    if (cancelActiveLoad === cancelThisLoad) cancelActiveLoad = null;
   }
 }
 
@@ -210,12 +274,12 @@ async function deleteRound(item: HistoryRoundItem): Promise<void> {
 }
 
 /** 归档当前画像的当前结果（BOSS 与智联），保留为历史轮次。 */
-async function archiveAllCurrentResults(): Promise<string[]> {
-  const data = await apiRequest<{ ok: boolean; archived_run_ids?: string[] }>(
+async function archiveAllCurrentResults(flowId?: string): Promise<string[]> {
+    const data = await apiRequest<{ ok: boolean; archived_run_ids?: string[] }>(
     "/api/result-history/archive-latest",
     {
       method: "POST",
-      json: { profile_id: currentProfileId },
+      json: { profile_id: currentProfileId, ...(flowId ? { flow_id: flowId } : {}) },
     },
   );
   await loadHistory();

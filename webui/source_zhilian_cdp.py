@@ -76,6 +76,9 @@ _ZHILIAN_DETAIL_SIGNAL_MAP = {
 _ZHILIAN_DETAIL_SIGNAL_MAP = build_zhilian_detail_signal_map(
     _ZHILIAN_DETAIL_SIGNAL_MAP,
 )
+_ZHILIAN_DETAIL_FAILURE_REASONS = frozenset({
+    "value_non_dict", "id_mismatch", "jd_missing",
+})
 _ZHILIAN_LIST_SIGNAL_MAP = build_zhilian_list_signal_map({
     "ok": None,
     "empty": None,  # 平台明确空走 reported_empty，由编排层二次确认
@@ -108,6 +111,16 @@ def _zhilian_safe_log(*, stage: str, platform: str = "zhilian",
     if url_host:
         parts.append(f"url_host={url_host}")
     return " ".join(parts)
+
+
+def _zhilian_detail_failure_reason(detail: Any) -> str:
+    """Return only the stable, non-sensitive detail parser subreason."""
+    if not isinstance(detail, dict):
+        return ""
+    reason = str(detail.get("_failure_reason") or "").strip()
+    return reason if reason in _ZHILIAN_DETAIL_FAILURE_REASONS else ""
+
+
 def _validate_zhilian_city_snapshot(city: Any) -> bool:
     """校验城市解析快照：必须是带 name/platform_code/mapping_version 的 dict。"""
     if not isinstance(city, dict):
@@ -436,10 +449,12 @@ class ZhilianCdpSource:
         if failed_code in SourceCircuitBreaker.SIGNAL_CODES:
             self.breaker.record_signal(failed_code)
         self._record_risk_signal(failed_code, _zhilian_failed_reason(failed_code))
+        detail_reason = _zhilian_detail_failure_reason(detail)
         return SourceOutcome.failure(
             failed_code=failed_code,
             safe_log=_zhilian_safe_log(
                 stage="detail", failed_code=failed_code,
+                counts={"reason": detail_reason} if detail_reason else None,
                 has_id=True,
                 url_host=_safe_host(str(job.get("canonical_url") or "")),
             ),
@@ -447,12 +462,14 @@ class ZhilianCdpSource:
         )
     def fetch_details_batch(
         self, jobs: list[dict], *, detail_output_path: str | None = None,
+        event_callback: Callable[[], None] | None = None,
         on_item_done: Callable[[int], None] | None = None,
         **bounded_options,
     ) -> dict[str, SourceOutcome]:
         """批量抓取详情：单项异常继续，连续平台级 signal 触发熔断。
         熔断器打开后，后续岗位不再调用 runner，直接返回 source_blocked
         （可暂停 outcome，编排层可后续 retry）。
+        ``event_callback``：并行详情 worker 每条完成时触发的无参心跳；
         ``on_item_done``：串行逐条抓取时每条完成后实时回调（1 起递增）；
         tab 池并行模式在批返回后按条回放（对齐 BOSS 子进程批返回语义），
         供编排层把进度回传给前端。
@@ -462,6 +479,18 @@ class ZhilianCdpSource:
         钳制 1-10）。
         """
         results: dict[str, SourceOutcome] = {}
+        completed_count = 0
+
+        def _notify_item_done() -> None:
+            """Report completed input count, independent of input index/order."""
+            nonlocal completed_count
+            if on_item_done is None:
+                return
+            completed_count = min(completed_count + 1, len(jobs))
+            try:
+                on_item_done(completed_count)
+            except Exception:
+                _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
         gap_min = max(0.0, float(bounded_options.get("gap_min") or 0.0))
         gap_max = max(gap_min, float(bounded_options.get("gap_max") or gap_min))
         reset_every = max(1, int(bounded_options.get("reset_every") or 1))
@@ -482,11 +511,7 @@ class ZhilianCdpSource:
                             counts={"idx": i, "reason": "job_not_dict"},
                         ),
                     )
-                    if on_item_done is not None:
-                        try:
-                            on_item_done(i + 1)
-                        except Exception:
-                            _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+                    _notify_item_done()
                     continue
                 job_id = str(job.get("platform_job_id") or "").strip()
                 key = job_id or f"idx{i}"
@@ -500,18 +525,10 @@ class ZhilianCdpSource:
                         ),
                         failed_reason="熔断器已打开，连续平台级 signal 触发",
                     )
-                    if on_item_done is not None:
-                        try:
-                            on_item_done(i + 1)
-                        except Exception:
-                            _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+                    _notify_item_done()
                     continue
                 results[key] = self.fetch_detail(job, detail_output_path=detail_output_path)
-                if on_item_done is not None:
-                    try:
-                        on_item_done(i + 1)
-                    except Exception:
-                        _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+                _notify_item_done()
                 if gap_min > 0 and i + 1 < len(jobs):
                     time.sleep(random.uniform(gap_min, gap_max))
             return results
@@ -525,11 +542,7 @@ class ZhilianCdpSource:
                         counts={"idx": i, "reason": "job_not_dict"},
                     ),
                 )
-                if on_item_done is not None:
-                    try:
-                        on_item_done(i + 1)
-                    except Exception:
-                        _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+                _notify_item_done()
                 continue
             job_id = str(job.get("platform_job_id") or "").strip()
             canonical = str(job.get("canonical_url") or "").strip()
@@ -541,11 +554,7 @@ class ZhilianCdpSource:
                         counts={"idx": i, "reason": "job_missing_canonical_url"},
                     ),
                 )
-                if on_item_done is not None:
-                    try:
-                        on_item_done(i + 1)
-                    except Exception:
-                        _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+                _notify_item_done()
                 continue
             if any(str(jobs[j].get("canonical_url") or "").strip() == canonical
                    for j, _ in valid):
@@ -556,11 +565,7 @@ class ZhilianCdpSource:
                         counts={"idx": i, "reason": "job_duplicate_in_batch"},
                     ),
                 )
-                if on_item_done is not None:
-                    try:
-                        on_item_done(i + 1)
-                    except Exception:
-                        _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+                _notify_item_done()
                 continue
             valid.append((i, job_id or f"idx{i}"))
         if not valid:
@@ -576,11 +581,7 @@ class ZhilianCdpSource:
                     ),
                     failed_reason="熔断器已打开，连续平台级 signal 触发",
                 )
-                if on_item_done is not None:
-                    try:
-                        on_item_done(i + 1)
-                    except Exception:
-                        _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+                _notify_item_done()
             return results
         runner_jobs = []
         for i, _ in valid:
@@ -594,7 +595,7 @@ class ZhilianCdpSource:
                 tab_pool_size=tab_pool_size,
                 inter_job_gap_range=(gap_min, gap_max),
                 reset_every=reset_every,
-                event_callback=on_item_done,
+                event_callback=event_callback,
                 cancel_event=self.cancel_event,
             )
         except Exception:
@@ -627,6 +628,7 @@ class ZhilianCdpSource:
                     failed_reason=_zhilian_failed_reason(skipped_code),
                 )
             else:
+                detail_reason = _zhilian_detail_failure_reason(detail)
                 failed_code = normalize_zhilian_detail_signal(
                     signal, _ZHILIAN_DETAIL_SIGNAL_MAP,
                 )
@@ -635,19 +637,18 @@ class ZhilianCdpSource:
                 if failed_code not in recorded_batch_signals:
                     recorded_batch_signals.add(failed_code)
                     self._record_risk_signal(failed_code, _zhilian_failed_reason(failed_code))
+                detail_counts = {"idx": i, "signal": signal}
+                if detail_reason:
+                    detail_counts["reason"] = detail_reason
                 results[key] = SourceOutcome.failure(
                     failed_code=failed_code,
                     safe_log=_zhilian_safe_log(
                         stage="batch", failed_code=failed_code,
-                        counts={"idx": i, "signal": signal},
+                        counts=detail_counts,
                         has_id=True,
                         url_host=_safe_host(str(jobs[i].get("canonical_url") or "")),
                     ),
                     failed_reason=_zhilian_failed_reason(failed_code),
                 )
-            if on_item_done is not None:
-                try:
-                    on_item_done(i + 1)
-                except Exception:
-                    _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+            _notify_item_done()
         return results

@@ -12,6 +12,7 @@ import { countActiveFilters, emptyFilterState, filterJobs, sortJobs } from "../l
 import type { FilterState, SortKey } from "../listFilter";
 import type { JobItem, PageScene, SceneIdentity } from "../types";
 import { cleanJobLocation } from "../location";
+import { platformLabel as platformDisplayName } from "../discovery";
 import { useDiscoverySceneState } from "../composables/useDiscoverySceneState";
 
 const props = withDefaults(defineProps<{
@@ -46,23 +47,20 @@ const emit = defineEmits<{
   (e: "selection-fallback"): void;
 }>();
 
+// 筛选档位枚举保持本组件自有；档位显示名一律取平台显示名权威。
 const PLATFORM_FILTER_OPTIONS = [
   { id: "all" as const, label: "全部" },
-  { id: "zhilian" as const, label: "智联" },
-  { id: "boss" as const, label: "BOSS" },
+  { id: "zhilian" as const, label: platformDisplayName("zhilian") },
+  { id: "boss" as const, label: platformDisplayName("boss") },
 ];
 
 function platformLabel(job: JobItem): string {
-  if (job.platform === "zhilian") return "智联";
-  if (job.platform === "boss") return "BOSS";
-  return "";
+  return platformDisplayName(job.platform);
 }
 
 // 019：跨平台重复簇成员的平台短名（与 platformLabel 同一套短名口径）。
 function copyPlatformLabel(platform?: string): string {
-  if (platform === "zhilian") return "智联";
-  if (platform === "boss") return "BOSS";
-  return platform || "";
+  return platformDisplayName(platform);
 }
 
 const visibleCount = ref(props.batchSize);
@@ -678,7 +676,7 @@ function saveFilterDraft(state: FilterState): void {
               class="status-pill platform-pill"
               :data-platform="selectedJob.platform"
               data-testid="job-platform-badge"
-            >{{ selectedJob.platform === 'boss' ? 'BOSS' : '智联' }}</span>
+            >{{ platformLabel(selectedJob) }}</span>
             <span
               v-if="selectedJob._applied"
               class="status-pill applied-pill"

@@ -50,7 +50,7 @@ function isCompletedWorkflowSnapshot(saved: Record<string, any>): boolean {
 }
 
 export function useDiscoveryWorkflow(state: DiscoveryState, deps: WorkflowNeeds) {
-  const { WORKFLOW_STATE_VERSION, activeCategory, activeStep, advancedPanelsOpen, analysisReady, cityText, currentRoundStatus, draftPlatform, enabledSteps, ensureSearchDraftLoaded, filterValues, finishedPartial, historyMode, interruptedRunId, keywords, loadSearchDraftFor, pausedRunId, pipelineResult, pipelineResultRunId, platformState, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, restoredWorkflowSnapshot, resultLoaded, resultPlatformFilter, resultsBootstrapPending, resultsPageSeen, saveSearchDraftFor, sceneSnapshot, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, unfinishedWorkflowRestored, workflowStateKey, workflowStateRestored } = state;
+  const { WORKFLOW_STATE_VERSION, activeCategory, activeStep, advancedPanelsOpen, analysisReady, cityText, currentRoundStatus, draftPlatform, ensureSearchDraftLoaded, filterValues, finishedPartial, historyMode, interruptedRunId, keywords, loadSearchDraftFor, pausedRunId, pipelineResult, pipelineResultRunId, platformState, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, restoredWorkflowSnapshot, resultLoaded, resultPlatformFilter, resultsBootstrapPending, resultsPageSeen, saveSearchDraftFor, sceneSnapshot, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, unfinishedWorkflowRestored, workflowStateKey, workflowStateRestored } = state;
 
 
 function readStoredPayload(): Record<string, any> | null {
@@ -319,7 +319,6 @@ function restoreSnapshotPayload(saved: Record<string, any>): void {
     ? saved.resultPlatform
     : (isPlatformValue(saved.platform) ? saved.platform : "");
   if (roundPlatform) applyRoundPlatform(roundPlatform);
-  if (saved.activeStep) activeStep.value = saved.activeStep as StepId;
   analysisReady.value = Boolean(saved.analysisReady);
   // Spec041 返工：搜索草稿以"平台槽位"为准（两个平台各自保留、刷新后都在）；
   // 只有该画像没有槽位存档（旧版本快照）时才退回快照里的单份草稿，并写进槽位。
@@ -351,6 +350,7 @@ function restoreSnapshotPayload(saved: Record<string, any>): void {
   if (saved.activeCategory) activeCategory.value = saved.activeCategory;
   if (saved.resultPlatformFilter) resultPlatformFilter.value = saved.resultPlatformFilter;
   sceneSnapshot.value = null;
+  if (saved.activeStep) state.navigateStep(String(saved.activeStep), { source: "restore" });
 }
 
 function restoreWorkflowStateInner(): void {
@@ -376,7 +376,7 @@ function restoreWorkflowStateInner(): void {
     // 由 maybeAutoStartNewRound 从后端最新轮补齐；确实没有结果再退回新一轮。
     if (isPlatformValue(finished.platform)) {
       applyRoundPlatform(finished.platform);
-      activeStep.value = "results";
+      state.navigateStep("results", { source: "restore", allowUnreachable: true });
       resultsBootstrapPending.value = true;
     }
     workflowStateRestored.value = true;
@@ -402,7 +402,6 @@ function restoreSaved02State(): void {
   const saved = restoredWorkflowSnapshot.value;
   if (!saved || resultsPageSeen.value) return;
   // 任务接口只负责恢复后台任务状态；02 页的用户草稿和停留步骤以本地快照为准。
-  if (saved.activeStep) activeStep.value = saved.activeStep as StepId;
   analysisReady.value = Boolean(saved.analysisReady);
   keywords.value = Array.isArray(saved.keywords) ? saved.keywords : [];
   selectedKeywords.value = Array.isArray(saved.selectedKeywords) ? saved.selectedKeywords : [];
@@ -417,6 +416,7 @@ function restoreSaved02State(): void {
   pipelineResultRunId.value = String(saved.pipelineResultRunId || "");
   currentRoundStatus.value = String(saved.currentRoundStatus || "");
   resultLoaded.value = Boolean(saved.resultLoaded);
+  if (saved.activeStep) state.navigateStep(String(saved.activeStep), { source: "restore" });
   // 恢复 02/03 页时面板默认关闭：任务运行中/完成后不自动展开，
   // 只有简历分析完成（analysisReady watch）才自动打开一次。
 }
@@ -425,26 +425,19 @@ function restoreSaved02State(): void {
 function enterSearchStep() {
   // 面板不再无任务自动展开：任务运行中/完成后保持关闭，只有简历分析完成
   // （analysisReady 触发 watch）时才自动打开一次，展示 AI 预填内容。
-  activeStep.value = "search";
+  state.navigateStep("search", { source: "system" });
 }
 
 
 function enterScreenStep() {
   // 面板默认关闭：AI 筛选中或任务完成后都不自动展开，只有简历分析完成时
   // 由 analysisReady watch 自动打开一次。
-  activeStep.value = "screen";
+  state.navigateStep("screen", { source: "system" });
 }
 
 
 function selectStep(step: string) {
-  if (historyMode.value && step !== "results") {
-    notify("历史轮次不可改写，请先回到最新", "warning");
-    return;
-  }
-  if (!enabledSteps.value.includes(step as StepId)) return;
-  if (step === "search") enterSearchStep();
-  else if (step === "screen") enterScreenStep();
-  else activeStep.value = step as StepId;
+  state.navigateStep(step, { source: "user" });
 }
 
 

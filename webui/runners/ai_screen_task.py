@@ -11,11 +11,15 @@ from webui import ai as ai_service
 import threading
 import time
 from webui.diagnostics import record_failure
+from webui.error_registry import is_recoverable_systemic_block
 from webui.task_runner_support import _carry_batch_signal
 from webui.task_runners import _split_resume_verdicts
 from webui.runners.ai_screen_rough import run_rough_stage
 from webui.runners.ai_screen_jd import run_jd_stage
 from webui.runners.ai_screen_fine import run_fine_stage
+from webui.ai_screen_failure import mark_flow_failure as _mark_flow_failure
+from webui.ai_screen_failure import persist_ai_worker_failure as _persist_ai_worker_failure
+from webui.flow_task_state import FlowStateClosureError
 
 def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_task_id, resume_from_run_id='', profile_facts=None, execution_config=None, cross_platform_dedupe=True):
     """AI 筛选任务：StageA 字段粗筛 → 批量抓 JD → StageB JD 精筛。
@@ -54,7 +58,26 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
             get_logger(__name__).debug(
                 "resume profile facts lookup failed: %s", type(exc).__name__
             )
-    ctx.activate_task_browser(task_id)
+    try:
+        ctx.activate_task_browser(task_id)
+    except Exception as exc:  # noqa: BLE001 - worker failures must be durable
+        raw_code = str(
+            getattr(exc, "error_code", "")
+            or getattr(exc, "failed_code", "")
+            or "internal_error"
+        )
+        code = raw_code if raw_code in {
+            "source_cdp_unavailable", "browser_busy",
+        } or is_recoverable_systemic_block(raw_code) else "internal_error"
+        _persist_ai_worker_failure(
+            ctx, task_id, scrape_task_id, code,
+            "AI 筛选启动失败", platform=(
+                (ctx.tasks.get(task_id) or {}).get("platform")
+                if hasattr(ctx, "tasks") else None
+            ),
+            status="paused" if code != "internal_error" else "failed",
+        )
+        return
     from webui.store_helpers import _now
     from webui.whitebox import WhiteboxService
     _whitebox = WhiteboxService(ctx.store) if hasattr(ctx.store, 'create_whitebox_run') else None
@@ -71,14 +94,10 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
             }, parent_owner_id=scrape_task_id)
         except Exception:
             _whitebox = None
-            try:
-                ctx.write_run(task_id, status='failed', error_code='whitebox_incomplete', error_reason='任务证据白箱初始化失败')
-            except Exception as marker_exc:
-                from webui.logging_setup import get_logger
-                get_logger(__name__).warning(
-                    "AI whitebox initialization failure state write failed: %s",
-                    type(marker_exc).__name__,
-                )
+            _persist_ai_worker_failure(
+                ctx, task_id, scrape_task_id, "whitebox_incomplete",
+                "任务证据白箱初始化失败",
+            )
             return
 
     def _whitebox_attempt(unit_key):
@@ -225,6 +244,14 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
             source_task = ctx.tasks.get(scrape_task_id)
             source_result = source_task.get('result') if isinstance(source_task, dict) else None
         if not isinstance(source_result, dict):
+            # A completed scrape can outlive its in-memory task (cleanup or
+            # process restart).  Recover the durable source through the same
+            # production helper used by the HTTP AI route.
+            source_snapshot = ctx.ensure_scrape_source(scrape_task_id)
+            if isinstance(source_snapshot, dict):
+                source_task = source_snapshot
+                source_result = source_snapshot.get('result')
+        if not isinstance(source_result, dict):
             raise RuntimeError('invalid_scrape_task')
         source_run = ctx.store.get_screening_run(scrape_task_id)
         # Recovery is only allowed to use a parent scrape as a completed
@@ -250,6 +277,12 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
                 severity='error',
             )
         source_params = (source_run.get('execution_params') if isinstance(source_run, dict) else None) or {}
+        # Preserve the Flow/Track ownership on the process run when the
+        # runner materializes its durable row.  The API creates the row before
+        # submission, and this runner's INSERT OR REPLACE must not erase that
+        # binding while it refreshes the frozen AI snapshot.
+        frozen_flow_id = str(source_params.get('flow_id') or '').strip() or None
+        frozen_track_id = str(source_params.get('track_id') or '').strip() or None
         frozen_platform = task.get('platform') or source_params.get('platform') or (source_run or {}).get('platform') or 'boss'
         frozen_cdp_port = task.get('cdp_port') or source_params.get('cdp_port')
         frozen_profile_key = task.get('profile_key') or source_params.get('profile_key')
@@ -270,7 +303,7 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         if source_result.get('hard_stop'):
             _hs_code = source_result.get('hard_stop_code') or 'source_blocked'
             _completed_combos = source_result.get('completed_combos') or []
-            ctx.store.create_screening_run(task_id, frozen_filters=screening_fields, source_count=len(source_result.get('jobs') or []), profile_id=str(task.get('profile_id') or '') or None, execution_params={'scrape_task_id': scrape_task_id, 'profile_summary': profile_summary or '', 'profile_facts': profile_facts, 'browser_account': frozen_browser_account or ctx.account_for_run(), 'active_account_at_freeze': str(task.get('active_account_at_freeze') or '') or ctx.account_for_run(), 'execution_config': execution_config.to_dict(), 'frozen_scope': frozen_scope.to_dict(), 'platform': frozen_platform, 'cdp_port': frozen_cdp_port, 'profile_key': frozen_profile_key, 'task_input_digest': ai_task_input_digest, 'cross_platform_dedupe': cross_platform_dedupe}, backend_version=ctx.backend_version)
+            ctx.store.create_screening_run(task_id, frozen_filters=screening_fields, source_count=len(source_result.get('jobs') or []), profile_id=str(task.get('profile_id') or '') or None, execution_params={'scrape_task_id': scrape_task_id, 'profile_summary': profile_summary or '', 'profile_facts': profile_facts, 'browser_account': frozen_browser_account or ctx.account_for_run(), 'active_account_at_freeze': str(task.get('active_account_at_freeze') or '') or ctx.account_for_run(), 'execution_config': execution_config.to_dict(), 'frozen_scope': frozen_scope.to_dict(), 'platform': frozen_platform, 'flow_id': frozen_flow_id, 'track_id': frozen_track_id, 'cdp_port': frozen_cdp_port, 'profile_key': frozen_profile_key, 'task_input_digest': ai_task_input_digest, 'cross_platform_dedupe': cross_platform_dedupe}, backend_version=ctx.backend_version)
             ctx.store.save_filter_snapshot(task_id, platform=frozen_platform, task_input_digest=ai_task_input_digest)
             ctx.write_run(task_id, status='running', current_stage='scrape')
             ctx.write_run(task_id, status='paused', error_code=_hs_code, current_stage='scrape')
@@ -293,7 +326,7 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         if not raw_jobs:
             raise RuntimeError('empty_scrape_result')
         if resume_from_run_id != task_id:
-            ctx.store.create_screening_run(task_id, frozen_filters=screening_fields, source_count=len(raw_jobs), profile_id=str(task.get('profile_id') or '') or None, execution_params={'scrape_task_id': scrape_task_id, 'profile_summary': profile_summary, 'profile_facts': profile_facts, 'browser_account': frozen_browser_account or ctx.account_for_run(), 'active_account_at_freeze': str(task.get('active_account_at_freeze') or '') or ctx.account_for_run(), 'execution_config': execution_config.to_dict(), 'frozen_scope': frozen_scope.to_dict(), 'platform': frozen_platform, 'cdp_port': frozen_cdp_port, 'profile_key': frozen_profile_key, 'task_input_digest': ai_task_input_digest, 'cross_platform_dedupe': cross_platform_dedupe}, backend_version=ctx.backend_version)
+            ctx.store.create_screening_run(task_id, frozen_filters=screening_fields, source_count=len(raw_jobs), profile_id=str(task.get('profile_id') or '') or None, execution_params={'scrape_task_id': scrape_task_id, 'profile_summary': profile_summary, 'profile_facts': profile_facts, 'browser_account': frozen_browser_account or ctx.account_for_run(), 'active_account_at_freeze': str(task.get('active_account_at_freeze') or '') or ctx.account_for_run(), 'execution_config': execution_config.to_dict(), 'frozen_scope': frozen_scope.to_dict(), 'platform': frozen_platform, 'flow_id': frozen_flow_id, 'track_id': frozen_track_id, 'cdp_port': frozen_cdp_port, 'profile_key': frozen_profile_key, 'task_input_digest': ai_task_input_digest, 'cross_platform_dedupe': cross_platform_dedupe}, backend_version=ctx.backend_version)
             ctx.store.save_filter_snapshot(task_id, platform=frozen_platform, task_input_digest=ai_task_input_digest)
             ctx.write_run(task_id, status='running', current_stage='ai_rough')
         else:
@@ -303,6 +336,21 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
             _frozen_dedupe = (resumed_run.get('execution_params') or {}).get('cross_platform_dedupe')
             if _frozen_dedupe is not None:
                 cross_platform_dedupe = bool(_frozen_dedupe)
+        # 轨道必须指名这条 AI run：接管式续跑的新 run 行在这里才存在，
+        # 绑定后轨道级暂停/恢复才有可操作对象。绑定失败不推翻已在跑的 worker，
+        # 但必须留下可观测记录（轨道随后会被启动归一认领）。
+        if frozen_flow_id:
+            try:
+                from webui.flow_task_coordinator import ensure_ai_run_bound_to_track
+
+                ensure_ai_run_bound_to_track(ctx, task_id)
+            except Exception as exc:  # noqa: BLE001 - worker keeps its durable row
+                from webui.logging_setup import get_logger
+
+                get_logger(__name__).warning(
+                    "Flow AI run %s could not take its Track (%s)",
+                    task_id, type(exc).__name__,
+                )
         resume_verdicts = {}
         resume_jd = {}
         if resume_from_run_id:
@@ -407,9 +455,74 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         finalized = True
         from webui.screen_flow import build_round_script_params
         from webui.result_rounds import save_finished_round
+
+        # A Flow result is publishable only when the final whitebox conclusion
+        # is complete.  Keep source jobs visible through the scrape run, but
+        # never create a result snapshot that would make the Track look
+        # AI-screened when the AI evidence is partial, failed, or unverifiable.
+        if frozen_flow_id and _conclusion in {'partial', 'failed', 'unverifiable'}:
+            _failure_code = (
+                'flow_result_incomplete'
+                if _conclusion in {'partial', 'failed'}
+                else 'whitebox_incomplete'
+            )
+            _mark_flow_failure(
+                ctx,
+                task_id,
+                scrape_task_id,
+                _failure_code,
+                'AI 筛选未完成，岗位暂未标记为已筛选',
+                platform=frozen_platform,
+            )
+            result['source_run_id'] = None
+            return
+
         ai_run_for_params = ctx.store.get_screening_run(task_id) or {}
         saved_script_params = build_round_script_params(ctx.store, ai_run_for_params, screening_fields, frozen_platform)
         source_run_id = save_finished_round(ctx.store, result, saved_script_params, scrape_task_id=scrape_task_id, status='done' if result.get('ok') else 'partial', execution_config=execution_config.to_dict(), platform=frozen_platform, started_at=task.get('started_at'), finished_at=int(time.time() * 1000))
+        if frozen_flow_id and not source_run_id:
+            _mark_flow_failure(
+                ctx,
+                task_id,
+                scrape_task_id,
+                'flow_result_empty',
+                'AI 筛选未生成可展示结果',
+                platform=frozen_platform,
+            )
+            result['source_run_id'] = None
+            return
+        if source_run_id:
+            try:
+                parent_run = ctx.store.get_screening_run(scrape_task_id) or {}
+                flow_id = (parent_run.get('execution_params') or {}).get('flow_id')
+                flow_service = getattr(ctx, 'flow_service', None)
+                if flow_id and flow_service is not None:
+                    flow_service.mark_result_ready(
+                        flow_id=flow_id,
+                        platform=frozen_platform,
+                        profile_id=parent_run.get('profile_id'),
+                        result_run_id=source_run_id,
+                    )
+            except Exception as flow_exc:  # noqa: BLE001 - result stays durable
+                from webui.logging_setup import get_logger
+                get_logger(__name__).warning(
+                    'B096 Flow result binding failed: %s', type(flow_exc).__name__
+                )
+                if frozen_flow_id:
+                    try:
+                        _mark_flow_failure(
+                            ctx,
+                            task_id,
+                            scrape_task_id,
+                            'flow_result_save_failed',
+                            '筛选结果保存失败，请重试',
+                            platform=frozen_platform,
+                        )
+                    except FlowStateClosureError:
+                        raise
+                    except Exception as closure_exc:  # noqa: BLE001
+                        raise FlowStateClosureError() from closure_exc
+                    raise FlowStateClosureError() from flow_exc
         if defer_partial_status and (not ctx.is_user_finished(task_id)):
             _integrity = result.get('integrity') or {}
             ctx.write_run(task_id, status='partial', error_code=_integrity.get('primary_code'), error_reason=_integrity.get('primary_reason'))
@@ -431,8 +544,14 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         ctx.schedule_pipeline_task_cleanup(task_id)
         ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
         ctx.remove_jd_checkpoint(jd_path)
+    except FlowStateClosureError:
+        # The Flow coordinator has already attempted the atomic durable
+        # closure.  Preserve the safe, observable error for the caller rather
+        # than converting it into an apparently successful worker return.
+        raise
     except ai_service.AISecurityError as exc:
         error_message = ai_service.user_facing_error(exc.error_code)
+        _mark_flow_failure(ctx, task_id, scrape_task_id, exc.error_code, error_message)
         try:
             _wb_record('unit_failed', 'ai_screen', 'ai_screen', {'error_code': exc.error_code, 'error_reason': error_message}, severity='error')
             _wb_finish('failed')
@@ -447,7 +566,7 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         persistence_error = None
         try:
             ctx.write_run(task_id, status='failed', error_code=exc.error_code, error_reason=error_message)
-        except ctx.operational_errors as persist_exc:
+        except Exception as persist_exc:
             persistence_error = type(persist_exc).__name__
         with ctx.lock:
             task = ctx.tasks.get(task_id)
@@ -486,18 +605,26 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
             except ctx.operational_errors:
                 _downgraded = False
             try:
-                ctx.store.append_task_event(task_id, 'result_round_save_failed', {'downgraded': bool(_downgraded), 'error': f'{type(exc).__name__}: {exc}'[:200]})
+                ctx.store.append_task_event(
+                    task_id,
+                    'result_round_save_failed',
+                    {
+                        'downgraded': bool(_downgraded),
+                        'error_code': 'result_round_save_failed',
+                    },
+                )
             except ctx.operational_errors:
                 pass
             if _downgraded:
                 error_message = '筛选已完成但结果保存失败，点继续可重试保存'
         _fail_code = 'result_round_save_failed' if finalized and (not ctx.is_user_finished(task_id)) and _downgraded else 'internal_error'
+        _mark_flow_failure(ctx, task_id, scrape_task_id, _fail_code, error_message)
         if not ctx.is_user_finished(task_id):
             record_failure(ctx.store, task_id, stage='ai_screen', error_code=_fail_code, reason=error_message, correlation_id=task_id, diagnostics={}, exception=exc, include_traceback=True, whitebox_unit=_current_whitebox_unit)
         persistence_error = None
         try:
             ctx.write_run(task_id, status='failed', error_code=_fail_code, error_reason=error_message)
-        except ctx.operational_errors as persist_exc:
+        except Exception as persist_exc:
             persistence_error = type(persist_exc).__name__
         with ctx.lock:
             task = ctx.tasks.get(task_id)

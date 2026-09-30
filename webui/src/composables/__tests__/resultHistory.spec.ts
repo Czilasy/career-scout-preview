@@ -56,6 +56,67 @@ describe("useResultHistory", () => {
     expect(history.items.value).toHaveLength(2);
   });
 
+  it("loads Flow history as one outer item with platform tracks", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/result-history/flows?profile_id=profile-flow")) {
+        return response({
+          ok: true,
+          items: [{
+            flow_id: "flow-history",
+            profile_id: "profile-flow",
+            selection: "all",
+            status: "failed",
+            tracks: [
+              { platform: "boss", status: "done", result_run_id: "boss-result", jobs: [{ job_id: "b1" }] },
+              { platform: "zhilian", status: "failed", jobs: [], message: "未完成 AI 筛选" },
+            ],
+          }],
+        });
+      }
+      if (url.includes("/api/result-history?profile_id=profile-flow")) {
+        return response({ ok: true, items: [] });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    setHistoryProfile("profile-flow");
+    const history = useResultHistory();
+
+    await history.loadHistory();
+
+    expect(history.flowItems.value).toHaveLength(1);
+    expect(history.flowItems.value[0].flow_id).toBe("flow-history");
+    expect(history.flowItems.value[0].tracks).toHaveLength(2);
+  });
+
+  it("keeps a slow Flow history response instead of timing out to an empty list", async () => {
+    let resolveFlow: (value: Response) => void = () => {};
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/result-history/flows")) {
+        return new Promise<Response>((resolve) => { resolveFlow = resolve; });
+      }
+      return response({ ok: true, items: [item()] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    setHistoryProfile("slow-flow");
+    const history = useResultHistory();
+    const pending = history.loadHistory();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(history.loading.value).toBe(true);
+    resolveFlow(response({
+      ok: true,
+      items: [{
+        flow_id: "slow-flow-1", profile_id: "slow-flow", selection: "all",
+        status: "done", tracks: [{ platform: "boss", status: "done" }, { platform: "zhilian", status: "done" }],
+      }],
+    }));
+    await pending;
+    expect(history.flowItems.value[0].flow_id).toBe("slow-flow-1");
+    expect(history.flowItems.value[0].tracks).toHaveLength(2);
+  });
+
   it("opens a round detail and closes the drawer", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -80,6 +141,30 @@ describe("useResultHistory", () => {
     expect(history.open.value).toBe(false);
     expect(history.detail.value?.status).toBe("failed");
     expect(history.detail.value?.source_run_id).toBe("h1");
+  });
+
+  it("keeps the current detail isolated and exposes a 404 when a history item disappeared", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/api/result-history/missing")) return response({ error: "not_found" }, 404);
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const history = useResultHistory();
+    const current = {
+      ok: true,
+      has_result: true,
+      source_run_id: "current-run",
+      platform: "boss" as const,
+      status: "done",
+      result: { jobs: [{ job_id: "current-job" }] },
+    };
+    history.detail.value = current;
+
+    await history.openRound("missing");
+
+    expect(history.open.value).toBe(true);
+    expect(history.error.value).toBeTruthy();
+    expect(history.detail.value).toMatchObject({ source_run_id: "current-run", platform: "boss" });
   });
 
   it("deletes a round and clears the currently opened detail", async () => {
@@ -111,15 +196,19 @@ describe("useResultHistory", () => {
   });
 
   it("removes the deleted round locally and reloads without flashing the loading state", async () => {
-    let resolveList: (value: Response) => void = () => {};
+    let resolveLegacy: (value: Response) => void = () => {};
+    let resolveFlow: (value: Response) => void = () => {};
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if ((url.includes("/api/result-history/h1?") || url.endsWith("/api/result-history/h1")) && init?.method === "DELETE") {
         return response({ ok: true, deleted: true, run_id: "h1" });
       }
+      if (url.includes("/api/result-history/flows")) {
+        return new Promise<Response>((resolve) => { resolveFlow = resolve; });
+      }
       if (url.includes("/api/result-history")) {
         return new Promise<Response>((resolve) => {
-          resolveList = resolve;
+          resolveLegacy = resolve;
         });
       }
       return response({});
@@ -132,7 +221,8 @@ describe("useResultHistory", () => {
     await flushPromises();
     expect(history.items.value.map((round) => round.run_id)).toEqual(["h2"]);
     expect(history.loading.value).toBe(false);
-    resolveList(response({ ok: true, items: [item({ run_id: "h3" })] }));
+    resolveLegacy(response({ ok: true, items: [item({ run_id: "h3" })] }));
+    resolveFlow(response({ ok: true, items: [] }));
     await pending;
     await flushPromises();
     expect(history.items.value.map((round) => round.run_id)).toEqual(["h3"]);
@@ -151,7 +241,7 @@ describe("useResultHistory", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const history = useResultHistory();
-    const archived = await history.archiveAllCurrentResults();
+    const archived = await history.archiveAllCurrentResults("flow-current");
     expect(archived).toEqual(["h1"]);
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/result-history/archive-latest",
@@ -163,7 +253,7 @@ describe("useResultHistory", () => {
     const fetchMock = vi.fn(async () => response({ ok: false, error: "persistence_failed" }, 500));
     vi.stubGlobal("fetch", fetchMock);
     const history = useResultHistory();
-    await expect(history.archiveAllCurrentResults()).rejects.toThrow();
+    await expect(history.archiveAllCurrentResults("flow-current")).rejects.toThrow();
   });
 
   it("scopes history requests to the current profile and swaps slots on switch", async () => {
@@ -232,9 +322,12 @@ describe("useResultHistory", () => {
     vi.stubGlobal("fetch", fetchMock);
     const history = useResultHistory();
     setHistoryProfile("profile-c");
-    await history.archiveAllCurrentResults();
+    await history.archiveAllCurrentResults("flow-current");
     const archiveCall = calls.find((call) => call.url.endsWith("/api/result-history/archive-latest"));
-    expect(JSON.parse(String(archiveCall?.init?.body))).toEqual({ profile_id: "profile-c" });
+    expect(JSON.parse(String(archiveCall?.init?.body))).toEqual({
+      profile_id: "profile-c",
+      flow_id: "flow-current",
+    });
   });
 
   // B099：切轮次不是「回到最新」。清空展示会被当成回最新而触发第二条

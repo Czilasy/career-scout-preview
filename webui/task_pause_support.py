@@ -168,11 +168,24 @@ def stop_mode_for_event(stop_event, task: dict | None = None) -> str | None:
 def continue_task_kind(ctx, run_id: str, run: dict | None = None) -> str:
     """Resolve the continuation kind, preferring the live task declaration.
 
-    An AI hard-stop can persist ``current_stage='scrape'`` while it is
-    materialising its source snapshot.  The in-memory task kind is the only
-    reliable discriminator in that window; after a restart, the persisted
-    stage remains the compatibility fallback for legacy scrape runs.
+    A durable Flow binding is stronger than both a stale live declaration and
+    ``current_stage``.  For unbound legacy runs, retain the live task kind and
+    then the persisted-stage compatibility fallback.
     """
+    # The durable Flow binding outranks a stale worker declaration or
+    # ``current_stage``.  This matters after an AI hard-stop that persisted
+    # ``scrape`` while the screen run remains the Track's bound run.
+    from webui.flow_task_coordinator import resolve_flow_binding
+
+    flow_binding = resolve_flow_binding(ctx, run_id)
+    if flow_binding is not None:
+        track_row = flow_binding.get("track_row")
+        if track_row is not None:
+            if str(track_row["screen_run_id"] or "").strip() == str(run_id):
+                return "ai_screen"
+            if str(track_row["scrape_run_id"] or "").strip() == str(run_id):
+                return "scrape"
+
     with ctx.lock:
         task = ctx.tasks.get(run_id)
         live_kind = str((task or {}).get("kind") or "").strip().lower()
@@ -503,6 +516,68 @@ def pause_with_mode(ctx, run_id: str, mode: str):
       携带 immediate 信号（fetch_job_details 据此作废当前批）、终止活动批
       子进程并清理 guard 批次登记；已暂停/已 immediate 幂等返回 ok（不 409）。
     """
+    # Resolve the durable Flow identity before publishing any process-local
+    # stop signal.  A Flow run without an exact Track/platform/profile binding
+    # must fail explicitly instead of pausing an arbitrary legacy task.
+    from webui.flow_task_coordinator import (
+        FlowTaskOperationError,
+        MissingPlatformIdentityError,
+        resolve_flow_binding,
+        sync_flow_track_for_run,
+    )
+    try:
+        flow_binding = resolve_flow_binding(ctx, run_id)
+    except MissingPlatformIdentityError:
+        return jsonify({
+            "ok": False,
+            "run_id": run_id,
+            "error": "platform_identity_missing",
+            "error_code": "platform_identity_missing",
+            "message": "任务缺少平台身份，无法暂停关联运行线",
+        }), 409
+    except FlowTaskOperationError:
+        return jsonify({
+            "ok": False,
+            "run_id": run_id,
+            "error": "flow_task_operation_failed",
+            "error_code": "flow_task_operation_failed",
+            "message": "任务关联运行线无效，请刷新后重试",
+        }), 409
+    flow_track_status = None
+    if flow_binding is not None:
+        try:
+            flow = ctx.store.get_flow(
+                flow_binding["flow_id"], profile_id=flow_binding["profile_id"]
+            )
+            track = next(
+                item for item in flow.get("tracks", [])
+                if item.get("id") == flow_binding["track_id"]
+            )
+        except (KeyError, StopIteration, ValueError):
+            return jsonify({
+                "ok": False,
+                "run_id": run_id,
+                "error": "flow_task_operation_failed",
+                "error_code": "flow_task_operation_failed",
+                "message": "任务关联运行线无效，请刷新后重试",
+            }), 409
+        flow_track_status = str(track.get("status") or "")
+        if flow_track_status in {"done", "succeeded", "failed", "stopped", "cancelled"}:
+            return jsonify({
+                "ok": False,
+                "run_id": run_id,
+                "error": "flow_task_operation_failed",
+                "error_code": "flow_task_operation_failed",
+                "message": "任务关联运行线已结束，请刷新后重试",
+            }), 409
+        if flow_track_status not in {"queued", "running", "paused"}:
+            return jsonify({
+                "ok": False,
+                "run_id": run_id,
+                "error": "flow_task_operation_failed",
+                "error_code": "flow_task_operation_failed",
+                "message": "任务关联运行线状态无效，请刷新后重试",
+            }), 409
     with ctx.lock:
         task = ctx.tasks.get(run_id)
         if task is None:
@@ -519,45 +594,72 @@ def pause_with_mode(ctx, run_id: str, mode: str):
             # 收尾区（事实已定）：任务正在关浏览器/写终态，暂停请求只回执、
             # 不执行——收尾结论统一结算（完成优先），随后任务即到终态。
             return jsonify({
-                "ok": True, "run_id": run_id, "status": "finalizing",
+                "ok": False, "run_id": run_id, "status": "finalizing",
+                "error": "finalizing",
                 "message": "任务正在收尾，暂停未执行",
-            }), 200
-        if task["status"] not in ("queued", "running"):
-            if mode == "immediate":
-                # 025：已暂停/已终态再点立即停止 → 幂等不报错
-                return jsonify({
-                    "ok": True, "run_id": run_id, "status": "paused",
-                }), 200
-            return jsonify({
-                "ok": False, "error": "task_not_active",
-                "message": f"任务当前状态（{task['status']}）不能暂停",
             }), 409
         run = ctx.store.get_screening_run(run_id)
-        if run is not None and run.get("status") not in ("queued", "running"):
-            if mode == "immediate":
+        task_status = str(task.get("status") or "")
+        # A worker may finish its local pause after the first signal but before
+        # the durable Track write succeeds.  Keep that exact Flow task
+        # retryable so the next request can publish ``paused`` without
+        # emitting a second signal or rejecting the already-paused worker.
+        flow_pause_recovery = bool(
+            flow_binding is not None
+            and flow_track_status == "running"
+            and task_status == "paused"
+            and run is not None
+            and str(run.get("status") or "") == "paused"
+        )
+        if task_status not in ("queued", "running"):
+            if (
+                mode == "immediate"
+                and task_status == "paused"
+                and (run is None or str(run.get("status") or "") == "paused")
+                and (flow_binding is None or flow_track_status == "paused")
+            ):
+                # A repeated immediate pause is idempotent only when every
+                # available durable projection already says ``paused``.
                 return jsonify({
                     "ok": True, "run_id": run_id, "status": "paused",
                 }), 200
-            return jsonify({
-                "ok": False, "error": "task_not_active",
-                "message": f"任务当前状态（{run.get('status')}）不能暂停",
-            }), 409
+            if not flow_pause_recovery:
+                return jsonify({
+                    "ok": False, "error": "task_not_active",
+                    "message": f"任务当前状态（{task['status']}）不能暂停",
+                }), 409
+        if run is not None and run.get("status") not in ("queued", "running"):
+            if (
+                mode == "immediate"
+                and str(run.get("status") or "") == "paused"
+                and task_status == "paused"
+                and (flow_binding is None or flow_track_status == "paused")
+            ):
+                return jsonify({
+                    "ok": True, "run_id": run_id, "status": "paused",
+                }), 200
+            if not flow_pause_recovery:
+                return jsonify({
+                    "ok": False, "error": "task_not_active",
+                    "message": f"任务当前状态（{run.get('status')}）不能暂停",
+                }), 409
         stop_event = task.get("stop_event")
-        if stop_event is None:
+        if stop_event is None and not flow_pause_recovery:
             return jsonify({
                 "ok": False, "error": "stop_signal_unavailable",
                 "message": "任务缺少停止信号，无法暂停",
             }), 409
-        if task.get("immediate_stop"):
+        if task.get("immediate_stop") and not flow_pause_recovery:
             # 025：已 immediate 再调 → 幂等（不重复清理）
             return jsonify({
                 "ok": True, "run_id": run_id, "status": "pausing",
             }), 200
-        if mode == "immediate":
+        if mode == "immediate" and not flow_pause_recovery:
             task["immediate_stop"] = True
             stop_event.immediate = True  # fetch_job_details 据此作废当前批
-        request_stop(task, stop_event, STOP_MODE_PAUSE)
-    if mode == "immediate":
+        if not flow_pause_recovery:
+            request_stop(task, stop_event, STOP_MODE_PAUSE)
+    if mode == "immediate" and not flow_pause_recovery:
         # 025：终止活动批子进程 + 清理批次登记（锁外，可能耗时）
         guard = getattr(ctx, "pipeline_guard", None)
         if guard is not None:
@@ -566,6 +668,31 @@ def pause_with_mode(ctx, run_id: str, mode: str):
             except Exception:
                 # 清理失败不阻断暂停（幂等兜底）
                 _logger.exception("immediate_stop_task 异常（已忽略）")
+    try:
+        sync_flow_track_for_run(
+            ctx,
+            run_id,
+            status="paused",
+            stage=str((run or {}).get("current_stage") or "scrape"),
+            error_code=str((run or {}).get("error_code") or "user_paused"),
+            reason=str((run or {}).get("error_reason") or "用户已暂停"),
+        )
+    except MissingPlatformIdentityError:
+        return jsonify({
+            "ok": False,
+            "run_id": run_id,
+            "error": "platform_identity_missing",
+            "error_code": "platform_identity_missing",
+            "message": "任务缺少平台身份，无法暂停关联运行线",
+        }), 409
+    except FlowTaskOperationError:
+        return jsonify({
+            "ok": False,
+            "run_id": run_id,
+            "error": "flow_task_operation_failed",
+            "error_code": "flow_task_operation_failed",
+            "message": "关联运行线暂停失败，请刷新任务状态后重试",
+        }), 503
     return jsonify({"ok": True, "run_id": run_id, "status": "pausing"})
 
 

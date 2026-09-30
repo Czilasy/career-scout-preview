@@ -46,10 +46,114 @@ export interface RoundStatusPayload {
   scope: RoundStatusScope;
 }
 
+/**
+ * 平台显示名唯一权威（全项目只有这一处登记平台名）。
+ * 新增平台只在这里加一行；未登记的身份给中性中文，
+ * 绝不默认成某个平台，也不把内部码原样吐到界面上。
+ */
+const PLATFORM_LABELS: Record<string, string> = {
+  boss: "BOSS",
+  zhilian: "智联",
+};
+const UNKNOWN_PLATFORM_LABEL = "其它平台";
+
+export function platformLabel(platform?: string | null): string {
+  const key = String(platform ?? "").trim().toLowerCase();
+  if (!key) return "";
+  return PLATFORM_LABELS[key] || UNKNOWN_PLATFORM_LABEL;
+}
+
 export function roundScopeLabel(scope: RoundStatusScope, platform: Platform): string {
   if (scope === "all") return "全部";
   if (scope === "history") return "历史轮次";
-  return platform === "boss" ? "BOSS" : "智联";
+  return platformLabel(platform);
+}
+
+// ---------------------------------------------------------------------------
+// 阶段卡状态口径（树干唯一一份）：Flow 呈现层、轨道头部与卡体都从这里取，
+// 不在各自文件里抄清单或抄词表——两份清单会各自漂移（历史上就漏过 pausing），
+// 两份词表会让同一张卡的头部与卡体说两句不同结论。
+// ---------------------------------------------------------------------------
+
+/** 轨道级活动态：整条线还活着（排队 / 进行中）。 */
+export const ACTIVE_TRACK_STATUSES = ["queued", "running"];
+
+/**
+ * 本段快照还没说完自己那段话的状态（空串＝后端还没写状态，同样没说完）。
+ * 轨道已经不是活动态时，这些状态要按整条线定格；本段快照是这些状态时，
+ * 它继续替整条线说话。
+ */
+export const STAGE_IN_FLIGHT_STATUSES = ["", "queued", "pending", "running", "pausing"];
+
+/**
+ * 在飞清单里「还没有 worker 在跑」的状态：空串＝后端还没写状态，
+ * queued／pending＝尚未开始。它们和已中断／已暂停／终态一样，时长由后端定格。
+ */
+const STAGE_NO_LIVE_WORKER_STATUSES = ["", "queued", "pending"];
+
+/**
+ * 计时是否走活表（可否在定格值上叠加本地每秒增量）的唯一判定，消费方只许调这一个函数。
+ * 在飞清单说这段还没说完自己的话，其中只有真的有活 worker 在跑（进行中／正在暂停）
+ * 才允许前端把表继续往下走；已中断／已暂停／尚未开始／终态一律只报后端定格值——
+ * 否则后端把时长定住了，前端又用本地时钟把它演成还在跑。
+ */
+export function elapsedRunsLive(status?: string | null): boolean {
+  const explicit = String(status || "");
+  return STAGE_IN_FLIGHT_STATUSES.includes(explicit) && !STAGE_NO_LIVE_WORKER_STATUSES.includes(explicit);
+}
+
+/**
+ * 本段已经有 run 身份（真的跑过）、这一轮却读不到任何状态时的兜底口径。
+ * 与「从没开始的段」（中性 queued／等待开始）必须分开：跑过的段不能说成没跑过。
+ */
+export const UNREADABLE_STAGE_STATUS = "unknown";
+
+/**
+ * 完成族：done / succeeded 是后端轨道白名单终态，completed / completed_with_pending /
+ * partial 是任务状态接口对同一事实的公开别名（webui/task_status.py）。
+ */
+export const STAGE_COMPLETED_STATUSES = [
+  "done", "succeeded", "completed", "completed_with_pending", "partial",
+];
+
+/** 白箱完整性结论的说法（卡体独说的口径，头部必须说同一句）。 */
+const STAGE_INTEGRITY_LABELS: Record<string, string> = {
+  succeeded: "完整成功",
+  empty: "已完成，没有找到岗位",
+  partial: "部分完成，部分结果可能缺失",
+  failed: "执行失败",
+  unverifiable: "无法确认是否完成",
+  interrupted: "任务已中断",
+};
+
+/** 生命周期状态比白箱结论更有话要说：失败/中断/停止/暂停不写成「完整成功」。 */
+const STAGE_STATUS_OVERRIDES_INTEGRITY = [
+  "failed", "interrupted", "cancelled", "stopped", "unavailable", "paused",
+];
+
+/**
+ * 阶段状态词的唯一计算：轨道头部徽章与卡体（TaskProgress）都调这一个函数，
+ * 同一张卡不会出现两句不同结论——后端把白箱 unverifiable 公开成
+ * completed_with_pending 时，头部也不许把「无法确认是否完成」报成「完成，但有待确认」。
+ */
+export function stageStatusLabel(status?: string | null, integrityConclusion?: string | null): string {
+  const explicit = String(status || "");
+  const conclusion = String(integrityConclusion || "");
+  if (conclusion && !STAGE_STATUS_OVERRIDES_INTEGRITY.includes(explicit)) {
+    return STAGE_INTEGRITY_LABELS[conclusion] || "运行中";
+  }
+  if (explicit === "completed_with_pending" || explicit === "partial") return "完成，但有待确认";
+  if (STAGE_COMPLETED_STATUSES.includes(explicit)) return "已完成";
+  if (explicit === "failed") return "执行失败";
+  if (explicit === "unavailable") return "暂不可用";
+  if (explicit === "cancelled" || explicit === "stopped") return "已停止";
+  if (explicit === "paused") return "已暂停";
+  if (explicit === "pausing") return "正在暂停";
+  if (explicit === "interrupted") return "已中断";
+  if (explicit === "queued") return "等待开始";
+  // 跑过但读不到状态的段：只说读不到，不说没开始、也不演成在跑。
+  if (explicit === UNREADABLE_STAGE_STATUS) return "状态更新中";
+  return "运行中";
 }
 
 export function historyStatusLabel(status: string, jobCount: number): string {

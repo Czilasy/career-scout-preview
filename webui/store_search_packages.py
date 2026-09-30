@@ -49,6 +49,7 @@ class StoreSearchPackagesMixin:
         city,
         profile_summary,
         profile_facts,
+        condition_snapshot=None,
     ) -> dict:
         package_id = _uuid()
         timestamp = _now()
@@ -56,8 +57,9 @@ class StoreSearchPackagesMixin:
             conn.execute(
                 "INSERT INTO search_packages ("
                 " id, name, payload_version, keywords_json, city_json,"
-                " profile_summary, profile_facts_json, created_at, updated_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " profile_summary, profile_facts_json, condition_snapshot_json,"
+                " created_at, updated_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     package_id,
                     str(name),
@@ -66,6 +68,7 @@ class StoreSearchPackagesMixin:
                     json.dumps(city, ensure_ascii=False),
                     str(profile_summary),
                     json.dumps(profile_facts, ensure_ascii=False),
+                    json.dumps(condition_snapshot or {}, ensure_ascii=False),
                     timestamp,
                     timestamp,
                 ),
@@ -99,6 +102,7 @@ class StoreSearchPackagesMixin:
             keywords = json.loads(row["keywords_json"])
             city = json.loads(row["city_json"])
             profile_facts = json.loads(row["profile_facts_json"])
+            condition_snapshot = json.loads(row["condition_snapshot_json"])
         except (TypeError, ValueError) as exc:
             raise SearchPackageCorruptError(
                 "search package payload is not valid JSON"
@@ -111,6 +115,7 @@ class StoreSearchPackagesMixin:
             "city": city,
             "profile_summary": row["profile_summary"],
             "profile_facts": profile_facts,
+            "condition_snapshot": condition_snapshot,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

@@ -1,9 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
-import { computed, ref } from "vue";
+import { computed, ref, type Ref } from "vue";
 import { useResumeAnalysisFlow } from "../useResumeAnalysisFlow";
 
 describe("useResumeAnalysisFlow", () => {
   const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  function analysisRefs(
+    activeStep: Ref<string>,
+    uploadBusy: Ref<boolean>,
+    resumeError: Ref<string>,
+    resumeAnalysis: Ref<unknown>,
+  ) {
+    return {
+      activeStep,
+      navigateStep: (step: string) => { activeStep.value = step; },
+      uploadBusy,
+      resumeError,
+      resumeAnalysis,
+    };
+  }
 
   it("启动分析后不锁住页面，成功时落到搜索页", async () => {
     let resolveRequest: (value: { fields: { keywords: string[] } }) => void = () => undefined;
@@ -16,7 +30,7 @@ describe("useResumeAnalysisFlow", () => {
     const resumeAnalysis = ref<unknown>(null);
     const entered: string[] = [];
     const flow = useResumeAnalysisFlow({
-      refs: { activeStep, uploadBusy, resumeError, resumeAnalysis },
+      refs: analysisRefs(activeStep, uploadBusy, resumeError, resumeAnalysis),
       api: {
         postAnalyzeResume: () => request,
         cancelActiveTasksForNewRound: async () => true,
@@ -48,7 +62,7 @@ describe("useResumeAnalysisFlow", () => {
     const resumeError = ref("");
     const resumeAnalysis = ref<unknown>({ fields: { keywords: ["旧关键词"] } });
     const flow = useResumeAnalysisFlow({
-      refs: { activeStep, uploadBusy, resumeError, resumeAnalysis },
+      refs: analysisRefs(activeStep, uploadBusy, resumeError, resumeAnalysis),
       api: {
         postAnalyzeResume: () => new Promise(() => undefined),
         cancelActiveTasksForNewRound: async () => true,
@@ -70,7 +84,7 @@ describe("useResumeAnalysisFlow", () => {
     const resumeAnalysis = ref<unknown>(null);
     const error = new Error("服务端暂时不可用");
     const flow = useResumeAnalysisFlow({
-      refs: { activeStep, uploadBusy, resumeError, resumeAnalysis },
+      refs: analysisRefs(activeStep, uploadBusy, resumeError, resumeAnalysis),
       api: {
         postAnalyzeResume: async () => {
           throw error;
@@ -102,7 +116,7 @@ describe("useResumeAnalysisFlow", () => {
     const resumeError = ref("");
     const resumeAnalysis = ref<unknown>(null);
     const flow = useResumeAnalysisFlow({
-      refs: { activeStep, uploadBusy, resumeError, resumeAnalysis },
+      refs: analysisRefs(activeStep, uploadBusy, resumeError, resumeAnalysis),
       api: {
         postAnalyzeResume: () => request,
         cancelActiveTasksForNewRound: async () => true,
@@ -130,7 +144,7 @@ describe("useResumeAnalysisFlow", () => {
     const resumeError = ref("");
     const resumeAnalysis = ref<unknown>(null);
     const flow = useResumeAnalysisFlow({
-      refs: { activeStep, uploadBusy, resumeError, resumeAnalysis },
+      refs: analysisRefs(activeStep, uploadBusy, resumeError, resumeAnalysis),
       api: {
         postAnalyzeResume: async () => ({}),
         cancelActiveTasksForNewRound: async () => true,
@@ -152,7 +166,7 @@ describe("useResumeAnalysisFlow", () => {
     const resumeAnalysis = ref<unknown>(null);
     const notices: string[] = [];
     const flow = useResumeAnalysisFlow({
-      refs: { activeStep, uploadBusy, resumeError, resumeAnalysis },
+      refs: analysisRefs(activeStep, uploadBusy, resumeError, resumeAnalysis),
       api: {
         postAnalyzeResume: async () => ({}),
         cancelActiveTasksForNewRound: async () => false,
@@ -184,7 +198,7 @@ describe("useResumeAnalysisFlow", () => {
     ];
     let call = 0;
     const flow = useResumeAnalysisFlow({
-      refs: { activeStep, uploadBusy, resumeError, resumeAnalysis },
+      refs: analysisRefs(activeStep, uploadBusy, resumeError, resumeAnalysis),
       api: {
         postAnalyzeResume: async () => ({ ok: true, task_id: "resume-analysis-1" }),
         fetchTaskState: async () => states[Math.min(call++, states.length - 1)],
@@ -222,7 +236,7 @@ describe("useResumeAnalysisFlow", () => {
     const resumeAnalysis = ref<unknown>(null);
     const applied: unknown[] = [];
     const flow = useResumeAnalysisFlow({
-      refs: { activeStep, uploadBusy, resumeError, resumeAnalysis },
+      refs: analysisRefs(activeStep, uploadBusy, resumeError, resumeAnalysis),
       api: {
         postAnalyzeResume: async () => ({ ok: true, task_id: "resume-analysis-2" }),
         fetchTaskState: async () => ({ status: "done", result: { fields: { profile_summary: "画像" } } }),
@@ -254,7 +268,7 @@ describe("useResumeAnalysisFlow", () => {
     ];
     let call = 0;
     const flow = useResumeAnalysisFlow({
-      refs: { activeStep, uploadBusy, resumeError, resumeAnalysis },
+      refs: analysisRefs(activeStep, uploadBusy, resumeError, resumeAnalysis),
       api: {
         postAnalyzeResume: async () => ({}),
         fetchTaskState: async () => states[Math.min(call++, states.length - 1)],
@@ -287,7 +301,7 @@ describe("useResumeAnalysisFlow", () => {
     const resumeError = ref("");
     const resumeAnalysis = ref<unknown>(null);
     const flow = useResumeAnalysisFlow({
-      refs: { activeStep, uploadBusy, resumeError, resumeAnalysis },
+      refs: analysisRefs(activeStep, uploadBusy, resumeError, resumeAnalysis),
       api: {
         postAnalyzeResume: async () => ({}),
         fetchTaskState: async () => ({ status: "failed", error: "服务端暂时不可用" }),

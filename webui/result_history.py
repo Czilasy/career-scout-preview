@@ -152,6 +152,32 @@ class ResultHistoryService:
             })
         return items
 
+    def list_flow_history(self, profile_id: str) -> list[dict[str, Any]]:
+        """Return one outer history item per Flow with platform inner tracks."""
+        items = []
+        flows = self.store.list_flows(profile_id, include_legacy=True)
+        real_result_ids = {
+            str(track.get("result_run_id"))
+            for flow in flows if not flow.get("legacy")
+            for track in flow.get("tracks", []) if track.get("result_run_id")
+        }
+        for flow in flows:
+            if flow.get("legacy") and str(flow["id"]) in real_result_ids:
+                continue
+            results = self.store.get_flow_results(flow["id"], profile_id=profile_id)
+            items.append({
+                "flow_id": flow["id"],
+                "profile_id": flow["profile_id"],
+                "selection": flow["selection"],
+                "status": flow["status"],
+                "created_at": flow.get("created_at"),
+                "updated_at": flow.get("updated_at"),
+                "legacy": bool(flow.get("legacy")),
+                "tracks": results["tracks"],
+                "screened_count": results["screened_count"],
+            })
+        return items
+
     def get_round(self, run_id: str, profile_id: str | None = None) -> dict[str, Any] | None:
         run = self.store.get_screening_run(run_id)
         if run is None or run.get("record_kind") != "result_snapshot":
@@ -194,6 +220,10 @@ class ResultHistoryService:
     def archive_all_current_results(self, profile_id: str | None = None) -> list[str]:
         """归档当前画像的当前结果（BOSS 与智联），保留为历史轮次。"""
         return self.store.archive_all_current_results(profile_id=profile_id)
+
+    def archive_flow(self, flow_id: str, profile_id: str) -> list[str]:
+        """Archive only result snapshots owned by the requested Flow."""
+        return self.store.archive_flow_results(flow_id, profile_id)
 
     def delete_round(self, run_id: str, profile_id: str | None = None) -> bool:
         """043：整条进出——删除轮连带其根账本/派生记录/白箱/日志一起走。"""

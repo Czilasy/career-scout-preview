@@ -18,7 +18,6 @@ const envPayload = {
       items: [
         { id: "browsers", name: "Chromium 浏览器", status: "ok", detail: "找到 Chrome ✅", fix: null },
         { id: "cdp", name: "专用浏览器已启动", status: "fail", detail: "无法连接", fix: "启动专用浏览器: ..." },
-        { id: "boss_login", name: "BOSS 登录状态", status: "fail", detail: "未登录", fix: "打开账号浏览器登录" },
       ],
     },
     {
@@ -36,7 +35,6 @@ const envPayload = {
       ],
     },
   ],
-  active_account: "a",
   checked_at: 1785940000,
 };
 
@@ -63,7 +61,6 @@ const exePayload = {
       ],
     },
   ],
-  active_account: "",
   checked_at: 1785940000,
 };
 
@@ -81,7 +78,6 @@ const sourcePayload = {
       ],
     },
   ],
-  active_account: "",
   checked_at: 1785940000,
 };
 
@@ -108,7 +104,6 @@ describe("EnvCheckDialog", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/env-check") return response(envPayload);
-      if (url === "/api/browser-accounts") return response({ accounts: [{ id: "a", name: "账号 A" }] });
       return response({});
     });
 
@@ -124,7 +119,21 @@ describe("EnvCheckDialog", () => {
 
     const failItem = wrapper.get('[data-testid="env-item-cdp"]');
     expect(failItem.text()).toContain("❌");
+    expect(wrapper.find('[data-testid="env-item-boss_login"]').exists()).toBe(false);
     expect(wrapper.get('[data-testid="env-check-time"]').text()).toContain("上次检查");
+  });
+
+  it("opens the environment check without loading browser accounts", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/env-check") return response(envPayload);
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    expect(wrapper.get('[data-testid="env-item-browsers"]').text()).toContain("找到 Chrome");
+    expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/env-check")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/browser-accounts")).toHaveLength(0);
   });
 
   it("shows every real status at once without staged pending marks", async () => {
@@ -132,7 +141,6 @@ describe("EnvCheckDialog", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/env-check") return response(envPayload);
-      if (url === "/api/browser-accounts") return response({ accounts: [] });
       return response({});
     });
 
@@ -149,7 +157,6 @@ describe("EnvCheckDialog", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/env-check") return response(envPayload);
-      if (url === "/api/browser-accounts") return response({ accounts: [{ id: "a", name: "账号 A" }] });
       return response({});
     });
 
@@ -160,28 +167,10 @@ describe("EnvCheckDialog", () => {
     expect(clearCall).toBe(false);
   });
 
-  it("emits open-browser-accounts when clicking the login guidance fix", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url === "/api/env-check") return response(envPayload);
-      if (url === "/api/browser-accounts") return response({ accounts: [] });
-      return response({});
-    });
-
-    const wrapper = await mountOpen(fetchMock);
-
-    const bossItem = wrapper.get('[data-testid="env-item-boss_login"]');
-    const fixButton = bossItem.find("button");
-    expect(fixButton.text()).toContain("登录指引");
-    await fixButton.trigger("click");
-    expect(wrapper.emitted("open-browser-accounts")).toHaveLength(1);
-  });
-
   it("runs the AI connectivity test on demand", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/env-check") return response(envPayload);
-      if (url === "/api/browser-accounts") return response({ accounts: [] });
       if (url === "/api/ai-settings/test") return response({ ok: true, message: "ok" });
       return response({});
     });
@@ -196,6 +185,19 @@ describe("EnvCheckDialog", () => {
     expect(wrapper.text()).toContain("AI 连通性测试通过");
   });
 
+  it("keeps the AI settings guidance for the remaining failed check", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/env-check") return response(envPayload);
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+    const fixButton = wrapper.get('[data-testid="env-item-ai_key"] button');
+    expect(fixButton.text()).toContain("打开 AI 设置");
+    await fixButton.trigger("click");
+    expect(wrapper.emitted("open-ai-settings")).toHaveLength(1);
+  });
+
   it("re-runs the check via the toolbar button", async () => {
     let calls = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -204,7 +206,6 @@ describe("EnvCheckDialog", () => {
         calls += 1;
         return response(envPayload);
       }
-      if (url === "/api/browser-accounts") return response({ accounts: [] });
       return response({});
     });
 
@@ -220,7 +221,6 @@ describe("EnvCheckDialog", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/env-check") return response(exePayload);
-      if (url === "/api/browser-accounts") return response({ accounts: [] });
       return response({});
     });
 
@@ -266,7 +266,6 @@ describe("EnvCheckDialog", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/env-check") return response(exeFailPayload);
-      if (url === "/api/browser-accounts") return response({ accounts: [] });
       return response({});
     });
 
@@ -274,7 +273,7 @@ describe("EnvCheckDialog", () => {
 
     const webview2 = wrapper.get('[data-testid="env-item-webview2"]');
     expect(webview2.text()).toContain("❌");
-    // 现有 fixAction 仅识别三类修复动作；「安装 WebView2 运行时」不在其中 → 不生成按钮（合同 §4）。
+    // fixAction 仅识别打开 AI 设置；「安装 WebView2 运行时」不生成按钮（合同 §4）。
     expect(webview2.find("button").exists()).toBe(false);
   });
 
@@ -282,7 +281,6 @@ describe("EnvCheckDialog", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/env-check") return response(sourcePayload);
-      if (url === "/api/browser-accounts") return response({ accounts: [] });
       return response({});
     });
 
@@ -302,7 +300,6 @@ describe("EnvCheckDialog", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/env-check") return response(envPayload);
-      if (url === "/api/browser-accounts") return response({ accounts: [{ id: "a", name: "账号 A" }] });
       return response({});
     });
 

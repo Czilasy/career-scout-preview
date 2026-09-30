@@ -381,7 +381,7 @@ class SearchPackageServiceTests(SearchPackageTestCase):
             set(package),
             {
                 "id", "name", "payloadVersion", "keywords", "city",
-                "profile", "createdAt", "updatedAt",
+                "profile", "conditions", "createdAt", "updatedAt",
             },
         )
         self.assertEqual(package["payloadVersion"], 1)
@@ -527,7 +527,7 @@ class SearchPackageApiLoadTests(SearchPackageApiTestCase):
             set(body),
             {
                 "id", "name", "payloadVersion", "keywords", "city",
-                "profile", "createdAt", "updatedAt",
+                "profile", "conditions", "createdAt", "updatedAt",
             },
         )
         self.assertEqual(body["keywords"]["selected"], ["产品经理"])
@@ -674,7 +674,7 @@ class SearchPackageApiManageTests(SearchPackageApiTestCase):
                 self.assertEqual(resp.status_code, 400)
                 self.assertEqual(resp.get_json()["error"]["code"], "invalid_name")
         self.assertEqual(
-            self.client.get(f"/api/search-packages/{created['id']}").get_json()["name"],
+            self.client.get(f"/api/search-packages/{created['id']}").get_json().get("name"),
             created["name"],
             "非法改名不得改动配置包",
         )
@@ -720,6 +720,90 @@ class SearchPackageApiManageTests(SearchPackageApiTestCase):
         self.assertEqual(
             anonymous.delete(f"/api/search-packages/{created['id']}").status_code, 403,
         )
+
+class SearchPackageV2ConditionSnapshotTests(SearchPackageTestCase):
+    """B096 V2 T012: package snapshots carry final two-platform conditions."""
+
+    def _snapshot(self, **overrides):
+        snapshot = {
+            "snapshotVersion": 2,
+            "mappingVersion": "b096-v2-2026-09-27",
+            "unifiedValues": {
+                "salary": ["406"], "experience": [], "degree": [],
+                "industry": [], "scale": [], "recruiter_activity": [],
+            },
+            "platformValues": {
+                "boss": {"salary": ["406"], "stage": ["804"]},
+                "zhilian": {"salary": ["407"], "company_nature": []},
+            },
+            "overrides": {"boss": {"salary": ["407"]}, "zhilian": {}},
+            "exclusiveValues": {
+                "boss": {"stage": ["804"]},
+                "zhilian": {"company_nature": []},
+            },
+        }
+        snapshot.update(overrides)
+        return snapshot
+
+    def _create_v2(self, **overrides):
+        return self.service.create_package(valid_payload(
+            payloadVersion=2,
+            conditions=self._snapshot(**overrides),
+        ))
+
+    def _assert_unusable(self, package_id):
+        with self.assertRaises(SearchPackageError) as ctx:
+            self.service.get_package(package_id)
+        self.assertEqual(ctx.exception.code, "package_unusable")
+
+    def test_version2_requires_and_returns_full_condition_snapshot(self):
+        package = self._create_v2()
+        self.assertEqual(package["payloadVersion"], 2)
+        self.assertEqual(package["conditions"], self._snapshot())
+
+    def test_version2_rejects_missing_or_invalid_snapshot(self):
+        with self.assertRaises(SearchPackageError) as ctx:
+            self.service.create_package(valid_payload(payloadVersion=2))
+        self.assertEqual(ctx.exception.code, "invalid_package")
+
+        broken = self._snapshot()
+        broken["unifiedValues"]["salary"] = "406"
+        with self.assertRaises(SearchPackageError) as ctx:
+            self.service.create_package(valid_payload(
+                payloadVersion=2, conditions=broken,
+            ))
+        self.assertEqual(ctx.exception.code, "invalid_package")
+
+    def test_version1_remains_readable_without_condition_snapshot(self):
+        package = self.service.create_package(valid_payload())
+        self.assertEqual(package["payloadVersion"], 1)
+        self.assertEqual(package["conditions"], {})
+
+    def test_stored_corrupt_or_invalid_v2_snapshot_is_unusable(self):
+        created = self._create_v2()
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE search_packages SET condition_snapshot_json = '{bad' "
+                "WHERE id = ?",
+                (created["id"],),
+            )
+        self._assert_unusable(created["id"])
+
+        second = self._create_v2()
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE search_packages SET condition_snapshot_json = ? "
+                "WHERE id = ?",
+                (json.dumps({"snapshotVersion": 1}), second["id"]),
+            )
+        self._assert_unusable(second["id"])
+
+    def test_package_facts_are_not_polluted_by_conditions(self):
+        profile_id = self.store.create_profile("条件包不动画像")["id"]
+        self._create_v2()
+        profile = self.store.get_profile(profile_id)
+        self.assertEqual(profile["confirmed_fields"], {})
+        self.assertEqual(profile["ai_preference"], {})
 
 
 if __name__ == "__main__":

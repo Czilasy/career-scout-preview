@@ -406,7 +406,13 @@ def register_task_state_routes(app, ctx):
             finished_at = _iso_epoch_ms((run or {}).get("finished_at"))
         # 暂停不计时：从 task_logs 的 pause/resume 事件推导累计实际运行时长。
         # 刷新页面后仍有效（事件已持久化）；无事件或无法计算时回退 None。
-        active_elapsed_ms = _active_elapsed_ms(started_at, finished_at, task_events)
+        # 传入状态与 run 行的 updated_at：只有真的有 worker 在跑才走活表，排队中
+        # （尚未开始）与已完成/已中断一样，finished_at 为空也要让时长定格。
+        active_elapsed_ms = _active_elapsed_ms(
+            started_at, finished_at, task_events,
+            status=raw_status,
+            updated_at_ms=_iso_epoch_ms((run or {}).get("updated_at")),
+        )
         # 016：软失败组合留痕（combo_issue/kind=combo_failed），倒序取最近 20 条；
         # 文案来自统一注册表，前端只展示不猜码。
         combo_issues = []

@@ -56,16 +56,16 @@
   --reject-deep: #8a4640;
   --reject-wash: #f8edeb;
 
-  --canvas: #f4f7f9;
+  --canvas: #eef2f5;
   --panel: #ffffff;
-  --panel-2: #fafcfd;        /* fact-row / fgroup 等次级面板 */
-  --panel-3: #fcfdfe;        /* actions 区底 */
-  --hover-row: #f7fafc;      /* job-row hover */
-  --ink-1: #14212b;
-  --ink-2: #455565;
-  --ink-3: #5e6e7e;
-  --hair: #e3e9ee;
-  --hair-2: #eef2f5;
+  --panel-2: #f1f4f7;        /* fact-row / fgroup 等次级面板 */
+  --panel-3: #f7f9fb;        /* actions 区底 */
+  --hover-row: #e8eef3;      /* job-row hover */
+  --ink-1: #17212b;
+  --ink-2: #425466;
+  --ink-3: #667585;
+  --hair: #d4dce4;
+  --hair-2: #e4e9ee;
 
   /* 品牌浅底描边（次级硬编码色，按平台切换） */
   --brand-edge: #bee9e2;
@@ -74,8 +74,8 @@
   --unsure-edge: #ecd9a8;
 
   /* 顶部装饰：渐变顶色 + 点阵纹理 rgba */
-  --canvas-tint: #eef8f6;
-  --dot-rgba: rgba(0, 90, 80, 0.03);
+  --canvas-tint: #e9edf1;
+  --dot-rgba: rgba(28, 45, 62, 0.045);
 
   /* 暗色主按钮字色（暗色下 .button.primary / 顶栏数字徽标用） */
   --on-bright-bg: #04241e;
@@ -116,7 +116,7 @@
   --radius-sm: 8px;
   --radius-md: 13px;
   --radius-lg: 18px;
-  --shadow: 0 18px 48px rgb(20 40 60 / 12%);
+  --shadow: 0 18px 48px rgb(20 40 60 / 14%);
 
   color-scheme: light;
 }
@@ -133,20 +133,20 @@
   --brand-ink: #005e53;
   --brand-wash: #e3f6f2;
 
-  --canvas: #f4f7f9;
+  --canvas: #eef2f5;
   --panel: #ffffff;
-  --panel-2: #fafcfd;
-  --panel-3: #fcfdfe;
-  --hover-row: #f7fafc;
-  --ink-1: #14212b;
-  --ink-2: #455565;
-  --ink-3: #5e6e7e;
-  --hair: #e3e9ee;
-  --hair-2: #eef2f5;
+  --panel-2: #f1f4f7;
+  --panel-3: #f7f9fb;
+  --hover-row: #e8eef3;
+  --ink-1: #17212b;
+  --ink-2: #425466;
+  --ink-3: #667585;
+  --hair: #d4dce4;
+  --hair-2: #e4e9ee;
 
   --brand-edge: #bee9e2;
-  --canvas-tint: #eef8f6;
-  --dot-rgba: rgba(0, 90, 80, 0.03);
+  --canvas-tint: #e9edf1;
+  --dot-rgba: rgba(28, 45, 62, 0.045);
 
   color-scheme: light;
 }
@@ -163,13 +163,32 @@
   --logo-north: #0f4ca3;
 
   --brand-edge: #c4d4ec;
-  --canvas-tint: #edf2fa;
-  --dot-rgba: rgba(20, 60, 140, 0.03);
+  --canvas-tint: #e9edf1;
+  --dot-rgba: rgba(28, 45, 62, 0.045);
 
   --ai-wash: #e9eff8;
   --ai-wash-deep: #0b3b80;
 
   color-scheme: light;
+}
+
+/* ===========================================================================
+ * 暗色共用中性基座：平台只负责品牌强调色，不再给整页套绿/蓝底。
+ * =========================================================================== */
+:root[data-theme="dark"] {
+  --canvas: #14181d;
+  --panel: #1d232a;
+  --panel-2: #262e37;
+  --panel-3: #181e25;
+  --hover-row: #2d3742;
+  --ink-1: #f3f6f8;
+  --ink-2: #b1bcc7;
+  --ink-3: #8b98a5;
+  --hair: #3b4652;
+  --hair-2: #2e3741;
+  --canvas-tint: #171c22;
+  --dot-rgba: rgba(255, 255, 255, 0.045);
+  --shadow: 0 18px 48px rgb(0 0 0 / 32%);
 }
 
 /* ===========================================================================
@@ -197,24 +216,24 @@
   --reject-deep: #f5abab;
   --reject-wash: rgba(240, 140, 140, 0.12);
 
-  --canvas: #0d1113;
-  --panel: #141b1e;
-  --panel-2: rgba(255, 255, 255, 0.03);
-  --panel-3: #10181b;
-  --hover-row: rgba(255, 255, 255, 0.04);
-  --ink-1: #ecf2f3;
-  --ink-2: #a7b8bc;
-  --ink-3: #78898e;
-  --hair: #26343a;
-  --hair-2: #1d282d;
+  --canvas: #14181d;
+  --panel: #1d232a;
+  --panel-2: #262e37;
+  --panel-3: #181e25;
+  --hover-row: #2d3742;
+  --ink-1: #f3f6f8;
+  --ink-2: #b1bcc7;
+  --ink-3: #8b98a5;
+  --hair: #3b4652;
+  --hair-2: #2e3741;
 
   --brand-edge: rgba(0, 212, 188, 0.35);
   --match-edge: rgba(59, 212, 153, 0.35);
   --reject-edge: rgba(240, 140, 140, 0.35);
   --unsure-edge: rgba(226, 181, 88, 0.35);
 
-  --canvas-tint: #0e181a;
-  --dot-rgba: rgba(0, 212, 188, 0.045);
+  --canvas-tint: #171c22;
+  --dot-rgba: rgba(255, 255, 255, 0.045);
 
   --on-bright-bg: #04241e;
 
@@ -226,6 +245,41 @@
   --ai-wash: rgba(59, 212, 153, 0.13);
   --ai-wash-deep: #6ce3b2;
 
+  color-scheme: dark;
+}
+
+/* “全部”中性作用域：必须位于平台品牌块之外，避免被 Boss 暗色块吞进作用域。 */
+:root[data-theme="light"][data-platform="all"] {
+  --brand: #4b5563;
+  --brand-strong: #374151;
+  --brand-ink: #111827;
+  --brand-wash: #f3f4f6;
+  --brand-edge: #d1d5db;
+  --boss-accent: #6b7280;
+  --boss-accent-ink: #374151;
+  --boss-accent-wash: #f3f4f6;
+  --zhilian-accent: #6b7280;
+  --zhilian-accent-ink: #374151;
+  --zhilian-accent-wash: #f3f4f6;
+  --ai-wash: #f3f4f6;
+  --ai-wash-deep: #374151;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"][data-platform="all"] {
+  --brand: #d1d5db;
+  --brand-strong: #e5e7eb;
+  --brand-ink: #f9fafb;
+  --brand-wash: rgba(209, 213, 219, 0.14);
+  --brand-edge: rgba(209, 213, 219, 0.36);
+  --boss-accent: #d1d5db;
+  --boss-accent-ink: #f9fafb;
+  --boss-accent-wash: rgba(209, 213, 219, 0.14);
+  --zhilian-accent: #d1d5db;
+  --zhilian-accent-ink: #f9fafb;
+  --zhilian-accent-wash: rgba(209, 213, 219, 0.14);
+  --ai-wash: rgba(209, 213, 219, 0.14);
+  --ai-wash-deep: #f9fafb;
   color-scheme: dark;
 }
 
@@ -246,21 +300,21 @@
   --zhilian-accent-wash: rgba(91, 150, 238, 0.13);
   --zhilian-accent-edge: rgba(91, 150, 238, 0.35);
 
-  --canvas: #0b0f18;
-  --panel: #131a29;
-  --panel-2: rgba(255, 255, 255, 0.03);
-  --panel-3: #101828;
-  --hover-row: rgba(255, 255, 255, 0.04);
-  --ink-1: #edf2fa;
-  --ink-2: #a9b6cd;
-  --ink-3: #77839d;
-  --hair: #26334f;
-  --hair-2: #1c2538;
+  --canvas: #14181d;
+  --panel: #1d232a;
+  --panel-2: #262e37;
+  --panel-3: #181e25;
+  --hover-row: #2d3742;
+  --ink-1: #f3f6f8;
+  --ink-2: #b1bcc7;
+  --ink-3: #8b98a5;
+  --hair: #3b4652;
+  --hair-2: #2e3741;
 
   --brand-edge: rgba(91, 150, 238, 0.35);
 
-  --canvas-tint: #0d1526;
-  --dot-rgba: rgba(91, 150, 238, 0.05);
+  --canvas-tint: #171c22;
+  --dot-rgba: rgba(255, 255, 255, 0.045);
 
   --on-bright-bg: #071a38;
 

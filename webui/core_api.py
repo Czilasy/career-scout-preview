@@ -21,7 +21,6 @@ from webui.constants import (
     FRONTEND_DIST,
     LIST_LIMIT,
     PROJECT_ROOT,
-    _MSG_BOSS_LOGIN_STATUS,
     _MSG_UNSUPPORTED_PLATFORM,
 )
 from webui.task_runners import SCRAPER, _env, _task_payload
@@ -307,31 +306,12 @@ def register_core_routes(app, ctx):
         """结构化环境检查：浏览器 / AI / 本地 三组，逐项返回状态。
 
         检查逻辑与 CLI ``--check`` 共用 boss.collect_check_items；
-        BOSS 登录项优先读激活账号的登录态缓存（D3），未命中才真实探测；
         AI Key 只判配置是否齐全（不验有效性，连通性由前端单独按钮触发）；
-        冷却记录随响应返回（D6：面板显示「建议等待至 XX 点」）。
         """
         items, _ = boss.collect_check_items(cdp_port=boss.DEFAULT_CDP_PORT)
         by_id = {item["id"]: item for item in items}
 
-        # BOSS 登录状态：激活账号走缓存优先（TTL 15 分钟），
-        # 未命中回退 collect_check_items 的真实探测结果。
-        account = ctx.account_for_run()
-        boss_login = by_id["boss_login"]
-        if account:
-            from scripts.login_state_cache import read_cached_state
-            cached = read_cached_state(account, "boss")
-            if cached == "logged_in":
-                boss_login = {"id": "boss_login", "name": _MSG_BOSS_LOGIN_STATUS,
-                              "status": "ok", "detail": "已登录（缓存）", "fix": None}
-            elif cached == "not_logged_in":
-                boss_login = {"id": "boss_login", "name": _MSG_BOSS_LOGIN_STATUS,
-                              "status": "fail", "detail": "未登录（缓存） — 请打开该账号的 BOSS 窗口登录",
-                              "fix": "打开账号浏览器登录"}
-            elif cached == "unknown":
-                boss_login = {"id": "boss_login", "name": _MSG_BOSS_LOGIN_STATUS,
-                              "status": "skip", "detail": "状态未知（缓存） — CDP 不可用，稍后重试", "fix": None}
-        browser_items = [by_id["browsers"], by_id["cdp"], boss_login]
+        browser_items = [by_id["browsers"], by_id["cdp"]]
 
         ai_settings = ctx.store.get_ai_settings()
         ai_configured = bool(ai_settings.get("is_configured"))
@@ -417,7 +397,6 @@ def register_core_routes(app, ctx):
                 {"id": "ai", "name": "AI", "items": ai_items},
                 {"id": "local", "name": "本地环境", "items": local_items},
             ],
-            "active_account": account,
             "checked_at": int(time.time()),
         })
 

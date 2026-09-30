@@ -131,15 +131,15 @@ def _scrape_detail_on_ws(
         "jobStatus:p.jobStatus||0," + STAFF_FIELD_JS + "};})()"
     ))
     if not isinstance(value, dict):
-        return "invalid_output", {}
+        return "invalid_output", {"_failure_reason": "value_non_dict"}
     detail_id = str(value.get("number") or "").strip()
     jd = str(value.get("jd") or "").strip()
     if detail_id and detail_id != job_id:
-        return "invalid_output", {}
+        return "invalid_output", {"_failure_reason": "id_mismatch"}
     if not jd:
         if str(value.get("positionStatus") or "") in ("4", "5", "6") or str(value.get("jobStatus") or "") in ("4", "5", "6"):
             return "not_found", {}
-        return "invalid_output", {}
+        return "invalid_output", {"_failure_reason": "jd_missing"}
     detail = {
         "platform": "zhilian",
         "platform_job_id": detail_id or job_id,

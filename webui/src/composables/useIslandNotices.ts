@@ -20,9 +20,13 @@
 // - 终态事件（completed/error/paused 跃迁）仍 upsert 进 notices（panel 历史）。
 // - 同 kind 替换（仅终态通知）；scope="history" 不派生；初始 prev=null
 //   不弹幽灵；已读会话级。
+//
+// 046 第五轮：paused 一族的行标题跟着事实走（见 attentionRow）——可恢复的暂停说
+// 「任务已暂停」，被服务重启打断的说「任务已中断」，与顶栏胶囊、同一屏阶段卡同一说法；
+// 性质由生产端随胶囊传下来，本池不再按 kind 猜第二次。id / 去重 / 落点 / 未读 / 轮播语义不变。
 // ---------------------------------------------------------------------------
 import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
-import type { CapsuleStatusPayload, DynamicIslandState } from "./useDiscoveryState";
+import { pausedFamilyNoticeTitle, type CapsuleStatusPayload, type DynamicIslandState } from "./useDiscoveryState";
 
 export type IslandNoticeKind = "completed" | "error" | "paused" | "interrupt" | "notice";
 
@@ -58,11 +62,19 @@ export interface IslandNoticesApi {
   reset(): void;
 }
 
-/** 胶囊 attention 有 error/paused/pending 三种；只有前两种进通知池（pending 仅胶囊显示）。 */
-const ATTENTION_KIND: Partial<Record<"error" | "paused" | "pending", { kind: IslandNoticeKind; title: string }>> = {
-  error: { kind: "error", title: "任务出错" },
-  paused: { kind: "paused", title: "任务已暂停" },
-};
+type AttentionContent = Extract<DynamicIslandState, { state: "attention" }>["attention"];
+
+/** 胶囊 attention 有 error/paused/pending 三种；只有前两种进通知池（pending 仅胶囊显示）。
+ *  error 的行标题固定；paused 一族的两种性质（用户可恢复的暂停 / 服务重启打断）共用同一条
+ *  kind 通道，行标题必须跟着事实走——写死成「任务已暂停」会和同一行的详情、同一屏的阶段卡
+ *  与顶栏胶囊互相打脸。性质由判定现场随胶囊传下来（attention.pausedFact），这里复用顶栏那
+ *  一份口径（pausedFamilyNoticeTitle），不判第二次状态、也不再写一套中文。 */
+function attentionRow(attention: AttentionContent): { kind: IslandNoticeKind; title: string } | null {
+  if (attention.kind === "error") return { kind: "error", title: "任务出错" };
+  if (attention.kind !== "paused") return null;
+  // 生产端没带性质（历史数据与手写桩）时按可恢复暂停说，保持既有行为。
+  return { kind: "paused", title: pausedFamilyNoticeTitle(attention.pausedFact ?? "paused") };
+}
 
 /** 跑完通知的 detail：与结果页同源（scraped→待筛选 N；judged→匹配 M · 待确认 P）。 */
 function completedDetail(state: Extract<DynamicIslandState, { state: "completed" }>, phase: CapsuleStatusPayload["phase"] | undefined): { detail: string } {
@@ -146,12 +158,12 @@ export function createIslandNotices(
         read: true,
       });
     } else if (next.state === "attention") {
-      const meta = ATTENTION_KIND[next.attention.kind];
-      if (meta) {
+      const row = attentionRow(next.attention);
+      if (row) {
         upsert({
-          id: makeId(meta.kind, ++seq),
-          kind: meta.kind,
-          title: meta.title,
+          id: makeId(row.kind, ++seq),
+          kind: row.kind,
+          title: row.title,
           detail: next.attention.message,
           target: "attention",
           at: Date.now(),

@@ -84,7 +84,15 @@ export type DynamicIslandState =
   | {
       state: "attention";
       platform: Platform;
-      attention: { kind: "paused" | "error" | "pending"; message: string };
+      attention: {
+        kind: "paused" | "error" | "pending";
+        message: string;
+        /** 暂停族的性质：可恢复的暂停，还是被服务重启打断。
+         *  两条线共用 kind="paused" 这一条通道（胶囊状态枚举与导航落点都不因此变），
+         *  但中文不能混着说；性质由唯一判定面给出并随胶囊传下来，展示端不再判第二次。
+         *  仅 kind=paused 时使用。 */
+        pausedFact?: "paused" | "interrupted";
+      };
     };
 
 /**
@@ -441,6 +449,40 @@ export interface JobItem {
   extra?: Record<string, unknown>;
 }
 
+// ---------------------------------------------------------------------------
+// B096 V2：统一条件、平台最终条件与可冻结条件快照。
+// 统一值使用业务稳定 ID；平台值使用当前平台 schema 的稳定 code。
+// ---------------------------------------------------------------------------
+
+export const UNIFIED_FILTER_FIELDS = [
+  "salary", "experience", "degree", "industry", "scale", "recruiter_activity",
+] as const;
+export type UnifiedFilterField = (typeof UNIFIED_FILTER_FIELDS)[number];
+export type UnifiedFilterValues = Record<UnifiedFilterField, string[]>;
+export type PlatformFilterValues = Record<string, string[]>;
+
+export interface ConditionSnapshotV2 {
+  snapshotVersion: 2;
+  mappingVersion: string;
+  unifiedValues: UnifiedFilterValues;
+  platformValues: Partial<Record<Platform, PlatformFilterValues>>;
+  overrides: Partial<Record<Platform, PlatformFilterValues>>;
+  exclusiveValues: {
+    boss?: { stage?: string[] };
+    zhilian?: { company_nature?: string[] };
+  };
+}
+
+/** V2 配置包快照；V1 仍没有该字段且读取时视为空白。 */
+export interface SearchPackageV2Payload extends SearchPackagePayload {
+  payloadVersion: 2;
+  conditions: ConditionSnapshotV2;
+}
+
+export interface SearchPackageWithConditions extends SearchPackage {
+  conditions?: ConditionSnapshotV2 | null;
+}
+// ---------------------------------------------------------------------------
 export interface Notice {
   message: string;
   tone: "info" | "success" | "warning" | "error";
@@ -488,6 +530,7 @@ export interface SearchPackage {
   profile: SearchPackageProfile;
   createdAt: string;
   updatedAt: string;
+  conditions?: ConditionSnapshotV2 | null;
 }
 
 /** 保存配置包的请求体。 */
@@ -497,6 +540,7 @@ export interface SearchPackagePayload {
   keywords: SearchPackageKeywords;
   city: SearchPackageCity;
   profile: SearchPackageProfile;
+  conditions?: ConditionSnapshotV2 | null;
 }
 
 export type TaskSize = "small" | "medium" | "large";

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import {
   buildSearchScriptParams,
   createAsyncResourceLoader,
@@ -6,12 +8,14 @@ import {
   filterPipelineResultByPlatform,
   isNationwideCityName,
   normalizeScopePreview,
+  platformLabel,
   stripNationwideCities,
   partitionPipelineResult,
   projectResumeSuggestionToSchema,
   historyStatusLabel,
   roundScopeLabel,
   shouldConfirmNationalScope,
+  stageStatusLabel,
   type PipelineResult,
 } from "../discovery";
 import type {
@@ -456,6 +460,27 @@ describe("history status mapping", () => {
   });
 });
 
+// 流程外壳状态（后端 _derive_flow_status 的全部出口值）也会流到界面：任何一项都
+// 必须有中文口径，绝不把机器枚举吐给用户；「已中断」的说法与阶段卡一致。
+describe("flow envelope status copy", () => {
+  const FLOW_ENVELOPE_STATUSES = [
+    "queued", "running", "paused", "interrupted", "failed", "stopped",
+    "cancelled", "done", "empty", "unknown",
+  ];
+
+  it("maps the interrupted envelope to the same 已中断 wording as the stage cards", () => {
+    expect(stageStatusLabel("interrupted")).toBe("已中断");
+    expect(stageStatusLabel("queued")).toBe("等待开始");
+    expect(stageStatusLabel("paused")).toBe("已暂停");
+  });
+
+  it.each(FLOW_ENVELOPE_STATUSES)("never echoes the machine value %s", (status) => {
+    const label = stageStatusLabel(status);
+    expect(label).not.toBe(status);
+    expect(label).toMatch(/[\u4e00-\u9fa5]/);
+  });
+});
+
 describe("全国哨兵（「全国」不是城市）", () => {
   it("isNationwideCityName 只认「全国」本身", () => {
     expect(isNationwideCityName("全国")).toBe(true);
@@ -467,5 +492,47 @@ describe("全国哨兵（「全国」不是城市）", () => {
   it("stripNationwideCities 去掉哨兵、保留真实城市", () => {
     expect(stripNationwideCities(["全国"])).toEqual([]);
     expect(stripNationwideCities(["全国", "上海"])).toEqual(["上海"]);
+  });
+});
+
+// 平台显示名唯一权威：新增第三个平台时只登记这一处即可全线生效。
+// 之前的写法是 platform === "boss" ? "BOSS" : "智联"，任何没登记的身份都会被
+// 显示成「智联」，用户看到一条根本不属于它的运行线。
+describe("platformLabel（平台显示名唯一权威）", () => {
+  it("已知平台给登记名，未知身份给中性中文且不默认成智联", () => {
+    expect(platformLabel("boss")).toBe("BOSS");
+    expect(platformLabel("zhilian")).toBe("智联");
+    expect(platformLabel("liepin")).toBe("其它平台");
+    expect(platformLabel("LIEPIN ")).toBe("其它平台");
+    expect(platformLabel("")).toBe("");
+    expect(platformLabel(null)).toBe("");
+    expect(platformLabel(undefined)).toBe("");
+  });
+
+  it("roundScopeLabel 复用同一份平台显示名", () => {
+    expect(roundScopeLabel("boss", "boss" as Platform)).toBe("BOSS");
+    expect(roundScopeLabel("boss", "zhilian" as Platform)).toBe("智联");
+  });
+
+  // 树干通用文件不得各自重复写死平台名（AGENTS.md：树枝适配树干）。
+  // 三元两种顺序都要拦：只查 "BOSS" 在前，反序写法（? "智联" : "BOSS"）会漏网。
+  it.each([
+    ["../components/ParallelPlatformProgress.vue", 82],
+    ["../components/ResultHistoryDrawer.vue", 52],
+    ["../components/TaskProgress.vue", 364],
+    ["../components/OneClickScreenDialog.vue", 235],
+    ["../components/ReminderDrawer.vue", 188],
+    ["../composables/useDiscoveryFlowCoordinator.ts", 207],
+    ["../composables/useDiscoveryParallelFlow.ts", 562],
+    ["../App.vue", 72],
+    ["../components/DynamicIsland.vue", 93],
+    ["../components/JobWorkspace.vue", 681],
+    ["../views/DiscoveryView.vue", 601],
+    ["../components/AccountPoolSheet.vue", 0],
+    ["../components/BrowserAccountsDialog.vue", 0],
+    ["../composables/useDiscoveryFlowPresentation.ts", 0],
+  ])("%s 不再自带平台名三元表达式", (relativePath) => {
+    const source = readFileSync(path.join(__dirname, relativePath), "utf8");
+    expect(source).not.toMatch(/\?\s*["'](BOSS|智联)["']\s*:\s*["'](BOSS|智联)["']/);
   });
 });

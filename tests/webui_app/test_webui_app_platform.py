@@ -323,6 +323,206 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         self.assertEqual(run["platform"], "zhilian")
         self.assertEqual(run["execution_params"]["platform"], "zhilian")
 
+    def test_execute_search_binds_an_existing_flow_track_and_uses_platform_capacity(self):
+        """B096 Flow 提交沿用既有搜索校验，但把任务绑定到指定平台线。"""
+        store = self.app.config["TASK_STORE"]
+        profile_id = "flow-profile-platform-test"
+        with store._connection() as conn:
+            conn.execute(
+                "INSERT INTO candidate_profiles "
+                "(id, name, confirmed_fields_json, ai_preference_json, created_at, updated_at) "
+                "VALUES (?, 'flow', '{}', '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                (profile_id,),
+            )
+        flow = store.create_flow(
+            profile_id=profile_id,
+            selection="all",
+            start_key="flow-exec-platform-test",
+            confirmed_filters={"boss": {}, "zhilian": {}},
+        )
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+        capacity = self.app.config["PLATFORM_EXECUTION_CAPACITY"]
+        with mock.patch.object(capacity, "submit") as submit:
+            response = self.client.post("/api/execute-search", json={
+                "platform": "boss",
+                "flow_id": flow["id"],
+                "profile_id": profile_id,
+                "script_params": {"keyword": "Python", "city": ["上海"], "pages": 1},
+                "scope_digest": preview["scope_digest"],
+            })
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        task_id = response.get_json()["task_id"]
+        bound = store.get_flow(flow["id"], profile_id=profile_id)
+        track = next(item for item in bound["tracks"] if item["platform"] == "boss")
+        self.assertEqual(track["scrape_run_id"], task_id)
+        self.assertIsNone(track["screen_run_id"])
+        submit.assert_called_once()
+        self.assertEqual(submit.call_args.args[0], "boss")
+
+    def test_flow_execute_search_requires_explicit_platform_identity(self):
+        store = self.app.config["TASK_STORE"]
+        profile_id = "flow-platform-required"
+        with store._connection() as conn:
+            conn.execute(
+                "INSERT INTO candidate_profiles "
+                "(id, name, confirmed_fields_json, ai_preference_json, created_at, updated_at) "
+                "VALUES (?, 'flow', '{}', '{}', '2026-01-01', '2026-01-01')",
+                (profile_id,),
+            )
+        flow = store.create_flow(
+            profile_id=profile_id,
+            selection="all",
+            start_key="flow-platform-required-key",
+            confirmed_filters={"boss": {}, "zhilian": {}},
+        )
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss", "keywords": ["Python"],
+            "scope_kind": "cities", "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+        with mock.patch.object(self.app.config["PLATFORM_EXECUTION_CAPACITY"], "submit"):
+            response = self.client.post("/api/execute-search", json={
+                "flow_id": flow["id"],
+                "profile_id": profile_id,
+                "script_params": {"keyword": "Python", "city": ["上海"], "pages": 1},
+                "scope_digest": preview["scope_digest"],
+            })
+
+        self.assertIn(response.status_code, (409, 422))
+        payload = response.get_json()
+        self.assertEqual(payload.get("error_code"), "platform_identity_missing")
+        current = store.get_flow(flow["id"], profile_id=profile_id)
+        self.assertEqual(
+            {track["status"] for track in current["tracks"]},
+            {"queued"},
+        )
+
+    def test_execute_search_submit_failure_persists_failed_flow_track(self):
+        store = self.app.config["TASK_STORE"]
+        profile_id = "flow-submit-failure-profile"
+        with store._connection() as conn:
+            conn.execute(
+                "INSERT INTO candidate_profiles "
+                "(id, name, confirmed_fields_json, ai_preference_json, created_at, updated_at) "
+                "VALUES (?, 'flow', '{}', '{}', '2026-01-01', '2026-01-01')",
+                (profile_id,),
+            )
+        flow = store.create_flow(
+            profile_id=profile_id,
+            selection="boss",
+            start_key="flow-submit-failure",
+            confirmed_filters={"boss": {}},
+        )
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss", "keywords": ["Python"],
+            "scope_kind": "cities", "cities": ["上海"], "pages_per_combination": 1,
+        }).get_json()["scope"]
+        capacity = self.app.config["PLATFORM_EXECUTION_CAPACITY"]
+        with mock.patch.object(capacity, "submit", side_effect=RuntimeError("private detail")):
+            response = self.client.post("/api/execute-search", json={
+                "platform": "boss", "flow_id": flow["id"], "profile_id": profile_id,
+                "script_params": {"keyword": "Python", "city": ["上海"], "pages": 1},
+                "scope_digest": preview["scope_digest"],
+            })
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("private detail", response.get_data(as_text=True))
+        current = store.get_flow(flow["id"], profile_id=profile_id)
+        track = current["tracks"][0]
+        self.assertEqual(track["status"], "failed")
+        self.assertEqual(track["error_code"], "submit_failed")
+        self.assertEqual(track["reason"], "后台任务提交失败")
+        scrape_run_id = track["scrape_run_id"]
+        self.assertEqual(store.get_screening_run(scrape_run_id)["status"], "failed")
+        self.assertEqual(store.get_screening_run(scrape_run_id)["error_code"], "submit_failed")
+        self.assertEqual(store.get_search_run(scrape_run_id)["status"], "failed")
+        self.assertEqual(store.get_search_run(scrape_run_id)["error_code"], "submit_failed")
+
+    def test_execute_search_register_failure_closes_claimed_track(self):
+        store = self.app.config["TASK_STORE"]
+        profile_id = "flow-register-failure-profile"
+        with store._connection() as conn:
+            conn.execute(
+                "INSERT INTO candidate_profiles "
+                "(id, name, confirmed_fields_json, ai_preference_json, created_at, updated_at) "
+                "VALUES (?, 'flow', '{}', '{}', '2026-01-01', '2026-01-01')",
+                (profile_id,),
+            )
+        flow = store.create_flow(
+            profile_id=profile_id,
+            selection="boss",
+            start_key="flow-register-failure",
+            confirmed_filters={"boss": {}},
+        )
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss", "keywords": ["Python"],
+            "scope_kind": "cities", "cities": ["上海"], "pages_per_combination": 1,
+        }).get_json()["scope"]
+        context = self.app.config["PIPELINE_CONTEXT"]
+        with mock.patch.object(
+            context, "register_pipeline_task",
+            side_effect=RuntimeError("private register detail"),
+        ):
+            response = self.client.post("/api/execute-search", json={
+                "platform": "boss", "flow_id": flow["id"], "profile_id": profile_id,
+                "script_params": {"keyword": "Python", "city": ["上海"], "pages": 1},
+                "scope_digest": preview["scope_digest"],
+            })
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("private register detail", response.get_data(as_text=True))
+        track = store.get_flow(flow["id"], profile_id=profile_id)["tracks"][0]
+        self.assertEqual(track["status"], "failed")
+        self.assertEqual(track["error_code"], "track_submit_failed")
+
+    def test_paused_preflight_track_without_run_retries_through_execute_search(self):
+        """A pre-claim pause is durable and resume re-enters full validation."""
+        store = self.app.config["TASK_STORE"]
+        profile_id = "flow-preflight-retry-profile"
+        with store._connection() as conn:
+            conn.execute(
+                "INSERT INTO candidate_profiles "
+                "(id, name, confirmed_fields_json, ai_preference_json, created_at, updated_at) "
+                "VALUES (?, 'flow', '{}', '{}', '2026-01-01', '2026-01-01')",
+                (profile_id,),
+            )
+        flow = store.create_flow(
+            profile_id=profile_id, selection="boss",
+            start_key="flow-preflight-retry",
+            confirmed_filters={"boss": {}},
+        )
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss", "keywords": ["Python"],
+            "scope_kind": "cities", "cities": ["上海"], "pages_per_combination": 1,
+        }).get_json()["scope"]
+        body = {
+            "platform": "boss", "flow_id": flow["id"], "profile_id": profile_id,
+            "script_params": {"keyword": "Python", "city": ["上海"], "pages": 1},
+            "scope_digest": preview["scope_digest"],
+        }
+        ctx = self.app.config["PIPELINE_CONTEXT"]
+        try:
+            with mock.patch.object(ctx, "browser_busy", return_value=True):
+                first = self.client.post("/api/execute-search", json=body)
+            self.assertEqual(first.status_code, 409)
+            paused = store.get_flow(flow["id"], profile_id=profile_id)["tracks"][0]
+            self.assertEqual(paused["status"], "paused")
+            self.assertIsNone(paused["scrape_run_id"])
+            self.assertTrue(paused["submission_snapshot"]["script_params"])
+
+            with mock.patch.object(self.app.config["PLATFORM_EXECUTION_CAPACITY"], "submit"):
+                second = self.client.post("/api/execute-search", json=body)
+            self.assertEqual(second.status_code, 200, second.get_data(as_text=True))
+            resumed = store.get_flow(flow["id"], profile_id=profile_id)["tracks"][0]
+            self.assertEqual(resumed["status"], "running")
+            self.assertIsNotNone(resumed["scrape_run_id"])
+        finally:
+            pass
+
     def test_execute_search_scope_request_mismatch_returns_409(self):
         """script_params 的关键词/城市/页数与 scope 不一致 → 409 scope_request_mismatch。"""
         preview = self.client.post("/api/search-scope/preview", json={
@@ -1492,8 +1692,8 @@ class DraftSwitchTargetRunConservationTests(unittest.TestCase):
                 (run_id,),
             )
         archive = self.client.post("/api/result-history/archive-latest")
-        self.assertEqual(archive.status_code, 200)
-        self.assertIn(run_id, archive.get_json()["archived_run_ids"])
+        self.assertEqual(archive.status_code, 422)
+        self.assertEqual(archive.get_json()["error"], "flow_scope_required")
 
 
 class CrossPlatformBrowserConservationTests(unittest.TestCase):
@@ -1660,8 +1860,8 @@ class PlatformAwareResetResultTests(unittest.TestCase):
                 (str(run_id),),
             )
         archive = self.client.post("/api/result-history/archive-latest")
-        self.assertEqual(archive.status_code, 200)
-        self.assertIn(run_id, archive.get_json()["archived_run_ids"])
+        self.assertEqual(archive.status_code, 422)
+        self.assertEqual(archive.get_json()["error"], "flow_scope_required")
         deleted = self.client.delete(f"/api/result-history/{run_id}")
         self.assertEqual(deleted.status_code, 200)
         self.assertEqual(deleted.get_json()["deleted"], True)

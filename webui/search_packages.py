@@ -18,6 +18,7 @@ from webui.profile_facts import derive_profile_facts, validate_profile_facts
 from webui.store_search_packages import SearchPackageCorruptError
 
 PAYLOAD_VERSION = 1
+CONDITION_SNAPSHOT_VERSION = 2
 MAX_NAME_LENGTH = 80
 DEFAULT_PACKAGE_NAME = "常用搜索配置"
 # 面向用户的稳定文案：不得包含 SQL、路径、堆栈或原始损坏数据。
@@ -72,7 +73,8 @@ class SearchPackageService:
         draft = _normalize_payload(raw)
         row = self.store.create_search_package(
             name=draft["name"],
-            payload_version=PAYLOAD_VERSION,
+            payload_version=draft["payloadVersion"],
+            condition_snapshot=draft["conditions"],
             keywords=draft["keywords"],
             city=draft["city"],
             profile_summary=draft["profile"]["summary"],
@@ -215,22 +217,97 @@ def _normalize_payload(raw) -> dict:
     if not isinstance(raw, dict):
         raise _invalid("配置包内容必须是对象")
     version = raw.get("payloadVersion")
-    if isinstance(version, bool) or version != PAYLOAD_VERSION:
+    if isinstance(version, bool) or version not in (PAYLOAD_VERSION, CONDITION_SNAPSHOT_VERSION):
         raise _invalid("配置包版本不受支持")
     keywords = _normalize_keywords(raw.get("keywords"))
     city = _normalize_city(raw.get("city"))
     profile = _normalize_profile(raw.get("profile"))
+    conditions = {} if version == PAYLOAD_VERSION else _normalize_condition_snapshot(raw.get("conditions"))
     raw_name = raw.get("name")
     if raw_name is None or (isinstance(raw_name, str) and not raw_name.strip()):
         name = default_package_name(keywords, city)
     else:
         name = _normalize_name(raw_name)
-    return {"name": name, "keywords": keywords, "city": city, "profile": profile}
+    return {
+        "name": name,
+        "payloadVersion": version,
+        "keywords": keywords,
+        "city": city,
+        "profile": profile,
+        "conditions": conditions,
+    }
 
+
+def _normalize_condition_snapshot(raw) -> dict:
+    """Strictly validate the V2 envelope; never repair or fill missing fields."""
+    if not isinstance(raw, dict):
+        raise _invalid("条件快照格式不正确")
+    if raw.get("snapshotVersion") != CONDITION_SNAPSHOT_VERSION:
+        raise _invalid("条件快照版本不受支持")
+    mapping_version = raw.get("mappingVersion")
+    if not isinstance(mapping_version, str) or not mapping_version.strip():
+        raise _invalid("条件快照缺少映射版本")
+    unified = raw.get("unifiedValues")
+    platform = raw.get("platformValues")
+    overrides = raw.get("overrides")
+    exclusive = raw.get("exclusiveValues")
+    if not isinstance(unified, dict) or not isinstance(platform, dict) \
+            or not isinstance(overrides, dict) or not isinstance(exclusive, dict):
+        raise _invalid("条件快照字段不完整")
+    fields = {"salary", "experience", "degree", "industry", "scale", "recruiter_activity"}
+    if set(unified.keys()) != fields:
+        raise _invalid("统一条件字段不完整")
+    normalized_unified = {key: _normalize_condition_list(unified.get(key)) for key in fields}
+    normalized_platform = {}
+    for platform_name in ("boss", "zhilian"):
+        values = platform.get(platform_name)
+        if not isinstance(values, dict):
+            raise _invalid("平台条件字段不完整")
+        normalized_platform[platform_name] = {
+            str(key): _normalize_condition_list(value) for key, value in values.items()
+        }
+    normalized_overrides = {}
+    for platform_name in ("boss", "zhilian"):
+        values = overrides.get(platform_name)
+        if not isinstance(values, dict):
+            raise _invalid("覆盖条件字段不完整")
+        normalized_overrides[platform_name] = {
+            str(key): _normalize_condition_list(value) for key, value in values.items()
+        }
+    normalized_exclusive = {}
+    for platform_name, key in (("boss", "stage"), ("zhilian", "company_nature")):
+        values = exclusive.get(platform_name)
+        if not isinstance(values, dict) or key not in values:
+            raise _invalid("专属条件字段不完整")
+        normalized_exclusive[platform_name] = {key: _normalize_condition_list(values[key])}
+    return {
+        "snapshotVersion": CONDITION_SNAPSHOT_VERSION,
+        "mappingVersion": mapping_version,
+        "unifiedValues": normalized_unified,
+        "platformValues": normalized_platform,
+        "overrides": normalized_overrides,
+        "exclusiveValues": normalized_exclusive,
+    }
+
+
+def _normalize_condition_list(raw) -> list:
+    if not isinstance(raw, list):
+        raise _invalid("条件值必须是数组")
+    seen = set()
+    result = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise _invalid("条件值格式不正确")
+        value = item.strip()
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 def _validate_stored(row: dict) -> None:
     """库内快照完整性校验：只读检查，不做任何修补。"""
-    if row.get("payload_version") != PAYLOAD_VERSION:
+    if row.get("payload_version") not in (PAYLOAD_VERSION, CONDITION_SNAPSHOT_VERSION):
         raise _unusable()
     name = row.get("name")
     if not isinstance(name, str) or not name.strip() or len(name) > MAX_NAME_LENGTH:
@@ -270,6 +347,13 @@ def _validate_stored(row: dict) -> None:
         raise _unusable()
     if not isinstance(city.get("text"), str) or not isinstance(city.get("custom"), str):
         raise _unusable()
+    if row.get("payload_version") == CONDITION_SNAPSHOT_VERSION:
+        try:
+            normalized_conditions = _normalize_condition_snapshot(row.get("condition_snapshot"))
+        except SearchPackageError:
+            raise _unusable()
+        if normalized_conditions != row.get("condition_snapshot"):
+            raise _unusable()
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +381,7 @@ def _full(row: dict) -> dict:
             "summary": row["profile_summary"],
             "facts": row["profile_facts"],
         },
+        "conditions": row["condition_snapshot"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }

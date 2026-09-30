@@ -1,6 +1,7 @@
 import { nextTick } from "vue";
 import { mount } from "@vue/test-utils";
 import OneClickScreenDialog from "../OneClickScreenDialog.vue";
+import { UNIFIED_FILTER_FIELDS } from "../../parallelFilterMapping";
 
 const groups = [
   {
@@ -93,5 +94,121 @@ describe("OneClickScreenDialog", () => {
     expect(wrapper.text()).toContain("当前平台暂无筛选条件，可直接开始。");
     await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
     expect(wrapper.emitted("confirm")![0][0]).toEqual({});
+  });
+
+  it("B096 V2 uses a unified tab plus final platform tabs and one immediate start", async () => {
+    const platformGroups = {
+      boss: [...groups],
+      zhilian: [...groups],
+    };
+    const wrapper = mount(OneClickScreenDialog, {
+      props: {
+        open: true,
+        platform: "boss",
+        groups,
+        modelValue: {},
+        hasOldResult: false,
+        mode: "all",
+        platforms: ["boss", "zhilian"],
+        platformGroups,
+        platformModelValues: {
+          boss: { salary: ["406"] },
+          zhilian: { salary: ["807"] },
+        },
+      },
+    });
+    await nextTick();
+
+    const tabs = wrapper.findAll('[role="tab"]');
+    expect(tabs.map((tab) => tab.text())).toEqual(["全部", "BOSS", "智联"]);
+    expect(wrapper.get('[data-testid="one-click-parallel-hint"]').text())
+      .toContain("当前条件一次启动");
+    expect(wrapper.find('[data-testid="one-click-unified-fields"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="one-click-unified-fields"]').findAll("fieldset"))
+      .toHaveLength(UNIFIED_FILTER_FIELDS.length);
+    const unifiedOptions = wrapper.get('[data-testid="one-click-unified-fields"]')
+      .findAll("button");
+    expect(unifiedOptions[1]?.attributes("type")).toBe("button");
+    expect(wrapper.find('[data-testid="one-click-confirm"]').attributes("disabled")).toBeUndefined();
+
+    await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
+    const emitted = wrapper.emitted("parallel-confirm");
+    expect(emitted).toHaveLength(1);
+    expect(emitted![0][0]).toMatchObject({
+      boss: { salary: ["406"] },
+      zhilian: { salary: ["807"] },
+    });
+  });
+
+  it("emits a platform draft immediately when a platform tab is micro-tuned", async () => {
+    const wrapper = mount(OneClickScreenDialog, {
+      props: {
+        open: true,
+        platform: "boss",
+        groups,
+        modelValue: {},
+        hasOldResult: false,
+        mode: "all",
+        platforms: ["boss", "zhilian"],
+        platformGroups: { boss: [...groups], zhilian: [...groups] },
+        platformModelValues: {
+          boss: { salary: ["406"], stage: ["804"] },
+          zhilian: { salary: ["807"], company_nature: ["1"] },
+        },
+      },
+    });
+    await nextTick();
+
+    await wrapper.get('[data-testid="one-click-platform-tab-boss"]').trigger("click");
+    await chip(wrapper, "50-100K").trigger("click");
+
+    expect(wrapper.emitted("platform-change")).toEqual([
+      ["boss", "salary", ["406", "807"]],
+    ]);
+  });
+
+  it("shows mapping errors and disables the all-platform confirmation", async () => {
+    const wrapper = mount(OneClickScreenDialog, {
+      props: {
+        open: true, platform: "boss", groups, modelValue: {}, hasOldResult: false, mode: "all",
+        platforms: ["boss", "zhilian"], platformGroups: { boss: [...groups], zhilian: [...groups] },
+        platformModelValues: { boss: {}, zhilian: {} },
+        confirmDisabled: true,
+        errorMessage: "平台筛选条件已变化，请更新后重试",
+      },
+    });
+
+    await nextTick();
+
+    expect(wrapper.get('[role="alert"]').text()).toContain("筛选条件已变化");
+    expect(wrapper.get('[data-testid="one-click-confirm"]').attributes("disabled")).toBeDefined();
+  });
+
+  it("keeps confirmation disabled while asynchronous preparation is pending", async () => {
+    const wrapper = mount(OneClickScreenDialog, {
+      props: {
+        open: true, platform: "boss", groups, modelValue: {}, hasOldResult: false, mode: "all",
+        platforms: ["boss", "zhilian"], platformGroups: { boss: [...groups], zhilian: [...groups] },
+        platformModelValues: { boss: {}, zhilian: {} }, preparing: true,
+      },
+    });
+
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="one-click-confirm"]').attributes("disabled")).toBeDefined();
+  });
+
+  it("keeps confirmation disabled while the Flow start request is loading", async () => {
+    const wrapper = mount(OneClickScreenDialog, {
+      props: {
+        open: true, platform: "boss", groups, modelValue: {}, hasOldResult: false, mode: "all",
+        platforms: ["boss", "zhilian"], platformGroups: { boss: [...groups], zhilian: [...groups] },
+        platformModelValues: { boss: {}, zhilian: {} }, loading: true,
+      },
+    });
+
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="one-click-confirm"]').attributes("disabled")).toBeDefined();
   });
 });
