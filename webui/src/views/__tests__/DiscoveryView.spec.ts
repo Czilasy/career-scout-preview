@@ -1051,6 +1051,13 @@ describe("DiscoveryView", () => {
       if (url.endsWith("/api/ai-screen")) {
         return response({ ok: true, task_id: "new-run", resuming: true });
       }
+      if (url.endsWith("/api/task/finish/interrupted-run")) {
+        return response({
+          ok: true, run_id: "interrupted-run", snapshot_run_id: "snapshot-interrupted", platform: "boss",
+          status: "completed_with_pending", scrape_task_id: "scrape-1",
+          result: { jobs: [], total_scraped: 0, total_kept: 0, total_dropped: 0 },
+        });
+      }
       if (url.includes("/api/task-state/")) {
         return response({
           ok: true, status: "done", progress: {}, logs: [], result: { jobs: [], total_kept: 0, total_dropped: 0 },
@@ -1064,27 +1071,22 @@ describe("DiscoveryView", () => {
     await flushPromises();
     // 失败/中断只保留错误事实并回到 02，不能把页面锁在旧的 AI 任务上。
     expect(wrapper.find('[data-testid="profile-confirm"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="continue-ai-screen"]').isVisible()).toBe(false);
+    // 状态词表：中断没有活体 worker，后端续跑也只收 paused/可续 failed，
+    // 因此这一轮不再给出一个注定失败的「继续 AI 筛选」。
+    expect(wrapper.find('[data-testid="continue-ai-screen"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("disabled")).toBeUndefined();
     await confirmProfile(wrapper, "3年Python后端工程师候选人");
     await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
     await flushPromises();
-    const resume = wrapper.get('[data-testid="continue-ai-screen"]');
-    expect(resume.attributes("disabled")).toBeUndefined();
     expect(wrapper.find(".task-progress").exists()).toBe(true);
-    expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
-    await resume.trigger("click");
+    // 摘掉继续不许顺手砍掉原有出口：这一轮仍按它自己恢复回来的 run 走既有 run 级收尾。
+    expect(wrapper.find('[data-testid="continue-ai-screen"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="finish-save-results"]').trigger("click");
     await flushPromises();
-    const resumeCall = fetchMock.mock.calls.find(
-      ([url]) => String(url).endsWith("/api/ai-screen"),
-    );
-    expect(resumeCall).toBeTruthy();
-    expect(JSON.parse(String(resumeCall![1]!.body))).toMatchObject({
-      scrape_task_id: "scrape-1",
-      screening_fields: { salary: ["406"], experience: [] },
-      profile_summary: "3年Python后端工程师候选人",
-    });
+    expect(fetchMock.mock.calls.some(
+      ([url]) => String(url).endsWith("/api/task/finish/interrupted-run"),
+    )).toBe(true);
 
     vi.unstubAllGlobals();
   });
@@ -1897,8 +1899,152 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
-  // 全部平台某条线 AI 失败时，结果页顶部有失败通知。它此前复用了装饰性提示的
-  // .command-note 类，而该类在窄屏（≤760px）被整条 display:none：窗宽一小，
+  // D-03 结构收敛：并行轨道行的动作就是单平台那套动作条，出口也走同两条既有路径——
+  // 轨道级暂停/终止走 Flow 轨道端点，轨道级「结束并保存」走单平台同一条 run 级收尾端点。
+  it("sends each Track row's actions to that Track's own Flow and run endpoints", async () => {
+    const trackFlow = {
+      id: "track-actions-flow", profile_id: "profile-track-actions", selection: "all", status: "running",
+      tracks: [
+        { id: "tb", platform: "boss", scrape_run_id: "scrape-b", status: "running", stage: "scrape" },
+        { id: "tz", platform: "zhilian", scrape_run_id: "scrape-z", status: "paused", stage: "scrape" },
+      ],
+    };
+    const posts: string[] = [];
+    const fetchMock = oneClickBase({
+      "/api/flows/current": () => response({ ok: true, flow: trackFlow }),
+      "/api/flows/track-actions-flow/results": () => response({ ok: true, results: { tracks: [] } }),
+      "/api/task-state/scrape-b": () => response({ status: "running", progress: {}, logs: [] }),
+      "/api/task-state/scrape-z": () => response({ status: "paused", progress: {}, logs: [] }),
+      "/api/flows/track-actions-flow/tracks/boss/pause": () => {
+        posts.push("tracks/boss/pause");
+        return response({ ok: true, flow: trackFlow });
+      },
+      "/api/flows/track-actions-flow/tracks/zhilian/stop": () => {
+        posts.push("tracks/zhilian/stop");
+        return response({ ok: true, flow: trackFlow });
+      },
+      "/api/task/finish/scrape-z": () => {
+        posts.push("task/finish/scrape-z");
+        return response({
+          ok: true, run_id: "scrape-z", snapshot_run_id: "snapshot-z", platform: "zhilian",
+          status: "completed_with_pending", scrape_task_id: "scrape-z",
+          result: { jobs: [], total_scraped: 0, total_kept: 0, total_dropped: 0 },
+        });
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-track-actions" } });
+    await flushPromises();
+
+    const bossRow = wrapper.get('[data-testid="parallel-track-boss"]');
+    const zhilianRow = wrapper.get('[data-testid="parallel-track-zhilian"]');
+    expect(bossRow.findAllComponents({ name: "ScreenRoundActions" })).toHaveLength(1);
+    expect(zhilianRow.findAllComponents({ name: "ScreenRoundActions" })).toHaveLength(1);
+
+    await bossRow.get('[data-testid="pause-scrape"]').trigger("click");
+    await flushPromises();
+    expect(posts).toContain("tracks/boss/pause");
+
+    await zhilianRow.get('[data-testid="parallel-track-zhilian-finish-save"]').trigger("click");
+    await flushPromises();
+    expect(posts).toContain("task/finish/scrape-z");
+
+    await zhilianRow.get('[data-testid="parallel-track-zhilian-cancel"]').trigger("click");
+    await flushPromises();
+    expect(posts).toContain("tracks/zhilian/stop");
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  // D-04/D-05 排版：并行轨道的动作行收在该轨道卡边框内部，轨道模块横跨整行、
+  // 与底部动作行同宽；同一条用例点名 02/03 页既有现场，防止用删功能的方式让检查变绿。
+  it("keeps each Track's actions inside its card and the module across the full row", async () => {
+    const fetchMock = oneClickBase({
+      "/api/flows/current": () => response({ ok: true, flow: {
+        id: "track-layout-flow", profile_id: "profile-track-layout", selection: "all", status: "running",
+        tracks: [
+          { id: "tl-b", platform: "boss", scrape_run_id: "scrape-tl-b", status: "running", stage: "scrape" },
+          { id: "tl-z", platform: "zhilian", scrape_run_id: "scrape-tl-z", status: "paused", stage: "scrape" },
+        ],
+      } }),
+      "/api/flows/track-layout-flow/results": () => response({ ok: true, results: { tracks: [] } }),
+      "/api/task-state/scrape-tl-b": () => response({ status: "running", progress: {}, logs: [] }),
+      "/api/task-state/scrape-tl-z": () => response({ status: "paused", progress: {}, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-track-layout" } });
+    await flushPromises();
+
+    const panel = wrapper.get('[data-testid="parallel-platform-progress"]');
+    for (const platform of ["boss", "zhilian"]) {
+      const trackRow = panel.get(`[data-testid="parallel-track-${platform}"]`);
+      const card = trackRow.get("section.task-progress");
+      const bars = card.findAllComponents({ name: "ScreenRoundActions" });
+      expect(bars).toHaveLength(1);
+      // 包含关系：动作行在卡边框内，不再掉在卡外、贴页面左缘。
+      expect(card.element.contains(bars[0]!.element)).toBe(true);
+      // 平台标识与状态口径都仍由卡自己说，且各只有一份。
+      expect(trackRow.find('[data-testid="task-platform-badge"]').exists()).toBe(true);
+      expect(trackRow.findAll(".task-status")).toHaveLength(1);
+    }
+
+    // 02 页底部动作行仍在原位（整行）；轨道模块与它同为这一片两列网格的直接子项，
+    // 共用同一条横跨整行的网格规则，因此两者同宽。
+    expect(wrapper.find('[data-testid="start-one-click"]').exists()).toBe(true);
+    const layoutSection = panel.element.closest(".search-layout");
+    const rowSiblings = Array.from(layoutSection?.children ?? []);
+    const actionRow = wrapper.get(".workflow-actions");
+    expect(rowSiblings).toContain(panel.element);
+    expect(rowSiblings).toContain(actionRow.element);
+    const css = readFileSync(path.join(__dirname, "../../styles.css"), "utf8");
+    const fullRowRule = css.match(/\.search-layout > \.task-progress,[\s\S]{0,220}?\}/)?.[0] || "";
+    expect(fullRowRule).toContain(".search-layout > .parallel-platform-progress");
+    expect(fullRowRule).toContain(".search-layout > .workflow-actions");
+    expect(fullRowRule).toContain("grid-column: 1 / -1");
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+
+    // 点名断言：并行分支没有吃掉这些既有现场——
+    // 02 页「进行确认AI筛选条件」出口、03 页 ContinuePlatformGuide、
+    // 单平台路径的 TaskProgress、03 页重抓进度 ScreenRecrawlProgress。
+    const view = readFileSync(path.join(__dirname, "../DiscoveryView.vue"), "utf8");
+    expect(view).toContain('data-testid="continue-to-screen"');
+    expect(view).toContain('<TaskProgress v-if="!parallelMode" :snapshot="scrapeSnapshot"');
+    expect(view).toContain('<TaskProgress v-if="!parallelMode" :snapshot="screenSnapshot"');
+    expect(view).toContain('<ContinuePlatformGuide v-if="!historyMode && roundFlow.continueGuide"');
+    expect(view).toContain('<ScreenRecrawlProgress v-if="recrawlSnapshot || recrawlBusy"');
+  });
+
+  // 状态词表：中断没有活体 worker，轨道行不给「继续」（服务重启后轨道级继续必然失败），
+  // 只留「结束并保存」这条收口出口；开新一轮的出口在页面级，由既有的 canResetNewRound 负责。
+  it("keeps an interrupted Track row free of any continuation", async () => {
+    const fetchMock = oneClickBase({
+      "/api/flows/current": () => response({ ok: true, flow: {
+        id: "interrupted-track-flow", profile_id: "profile-interrupted-track", selection: "all", status: "interrupted",
+        tracks: [
+          { id: "tb", platform: "boss", scrape_run_id: "scrape-b", status: "interrupted", stage: "scrape" },
+        ],
+      } }),
+      "/api/flows/interrupted-track-flow/results": () => response({ ok: true, results: { tracks: [] } }),
+      "/api/task-state/scrape-b": () => response({ status: "interrupted", progress: {}, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-interrupted-track" } });
+    await flushPromises();
+
+    const row = wrapper.get('[data-testid="parallel-track-boss"]');
+    expect(row.text()).toContain("已中断");
+    expect(row.find('[data-testid="continue-scrape"]').exists()).toBe(false);
+    expect(row.text()).not.toContain("继续");
+    expect(row.find('[data-testid="parallel-track-boss-finish-save"]').exists()).toBe(true);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  // 全部平台某条线 AI 失败时，结果页顶部有失败通知。它此前复用了装饰性提示的  // .command-note 类，而该类在窄屏（≤760px）被整条 display:none：窗宽一小，
   // 用户面对结果列表以为全都成功。错误/失败类通知任何宽度都必须可见。
   it("keeps the flow failure notice readable at every viewport width", async () => {
     const fetchMock = oneClickBase({
@@ -6332,7 +6478,10 @@ describe("DiscoveryView", () => {
           expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/task/continue/"))).toBe(false);
         } else {
           // failed/interrupted are visible facts, not an occupied task slot.
-          expect(wrapper.find('[data-testid="continue-ai-screen"]').isVisible()).toBe(false);
+          // 中断不再给「继续」（后端续跑只收 paused/可续 failed）：按钮根本不再出现；
+          // failed 仍给继续，只是回到 02 现场时整片 03 隐藏。
+          const continuation = wrapper.find('[data-testid="continue-ai-screen"]');
+          expect(status === "interrupted" ? continuation.exists() : continuation.isVisible()).toBe(false);
           expect(wrapper.find('[data-testid="finish-save-results"]').isVisible()).toBe(false);
           expect(wrapper.find('[data-testid="start-scrape"]').exists()).toBe(true);
           expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("disabled")).toBeUndefined();
@@ -7018,6 +7167,318 @@ describe("DiscoveryView 035 界面收口（US1/US2 界面级）", () => {
 
     wrapper.unmount();
     sessionStorage.clear();
+    vi.unstubAllGlobals();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SPEC 046 Edge Cases：任一平台被系统禁用新建任务时，「全部」仍阻止启动并指出
+// 不可用平台；可用单平台仍可单独启动。
+// 缺陷现场：前端只看草稿平台的 schema（选了「全部」时非草稿平台的禁用看不见），
+// 用户点完启动、等后端 503 才知道，而且提示语把内部平台码直接吐在脸上。
+// 可用性事实取既有的平台 schema 投影，显示名取平台显示名投影，树干不写平台名。
+// ---------------------------------------------------------------------------
+describe("DiscoveryView 「全部」启动前的平台可用性门禁（046 Edge Cases）", () => {
+  const gateSettings = {
+    inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+    detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+    screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 10, match_concurrency: 10,
+  };
+
+  function platformSchema(platform: string, enabled: boolean) {
+    return {
+      ok: true, platform, schema_version: 1, enabled_for_new_tasks: enabled,
+      fields: [{
+        key: "salary", label: "薪资范围", multiple: false,
+        options: [{ value: "0", label: "不限" }, { value: "406", label: "10-20K" }],
+      }],
+    };
+  }
+
+  function gateFetch(options: { disabled: string[] }) {
+    return vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) return response({ ok: true, flow: null });
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) {
+        const platform = url.includes("platform=zhilian") ? "zhilian" : "boss";
+        return response(platformSchema(platform, !options.disabled.includes(platform)));
+      }
+      if (url.includes("/api/options")) {
+        const platform = url.includes("platform=zhilian") ? "zhilian" : "boss";
+        return response({ ok: true, platform, city_mapping_version: 1, cities: [] });
+      }
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({
+          ok: true, selection: "balanced", settings: gateSettings, last_custom: null,
+          mode_version: null, manual_ranges: {}, config_schema_version: 1,
+        });
+      }
+      if (url.endsWith("/api/analyze-resume")) {
+        return response({ ok: true, fields: {}, platform: "boss", filter_schema_version: 1 });
+      }
+      if (url.includes("/api/flows")) return response({ ok: true, flow_id: "must-not-start", flow: null });
+      return response({});
+    });
+  }
+
+  async function mountOnSearchStep(disabled: string[]) {
+    const fetchMock = gateFetch({ disabled });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-gate" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text().includes("跳过简历"))!.trigger("click");
+    await flushPromises();
+    return { fetchMock, wrapper };
+  }
+
+  it("非草稿平台被禁用时，「全部」的主启动在提交前就挡住并点名", async () => {
+    const { fetchMock, wrapper } = await mountOnSearchStep(["zhilian"]);
+
+    // 默认选中「全部」，草稿平台仍是可用平台：旧写法只看草稿平台，这里必须已经挡住。
+    expect(wrapper.get('[data-testid="platform-segment-all"]').attributes("aria-selected")).toBe("true");
+    const notice = wrapper.get('[data-testid="parallel-platform-disabled-notice"]');
+    expect(notice.text()).toContain("智联");
+    expect(notice.text()).not.toContain("zhilian");
+    expect(wrapper.get('[data-testid="start-one-click"]').attributes("disabled")).toBeDefined();
+
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await flushPromises();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/api/flows"))).toBe(false);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("平台都可用时不设门禁，「全部」照常启动", async () => {
+    const { wrapper } = await mountOnSearchStep([]);
+
+    expect(wrapper.find('[data-testid="parallel-platform-disabled-notice"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="start-one-click"]').attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("禁用另一平台时，可用平台仍可单独启动", async () => {
+    const { wrapper } = await mountOnSearchStep(["zhilian"]);
+
+    await wrapper.get('[data-testid="platform-segment-boss"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="parallel-platform-disabled-notice"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="platform-disabled-notice"]').exists()).toBe(false);
+    const scrapeButton = wrapper.get('[data-testid="start-scrape"]');
+    expect(scrapeButton.attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("禁用当前草稿平台时仍按既有单平台口径提示，不重复两条", async () => {
+    const { wrapper } = await mountOnSearchStep(["boss"]);
+
+    await wrapper.get('[data-testid="platform-segment-boss"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="platform-disabled-notice"]').text()).toContain("BOSS");
+    // 「全部」侧的门禁此时不适用（不在全部模式），只留单平台那一条口径。
+    expect(wrapper.find('[data-testid="parallel-platform-disabled-notice"]').exists()).toBe(false);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SPEC 046 D-07：本轮范围锁定时，03 页卡片汇总与界面自相矛盾。
+// 七类条件因锁定全部置灰，芯片按空草稿把「不限 / 全部」点亮，右上角汇总却写
+// 「未设置筛选条件」。本轮条件的唯一事实源是轨道的 confirmed_filters_snapshot，
+// 汇总必须读它并如实说「已按本轮确认条件锁定，当前只读」。
+// ---------------------------------------------------------------------------
+describe("DiscoveryView 03 页锁定轮次的条件汇总（046 D-07）", () => {
+  function lockedFlowFetch(flow: Record<string, unknown> | null) {
+    return vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) return response({ ok: true, flow });
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) {
+        const platform = url.includes("platform=zhilian") ? "zhilian" : "boss";
+        return response({
+          ok: true, platform, schema_version: 1, enabled_for_new_tasks: true,
+          fields: [{
+            key: "salary", label: "薪资范围", multiple: false,
+            options: [{ value: "0", label: "不限" }, { value: "406", label: "10-20K" }],
+          }],
+        });
+      }
+      if (url.includes("/api/options")) {
+        const platform = url.includes("platform=zhilian") ? "zhilian" : "boss";
+        return response({ ok: true, platform, city_mapping_version: 1, cities: [] });
+      }
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({
+          ok: true, selection: "balanced", settings: {}, last_custom: null,
+          mode_version: null, manual_ranges: {}, config_schema_version: 1,
+        });
+      }
+      return response({});
+    });
+  }
+
+  const frozenSnapshot = {
+    snapshotVersion: 2,
+    mappingVersion: "b096-v2-locked",
+    unifiedValues: { salary: ["10k-20k"] },
+    platformValues: { boss: { salary: ["406"] }, zhilian: { salary: ["10-20K"] } },
+  };
+
+  it("锁定轮次：汇总读本轮冻结快照，不再说「未设置筛选条件」", async () => {
+    const fetchMock = lockedFlowFetch({
+      id: "flow-locked-round",
+      profile_id: "profile-locked-round",
+      selection: "all",
+      status: "running",
+      tracks: [
+        { id: "t-b", flow_id: "flow-locked-round", platform: "boss", status: "running", stage: "ai", confirmed_filters_snapshot: frozenSnapshot },
+        { id: "t-z", flow_id: "flow-locked-round", platform: "zhilian", status: "queued", stage: "scrape", confirmed_filters_snapshot: frozenSnapshot },
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-locked-round" } });
+    await flushPromises();
+
+    const summary = wrapper.get('[data-testid="screen-summary-locked"]');
+    expect(summary.text()).toContain("已按本轮确认条件锁定");
+    expect(summary.text()).toContain("只读");
+    expect(wrapper.text()).not.toContain("未设置筛选条件");
+    // 冻结快照的原始 JSON、字段码与映射版本不得整坨搬到汇总上。
+    expect(summary.text()).not.toContain("snapshotVersion");
+    expect(summary.text()).not.toContain("b096-v2-locked");
+    expect(summary.text()).not.toContain("salary");
+
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("没有冻结快照的新轮次仍按草稿如实显示，不被锁定文案带跑", async () => {
+    const fetchMock = lockedFlowFetch(null);
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-unlocked-round" } });
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="screen-summary-locked"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain("未设置筛选条件");
+
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SPEC 046 D-08：04 页在整轮未完成时开放是分轨合流的设计如此，缺陷只是没说清。
+// 用户会先把领先平台的结果读成"整轮筛完了"。补一句口径明确的说明：本轮仍在进行、
+// 当前只含某一条平台线的结果；落后平台完成时原地加入。判定取既有 Flow 投影与
+// 状态词表的唯一谓词，页面不自算一套活体判定。
+// ---------------------------------------------------------------------------
+describe("DiscoveryView 04 页「本轮仍在进行」说明（046 D-08）", () => {
+  function partialRoundFetch(status: string, tracks: Array<Record<string, unknown>>) {
+    return vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) {
+        return response({
+          ok: true,
+          flow: {
+            id: "flow-partial-round", profile_id: "profile-partial-round", selection: "all", status, tracks,
+          },
+        });
+      }
+      if (url.includes("/api/flows/flow-partial-round/results")) {
+        return response({ ok: true, results: { flow_id: "flow-partial-round", selection: "all", status, tracks } });
+      }
+      if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) {
+        const platform = url.includes("platform=zhilian") ? "zhilian" : "boss";
+        return response({
+          ok: true, platform, schema_version: 1, enabled_for_new_tasks: true,
+          fields: [{ key: "salary", label: "薪资范围", multiple: false, options: [{ value: "0", label: "不限" }] }],
+        });
+      }
+      if (url.includes("/api/options")) {
+        const platform = url.includes("platform=zhilian") ? "zhilian" : "boss";
+        return response({ ok: true, platform, city_mapping_version: 1, cities: [] });
+      }
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({
+          ok: true, selection: "balanced", settings: {}, last_custom: null,
+          mode_version: null, manual_ranges: {}, config_schema_version: 1,
+        });
+      }
+      return response({});
+    });
+  }
+
+  const bossDelivered = { id: "p-b", platform: "boss", status: "done", stage: "complete", result_run_id: "p-b-result" };
+  const zhilianCatchingUp = { id: "p-z", platform: "zhilian", status: "running", stage: "scrape", result_run_id: null };
+
+  it("领先平台已出结果、落后平台仍在跑时，04 页说明本轮仍在进行", async () => {
+    const fetchMock = partialRoundFetch("running", [bossDelivered, zhilianCatchingUp]);
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-partial-round" } });
+    await flushPromises();
+    const resultsStep = wrapper.findAll(".step-nav button").find((button) => button.text().includes("查看结果"));
+    await resultsStep!.trigger("click");
+    await flushPromises();
+
+    const notice = wrapper.get('[data-testid="flow-round-progress-notice"]');
+    expect(notice.text()).toContain("本轮仍在进行");
+    expect(notice.text()).toContain("BOSS");
+    expect(notice.text()).toContain("智联");
+    expect(notice.text()).toContain("原地加入");
+    // 面向用户的文案只走平台显示名投影，不回吐内部码。
+    expect(notice.text()).not.toContain("zhilian");
+    expect(notice.text()).not.toContain("boss");
+    // 与装饰性提示不同类：窄屏隐藏装饰时不能把这句话说没。
+    expect(notice.classes()).not.toContain("command-note");
+
+    const css = readFileSync(path.join(__dirname, "../../styles.css"), "utf8");
+    const narrow = mediaBlocks(css, "max-width: 760px");
+    for (const className of notice.classes()) {
+      expect(narrow).not.toMatch(new RegExp(`\\.${className}\\s*\\{[^}]*display:\\s*none`));
+    }
+    expect(css).toMatch(/\.flow-round-progress-notice\s*\{/);
+
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("两条线都已出结果时不再说本轮仍在进行", async () => {
+    const fetchMock = partialRoundFetch("done", [
+      bossDelivered,
+      { id: "p-z2", platform: "zhilian", status: "done", stage: "complete", result_run_id: "p-z2-result" },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-full-round" } });
+    await flushPromises();
+    const resultsStep = wrapper.findAll(".step-nav button").find((button) => button.text().includes("查看结果"));
+    await resultsStep!.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="flow-round-progress-notice"]').exists()).toBe(false);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("还没有任何结果到达时不承诺原地加入", async () => {
+    const fetchMock = partialRoundFetch("running", [
+      { id: "p-b2", platform: "boss", status: "running", stage: "scrape", result_run_id: null },
+      zhilianCatchingUp,
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-no-result" } });
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="flow-round-progress-notice"]').exists()).toBe(false);
+    wrapper.unmount();
     vi.unstubAllGlobals();
   });
 });

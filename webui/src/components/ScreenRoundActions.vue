@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { LoaderCircle } from "@lucide/vue";
-import type { ScreenPrimaryAction, ScrapePrimaryAction } from "../screenFlow";
-
-type SharedPrimaryAction = ScreenPrimaryAction | ScrapePrimaryAction;
+import type { SharedPrimaryAction } from "../screenFlow";
 
 const props = defineProps<{
   action: SharedPrimaryAction;
@@ -92,6 +90,12 @@ function cancelDisabled(): boolean {
   }
   return anyActionBusy();
 }
+
+// disabled 说的是「这一整片现场此刻不可操作」（例如流程状态读不到、只能看），
+// 因此三个按钮一起锁；只锁主动作会让收尾与终止在不可确认的状态下仍然可点。
+function sharedDisabled(): boolean {
+  return anyActionBusy() || Boolean(props.disabled);
+}
 </script>
 
 <template>
@@ -117,7 +121,7 @@ function cancelDisabled(): boolean {
       class="button danger"
       type="button"
       :data-testid="finishTestId()"
-      :disabled="anyActionBusy()"
+      :disabled="sharedDisabled()"
       @click="emit('finish-save')"
     >
       <LoaderCircle
@@ -133,7 +137,7 @@ function cancelDisabled(): boolean {
       class="button danger"
       type="button"
       :data-testid="cancelTestId()"
-      :disabled="cancelDisabled()"
+      :disabled="cancelDisabled() || Boolean(disabled)"
       @click="emit('cancel')"
     >
       <LoaderCircle

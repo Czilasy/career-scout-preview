@@ -234,6 +234,8 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
 
   // SPEC 046 第五轮：服务重启打断的轮次，03 页 AI 筛选卡写「已中断」、02 页抓取卡写
   // 「完整成功」，而顶栏灵动岛说「任务已暂停，请处理后继续」——岛谎报了状态性质。
+  // SPEC 046 D-06（状态词表）：中断没有活体 worker，轨道级「继续」在服务重启后必然
+  // 失败，界面上也不存在这个入口；中断的唯一出路是开新一轮。文案不得再承诺「继续」。
   it("筛选被服务重启打断 → 岛上说已中断，不再谎报已暂停", () => {
     const state = useDiscoveryState({ profileId: "test" }, () => {});
     state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
@@ -246,9 +248,21 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
       expect(capsule.attention.kind).toBe("paused");
       expect(capsule.attention.message).toContain("已中断");
       expect(capsule.attention.message).not.toContain("已暂停");
-      expect(capsule.attention.message).toContain("继续");
+      expect(capsule.attention.message).toContain("开始新一轮");
+      expect(capsule.attention.message).not.toContain("继续");
     }
     expect(payload?.stuckAt).toBe("screen");
+  });
+
+  it("用户主动暂停仍然说「处理后继续」：只有中断才指向新一轮", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.pausedRunId.value = "run-paused-copy";
+    const capsule = state.roundStatusPayload.value?.capsule;
+    expect(capsule?.state).toBe("attention");
+    if (capsule?.state === "attention") {
+      expect(capsule.attention.message).toContain("已暂停");
+      expect(capsule.attention.message).toContain("继续");
+    }
   });
 
   it("只剩中断断点（interruptedRunId）→ 岛同样说已中断", () => {

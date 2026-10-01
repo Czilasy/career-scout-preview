@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ref } from "vue";
+import { ref, type Ref } from "vue";
 import { createIslandNotices } from "../useIslandNotices";
 import { useDiscoveryState } from "../useDiscoveryState";
 import type { CapsuleStatusPayload } from "../useDiscoveryState";
@@ -437,5 +437,124 @@ describe("useIslandNotices — 暂停族行标题与事实一致", () => {
     expect(row.title).toContain("已暂停");
     expect(row.title).not.toContain("已中断");
     expect(row.detail).toContain("已暂停");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SPEC 046 D-06：通知行必须带轮次归属，新一轮开始时上一轮的告警族通知失效。
+// 真实现场——点「开始新一轮」并把中断轨道收尾为 cancelled 之后，灵动岛仍挂着
+// 「任务已中断」那一行：running 分支故意不清池（037：用户可能还没看），而池里
+// 的行又不认识"自己是哪一轮说的"，于是没有任何一条路径撤掉它。
+// 修法只允许按轮次归属撤销上一轮的中断/attention 行；整池清掉会把本轮刚到达
+// 的「结果已加入」一起吞掉（那是 US3 要求只提示一次的那一条）。
+// 轮次身份取现场存档既有的轮次令牌（sceneStore.roundEpoch，开新一轮才换发），
+// 本池不自己数轮次。
+// ---------------------------------------------------------------------------
+describe("useIslandNotices — 轮次归属与新一轮失效（D-06）", () => {
+  /** 上一轮的现场：一条中断 attention 行 + 一条沉入的中断行 + 一条完成历史行。 */
+  function previousRoundPool(round: Ref<string>) {
+    const status = ref<CapsuleStatusPayload | null>(
+      makeStatus({ state: "running", platform: "boss", progress: { phase: "screening", done: 5 } }),
+    );
+    const api = createIslandNotices(status, round);
+    status.value = makeStatus({
+      state: "attention", platform: "boss",
+      attention: {
+        kind: "paused", pausedFact: "interrupted",
+        message: "任务已中断，请开始新一轮",
+      },
+    });
+    api.sinkInterrupt({
+      id: "int-previous-round",
+      kind: "interrupt",
+      title: "上次 AI 筛选因服务重启被中断，已保留中断信息，可开始新一轮",
+      detail: "",
+      tone: "warning",
+      target: "task",
+    });
+    return { api, status };
+  }
+
+  it("通知行登记到达时的轮次身份", () => {
+    const round = ref("round-A");
+    const { api } = previousRoundPool(round);
+    expect(api.notices.value.every((notice) => notice.round === "round-A")).toBe(true);
+  });
+
+  it("开始新一轮：上一轮的中断行与 attention 行都撤销", () => {
+    const round = ref("round-A");
+    const { api } = previousRoundPool(round);
+    expect(api.notices.value).toHaveLength(2);
+    expect(api.unreadCount.value).toBe(2);
+
+    round.value = "round-B";
+
+    expect(api.notices.value).toHaveLength(0);
+    expect(api.unreadCount.value).toBe(0);
+  });
+
+  it("撤销只按轮次归属：上一轮的完成历史行不属于告警族，不得被整池清掉", () => {
+    const round = ref("round-A");
+    const { api, status } = previousRoundPool(round);
+    status.value = makeStatus({ state: "running", platform: "boss", progress: { phase: "screening", done: 8 } });
+    status.value = makeStatus({ state: "completed", platform: "boss", results: { matched: 6, pending: 0 } });
+    expect(api.notices.value.some((notice) => notice.kind === "completed")).toBe(true);
+
+    round.value = "round-B";
+
+    const completed = api.notices.value.filter((notice) => notice.kind === "completed");
+    expect(completed).toHaveLength(1);
+    expect(completed[0].detail).toBe("匹配 6");
+    expect(api.notices.value.some((notice) => notice.kind === "paused")).toBe(false);
+    expect(api.notices.value.some((notice) => notice.kind === "interrupt")).toBe(false);
+  });
+
+  it("正向配对：新一轮里刚到达的结果加入通知不被撤销", () => {
+    const round = ref("round-A");
+    const { api } = previousRoundPool(round);
+    round.value = "round-B";
+
+    api.pushNotice({
+      id: "join-round-B",
+      title: "BOSS 结果已加入",
+      detail: "当前流程的新结果已原地合入",
+      target: "results",
+    });
+    // 本轮再产一条通知：撤销只认轮次归属，不得顺手把池清掉。
+    api.sinkInterrupt({
+      id: "int-round-B",
+      kind: "interrupt",
+      title: "投递提醒",
+      detail: "1条逾期",
+      tone: "warning",
+      target: "reminders",
+    });
+
+    expect(api.notices.value.map((notice) => notice.id)).toEqual(["join-round-B", "int-round-B"]);
+    expect(api.notices.value.every((notice) => notice.round === "round-B")).toBe(true);
+  });
+
+  it("没有轮次身份时不误撤（未登记归属的行保持既有行为）", () => {
+    const status = ref<CapsuleStatusPayload | null>(
+      makeStatus({ state: "running", platform: "boss", progress: { phase: "screening", done: 5 } }),
+    );
+    const api = createIslandNotices(status);
+    status.value = makeStatus({
+      state: "attention", platform: "boss",
+      attention: { kind: "error", message: "网络断连" },
+    });
+    const round = ref("");
+    const wiredStatus = ref<CapsuleStatusPayload | null>(
+      makeStatus({ state: "running", platform: "boss", progress: { phase: "screening", done: 5 } }),
+    );
+    const wired = createIslandNotices(wiredStatus, round);
+    wired.sinkInterrupt({
+      id: "int-no-round", kind: "interrupt", title: "无轮次身份的行", detail: "", tone: "warning", target: "task",
+    });
+
+    expect(api.notices.value).toHaveLength(1);
+    expect(wired.notices.value.map((notice) => notice.id)).toEqual(["int-no-round"]);
+    round.value = "round-B";
+    expect(wired.notices.value.map((notice) => notice.id)).toEqual(["int-no-round"]);
   });
 });

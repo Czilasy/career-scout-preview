@@ -238,6 +238,29 @@ describe("useDiscoveryExecution.restoreRunningTask（026 B078）", () => {
     },
   );
 
+  it.each(["failed", "interrupted"] as const)(
+    "未进 04 页 + AI 筛选 %s → 恢复提示指向「开始新一轮」这条真出路（D-06）",
+    async (status) => {
+      apiRequestMock.mockResolvedValue({
+        ...interruptedScreenResponse,
+        task_id: `screen-hint-${status}`,
+        status,
+        error: status === "failed" ? "AI 服务失败" : "服务重启导致 AI 筛选中断",
+      });
+      const state = makeState({ resultsPageSeen: ref(false) });
+      const deps = makeDeps();
+      const execution = useDiscoveryExecution(state, deps);
+
+      await execution.restoreRunningTask();
+
+      const hint = state.restoredTaskHint.value;
+      expect(hint).toContain("开始新一轮");
+      // 本项目没有"重新开始筛选"这个入口（该恢复能力已定案记延期）：
+      // 提示语不得再承诺一个界面上不存在的动作。
+      expect(hint).not.toContain("可重新开始筛选");
+    },
+  );
+
   it("paused 分支同样受「已结束」闸门约束：已进 04 页则不恢复暂停任务", async () => {
     apiRequestMock.mockResolvedValue({
       has_task: true,

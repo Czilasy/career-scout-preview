@@ -94,8 +94,10 @@ export function requestCapsuleNavigation(target: CapsuleNavigationTarget): void 
 // 但性质不能混着说：把「已中断」写成「已暂停」就是谎报，与同一屏的阶段卡和顶栏胶囊
 // 互相打脸。这里只把胶囊分支已经读到的那一份状态换成中文口径——判活与状态权威仍是
 // 那一份，不在此另起一套判定；用词与阶段卡的 stageStatusLabel 对齐（paused=已暂停、
-// interrupted=已中断），两种都保留「请处理后继续」的可恢复引导。
+// interrupted=已中断），两种性质各自的出路见 pausedFamilyIslandMessage。
 // 顶栏胶囊与展开面板的通知行标题共读这一份：通知池只接性质，不再自己按 kind 猜。
+// 出路也共读这一份：可恢复的暂停说「处理后继续」，被服务重启打断的说「开始新一轮」
+// （状态词表：中断没有活体 worker，界面上不存在轨道级「继续」这个入口）。
 // ---------------------------------------------------------------------------
 const PAUSED_FAMILY_STATUSES = ["paused", "interrupted"] as const;
 export type PausedFamilyFact = typeof PAUSED_FAMILY_STATUSES[number];
@@ -122,7 +124,12 @@ export function pausedFamilyNoticeTitle(fact: PausedFamilyFact): string {
 
 /** 完整说法：顶栏胶囊那一行的提示。 */
 function pausedFamilyIslandMessage(fact: PausedFamilyFact): string {
-  return `${PAUSED_FAMILY_LABELS[fact]}，请处理后继续`;
+  // 状态词表（SPEC 046 D-06）：中断是「无活体 worker」，轨道级「继续」在服务重启后
+  // 必然失败、界面上也没有这个入口，唯一出路是开新一轮；能接续的只有用户主动暂停。
+  // 出口在这里说清楚，不在页面上补一个做不到的按钮。
+  return fact === "interrupted"
+    ? `${PAUSED_FAMILY_LABELS[fact]}，请开始新一轮`
+    : `${PAUSED_FAMILY_LABELS[fact]}，请处理后继续`;
 }
 
 export function useDiscoveryState(props: DiscoveryProps, emit: DiscoveryEmit) {
@@ -1007,6 +1014,34 @@ const screenSummaryChips = computed(() => {
   return chips;
 });
 
+// 结果是否已经到「可以直接渲染」的程度：一条结果可能早于外围的完成标记落地
+// （恢复持久化页面、替换 Flow 投影时都会出现）。空态/加载中的横幅不得盖住已经
+// 能渲染的列表、计数或 Flow 错误投影——这里读的就是 pipelineResult 本体那一份
+// 事实，页面只绑定结果，不再自己拼判定。
+const hasRenderableResult = computed(() => {
+  const result = pipelineResult.value as (PipelineResult & {
+    flow_tracks?: Array<Record<string, unknown>>;
+  }) | null;
+  if (resultLoaded.value) return true;
+  if (!result) return false;
+  const jobs = Array.isArray(result.jobs) ? result.jobs : [];
+  const dropped = Array.isArray(result.dropped) ? result.dropped : [];
+  const hasCount = [
+    result.total_scraped,
+    result.total_kept,
+    result.total_matched,
+    result.total_dropped,
+  ].some((value) => Number(value || 0) > 0);
+  const hasTrackProjection = (result.flow_tracks || []).some((track) => (
+    (Array.isArray(track.jobs) && track.jobs.length > 0)
+    || (Array.isArray(track.dropped) && track.dropped.length > 0)
+    || Boolean(track.result_run_id)
+    || ["failed", "unavailable", "interrupted"].includes(String(track.status || ""))
+    || Boolean(String(track.message || track.reason || track.error || "").trim())
+  ));
+  return Boolean(jobs.length || dropped.length || hasCount || hasTrackProjection);
+});
+
 // 分类基于当前平台过滤后的结果：页签计数跟随筛选联动。
 // 过滤逻辑抽到 discovery.ts 纯函数（filterPipelineResultByPlatform），
 // 切换筛选只影响展示层派生，不触碰 pipelineResult 本体。
@@ -1562,6 +1597,7 @@ return {
   searchSummary,
   screenSummaryChips,
   filteredPipelineResult,
+  hasRenderableResult,
   groups,
   uncertainByPlatform,
   resultTabs,

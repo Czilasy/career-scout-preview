@@ -675,7 +675,7 @@ describe("Discovery recovery paths", () => {
 
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-live-notice" } });
     await flushPromises();
-    await wrapper.get('[data-testid="parallel-boss-pause"]').trigger("click");
+    await wrapper.get('[data-testid="parallel-track-boss"]').get('[data-testid="pause-scrape"]').trigger("click");
     await flushPromises();
     await flushPromises();
 

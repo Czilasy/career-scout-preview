@@ -1,380 +1,344 @@
 import { mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { nextTick } from "vue";
 import ParallelPlatformProgress from "../ParallelPlatformProgress.vue";
+import ScreenRoundActions from "../ScreenRoundActions.vue";
+import { deriveTrackActionBar } from "../../screenFlow";
+import type { Platform } from "../../types";
+
+// 轨道行是「一平台一行」的复用现场：进度卡与动作条都是既有组件，
+// 这一层只把呈现层算好的事实摆出来、把点击原样往上传。
+// 动作事实由呈现层按轨道各算一份（见 useDiscoveryFlowPresentation.spec），
+// 本文件因此直接喂派生结果，不再自带任何状态判定。
+function snapshotFor(status: string, progress: Record<string, unknown> = {}) {
+  return { status, progress, logs: [] };
+}
+
+function item(overrides: Record<string, unknown> = {}) {
+  const platform = (overrides.platform as Platform) || "boss";
+  const kind = (overrides.kind as "scrape" | "screen") || "scrape";
+  const status = String(overrides.status ?? "running");
+  const runId = String(overrides.runId ?? `run-${platform}`);
+  const bar = deriveTrackActionBar({ stage: kind, status, runId });
+  return {
+    platform,
+    trackId: `track-${platform}`,
+    runId,
+    kind,
+    stage: kind,
+    status,
+    snapshot: snapshotFor(status, { overall_percent: 42, current: 3, total: 7 }),
+    statusLabel: "运行中",
+    enteredAt: 0,
+    carriesLineState: true,
+    ...bar,
+    finishRunId: runId,
+    finishTestId: `parallel-track-${platform}-finish-save`,
+    cancelTestId: `parallel-track-${platform}-cancel`,
+    ...overrides,
+  };
+}
+
+function row(wrapper: ReturnType<typeof mount>, platform: Platform) {
+  return wrapper.get(`[data-testid="parallel-track-${platform}"]`);
+}
 
 describe("ParallelPlatformProgress", () => {
-  const snapshots = {
-    running: { status: "running", progress: { overall_percent: 42, stage: "scrape", current: 3, total: 7 }, logs: [] },
-    paused: { status: "paused", progress: { overall_percent: 61, stage: "screen" }, logs: [], pause_info: { error_code: "user_paused", error_reason: "已暂停" } },
-    failed: { status: "failed", progress: {}, logs: [], error: "AI unavailable" },
-  };
-
-  it("renders independent BOSS and Zhilian items and only emits the clicked action", async () => {
+  it("renders one shared action bar per Track row, each with that Track's own action", () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {
         items: [
-          { platform: "boss", trackId: "b", runId: "run-b", kind: "scrape", stage: "scrape", status: "running", snapshot: snapshots.running },
-          { platform: "zhilian", trackId: "z", runId: "run-z", kind: "screen", stage: "screen", status: "paused", snapshot: snapshots.paused },
+          item({ platform: "boss", status: "running" }),
+          item({
+            platform: "zhilian",
+            kind: "screen",
+            stage: "screen",
+            status: "paused",
+            statusLabel: "已暂停",
+            snapshot: snapshotFor("paused"),
+          }),
+        ],
+      },
+    });
+
+    expect(wrapper.findAllComponents({ name: "TaskProgress" })).toHaveLength(2);
+    const bars = wrapper.findAllComponents(ScreenRoundActions);
+    expect(bars).toHaveLength(2);
+    expect(bars[0]?.props("action")).toEqual({ kind: "pause-scrape", label: "暂停" });
+    expect(bars[1]?.props("action")).toEqual({ kind: "continue", label: "继续 AI 筛选" });
+    expect(row(wrapper, "boss").text()).toContain("暂停");
+    expect(row(wrapper, "zhilian").text()).toContain("继续 AI 筛选");
+    wrapper.unmount();
+  });
+
+  // D-04：动作条是这张卡的一部分——落进卡边框内部，左缘随卡内 padding 与卡内内容对齐。
+  it("renders each Track's action bar inside that Track's own progress card", () => {
+    const component = readFileSync(path.join(__dirname, "../ParallelPlatformProgress.vue"), "utf8");
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: {
+        items: [
+          item({ platform: "boss" }),
+          item({ platform: "zhilian", kind: "screen", stage: "screen", statusLabel: "已暂停" }),
+        ],
+      },
+    });
+
+    expect(wrapper.findAll("section.task-progress")).toHaveLength(2);
+    for (const platform of ["boss", "zhilian"] as Platform[]) {
+      const trackRow = row(wrapper, platform);
+      const card = trackRow.get("section.task-progress");
+      const bars = card.findAllComponents(ScreenRoundActions);
+      expect(bars).toHaveLength(1);
+      // DOM 包含关系：动作行在卡边框之内，不是掉在卡外的兄弟节点。
+      expect(card.element.contains(bars[0]!.element)).toBe(true);
+      // 平台标识仍然只有卡自己那一份（表头删掉后徽章没有跟着消失）。
+      expect(trackRow.get('[data-testid="task-platform-badge"]').text()).toContain(
+        platform === "boss" ? "BOSS" : "智联",
+      );
+    }
+
+    // 结构：动作条写在 <TaskProgress> 的开合标签之间（作为卡自己的落点内容）。
+    const cardOpen = component.indexOf("<TaskProgress");
+    const cardClose = component.indexOf("</TaskProgress>");
+    expect(cardOpen).toBeGreaterThanOrEqual(0);
+    expect(cardClose).toBeGreaterThan(cardOpen);
+    expect(component.indexOf("<ScreenRoundActions")).toBeGreaterThan(cardOpen);
+    expect(component.indexOf("<ScreenRoundActions")).toBeLessThan(cardClose);
+    wrapper.unmount();
+  });
+
+  // D-04：自写表头删除后，一行里表示平台/阶段/状态的元素只允许来自 TaskProgress。
+  it("leaves the progress card as the only voice of a Track's platform, stage and status", () => {
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: {
+        items: [
+          item({ platform: "boss", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") }),
+          item({ platform: "zhilian", status: "running", snapshot: snapshotFor("running") }),
+        ],
+      },
+    });
+
+    expect(wrapper.find('[data-testid="parallel-track-status"]').exists()).toBe(false);
+    expect(wrapper.find(".parallel-item-header").exists()).toBe(false);
+    for (const platform of ["boss", "zhilian"] as Platform[]) {
+      const trackRow = row(wrapper, platform);
+      // 同一行内表示状态的元素只有一个，且它就是卡体的那一个。
+      expect(trackRow.findAll(".task-status")).toHaveLength(1);
+      // 行内不再有第二层表头（卡自己的那一个 header 保留）。
+      expect(trackRow.findAll("header")).toHaveLength(1);
+    }
+    expect(row(wrapper, "boss").get(".task-status").text()).toBe("已暂停");
+    wrapper.unmount();
+  });
+
+  it("emits only the clicked Track's platform and action kind", async () => {
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: {
+        items: [
+          item({ platform: "boss", status: "running" }),
+          item({ platform: "zhilian", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") }),
+        ],
+      },
+    });
+
+    await row(wrapper, "boss").get('[data-testid="pause-scrape"]').trigger("click");
+    expect(wrapper.emitted("action")).toEqual([["boss", "pause-scrape"]] as never);
+
+    await row(wrapper, "zhilian").get('[data-testid="continue-scrape"]').trigger("click");
+    expect(wrapper.emitted("action")).toEqual([
+      ["boss", "pause-scrape"],
+      ["zhilian", "continue-scrape"],
+    ] as never);
+    wrapper.unmount();
+  });
+
+  // 轨道级「结束并保存」走单平台同一条 run 级收尾：把这条线自己的 run id 交给页面，
+  // 由页面调用既有的 finishPausedTask，不新增端点、不新增一套动作。
+  it("hands the Track's own run id to the shared finish path", async () => {
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: { items: [item({ platform: "zhilian", runId: "scrape-zhilian" })] },
+    });
+
+    await row(wrapper, "zhilian").get('[data-testid="parallel-track-zhilian-finish-save"]').trigger("click");
+    expect(wrapper.emitted("finish")).toEqual([["scrape-zhilian"]] as never);
+    expect(wrapper.emitted("action")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("labels the Track cancel action 终止本轨 and emits cancel for that platform only", async () => {
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: {
+        items: [
+          item({ platform: "boss", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") }),
+          item({ platform: "zhilian", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") }),
+        ],
+      },
+    });
+
+    expect(row(wrapper, "boss").get('[data-testid="parallel-track-boss-cancel"]').text()).toContain("终止本轨");
+    await row(wrapper, "boss").get('[data-testid="parallel-track-boss-cancel"]').trigger("click");
+    expect(wrapper.emitted("action")).toEqual([["boss", "cancel"]] as never);
+    wrapper.unmount();
+  });
+
+  // 状态词表：中断＝无活体 worker，只能开新一轮（页面级「开始新一轮」出口），
+  // 轨道行上不得再出现「继续」。这里喂呈现层给的中断事实，断言本行只剩收尾出口。
+  it("gives an interrupted Track the close-out exit and no continuation", () => {
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: {
+        items: [item({
+          platform: "boss",
+          status: "interrupted",
+          statusLabel: "已中断",
+          snapshot: snapshotFor("interrupted"),
+        })],
+      },
+    });
+
+    const actions = row(wrapper, "boss").get(".screen-round-actions");
+    expect(actions.find('[data-testid="continue-scrape"]').exists()).toBe(false);
+    expect(actions.find('[data-testid="pause-scrape"]').exists()).toBe(false);
+    expect(actions.text()).not.toContain("继续");
+    expect(actions.get('[data-testid="parallel-track-boss-finish-save"]').text()).toContain("结束并保存");
+    wrapper.unmount();
+  });
+
+  it("renders a terminal Track row without any action button", () => {
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: {
+        items: [item({
+          platform: "boss", status: "stopped", statusLabel: "已停止", snapshot: snapshotFor("stopped"),
+        })],
+      },
+    });
+
+    expect(wrapper.findAllComponents(ScreenRoundActions)).toHaveLength(1);
+    expect(row(wrapper, "boss").findAll("button")).toHaveLength(0);
+    wrapper.unmount();
+  });
+
+  it("keeps the shared busy and read-only facts working for every button on that row", () => {
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: {
+        items: [
+          item({ platform: "boss", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") }),
+          item({ platform: "zhilian", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") }),
         ],
         busyPlatform: "boss",
       },
     });
-    expect(wrapper.find('[data-testid="parallel-track-boss"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="parallel-track-zhilian"]').exists()).toBe(true);
-    await wrapper.get('[data-testid="parallel-zhilian-resume"]').trigger("click");
-    await nextTick();
-    expect(wrapper.emitted("action")).toEqual([["zhilian", "resume"]] as never);
-    expect(wrapper.find('[data-testid="parallel-zhilian-resume"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="parallel-boss-pause"]').attributes("disabled")).toBeDefined();
+
+    expect(row(wrapper, "boss").findAll("button").every((button) => button.attributes("disabled") !== undefined)).toBe(true);
+    expect(row(wrapper, "zhilian").findAll("button").every((button) => button.attributes("disabled") === undefined)).toBe(true);
+    wrapper.unmount();
+  });
+
+  // 流程状态读不到（stale）时整条动作条不可操作：三个按钮一起锁，
+  // 但按钮仍在原位，用户看得到这一条线，只是点不动。
+  it("disables every Track action while Flow state is stale", () => {
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: {
+        stale: true,
+        items: [item({ platform: "boss", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") })],
+      },
+    });
+
+    const buttons = row(wrapper, "boss").findAll("button");
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(buttons.every((button) => button.attributes("disabled") !== undefined)).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("says the interrupted Track's wording once, through the card's own status label", () => {
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: {
+        items: [item({
+          platform: "boss", status: "interrupted", statusLabel: "已中断", snapshot: snapshotFor("interrupted"),
+        })],
+      },
+    });
+
+    // 表头已删：这一行表示状态的元素只允许来自 TaskProgress，且只有一处。
+    const statuses = row(wrapper, "boss").findAll(".task-status");
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]?.text()).toBe("已中断");
+    expect(row(wrapper, "boss").find(".task-status .spin").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("renders the stage card exactly as the presentation layer resolved it", () => {
+    // 抓取段自己已完成、整条线在 AI 段暂停：头部徽章与卡体都只说这一段（呈现层已定稿），
+    // 动作仍按轨道状态给暂停 AI（轨道级事实）。组件不得再自己压一遍状态。
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: {
+        items: [{
+          ...item({ platform: "zhilian", status: "paused", runId: "run-scrape-done" }),
+          statusLabel: "已完成",
+          snapshot: { ...snapshotFor("succeeded"), progress: { overall_percent: 100, current: 7, total: 7 } },
+        }],
+      },
+    });
+
+    expect(row(wrapper, "zhilian").get(".task-status").text()).toBe("已完成");
+    expect(row(wrapper, "zhilian").text()).not.toContain("已暂停");
+    expect(row(wrapper, "zhilian").text()).not.toContain("已中断");
+    expect(row(wrapper, "zhilian").find(".task-status .spin").exists()).toBe(false);
+    wrapper.unmount();
   });
 
   it("shows a failed track through TaskProgress instead of a fake completed bar", () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {
-        items: [
-          { platform: "zhilian", trackId: "z", runId: "run-z", kind: "scrape", stage: "scrape", status: "failed", snapshot: snapshots.failed },
-        ],
+        items: [{
+          ...item({ platform: "zhilian", status: "failed", statusLabel: "执行失败" }),
+          snapshot: { status: "failed", progress: {}, logs: [], error: "AI unavailable" },
+        }],
       },
     });
     expect(wrapper.text()).toContain("智联");
     expect(wrapper.find('[role="progressbar"]').exists()).toBe(false);
-  });
-
-  // 终态文案以后端 flow_tracks 白名单为唯一口径：stopped / cancelled 都是真实
-  // 终态（停止与取消轨道由 store_flow_claims / store_flow_state 写入），
-  // 之前落到兜底分支显示「状态更新中」，用户看不出这一线已经停了。
-  it.each([
-    ["stopped", "run-stopped"],
-    ["cancelled", "run-cancelled"],
-  ])("shows a %s Track as a terminal stopped state without a spinner", async (status, runId) => {
-    const wrapper = mount(ParallelPlatformProgress, {
-      props: {
-        items: [
-          {
-            platform: "boss",
-            trackId: `${status}-track`,
-            runId,
-            kind: "scrape",
-            stage: "scrape",
-            status,
-            snapshot: { ...snapshots.running, status: "running" },
-          },
-        ],
-      },
-    });
-
-    expect(wrapper.get('[data-testid="parallel-track-status"]').text()).toBe("已停止");
-    expect(wrapper.find('[data-testid="parallel-track-boss"] .task-status .spin').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="parallel-boss-pause"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="parallel-boss-stop"]').exists()).toBe(false);
     wrapper.unmount();
   });
 
-  it("renders each item with the original TaskProgress and real snapshot data", async () => {
+  it("renders each item with the original TaskProgress and real snapshot data", () => {
     const wrapper = mount(ParallelPlatformProgress, {
-      props: {
-        items: [
-          { platform: "boss", trackId: "track-b", runId: "run-b", kind: "scrape", stage: "scrape", status: "running", snapshot: snapshots.running },
-          { platform: "zhilian", trackId: "track-z", runId: "run-z", kind: "screen", stage: "screen", status: "paused", snapshot: snapshots.paused },
-        ],
-        busyPlatform: "boss",
-      },
+      props: { items: [item({ platform: "boss" }), item({ platform: "zhilian", kind: "screen", stage: "screen", statusLabel: "已暂停" })] },
     });
-    const tasks = wrapper.findAllComponents({ name: "TaskProgress" });
-    expect(tasks).toHaveLength(2);
-    expect(wrapper.find('[role="progressbar"]').exists()).toBe(false);
+    expect(wrapper.findAllComponents({ name: "TaskProgress" })).toHaveLength(2);
     expect(wrapper.find(".parallel-platform-bar").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("scrape");
     expect(wrapper.text()).not.toContain("screen");
-    await wrapper.get('[data-testid="parallel-zhilian-resume"]').trigger("click");
-    expect(wrapper.emitted("action")).toEqual([["zhilian", "resume"]] as never);
-    expect(wrapper.find('[data-testid="parallel-boss-pause"]').attributes("disabled")).toBeDefined();
+    wrapper.unmount();
   });
 
   it("keeps one vertical single-column shell without fake percentages", () => {
     const wrapper = mount(ParallelPlatformProgress, {
-      props: { items: [{ platform: "boss", trackId: "b", runId: "r", kind: "scrape", stage: "scrape", status: "running", snapshot: snapshots.running }] },
+      props: { items: [item({ platform: "boss" })] },
     });
     const source = (wrapper.element as HTMLElement).outerHTML;
     expect(source).not.toContain("repeat(2");
     expect(source).not.toContain("35%");
     expect(source).not.toContain("65%");
+    wrapper.unmount();
   });
 
   it("uses the explicit Flow kind instead of guessing from an opaque run id", () => {
     const wrapper = mount(ParallelPlatformProgress, {
-      props: {
-        items: [{
-          platform: "boss", trackId: "b", runId: "8c0f0c9e-opaque", kind: "screen", stage: "screen",
-          status: "running", snapshot: { ...snapshots.running, status: "running" },
-        }],
-      },
+      props: { items: [item({ platform: "boss", runId: "8c0f0c9e-opaque", kind: "screen", stage: "screen" })] },
     });
     const task = wrapper.findComponent({ name: "TaskProgress" });
     expect(task.props("kind")).toBe("screen");
     expect(wrapper.text()).not.toContain("running");
-  });
-
-  it("disables every Track action while Flow state is stale", () => {
-    const wrapper = mount(ParallelPlatformProgress, {
-      props: {
-        stale: true,
-        items: [{
-          platform: "boss", trackId: "stale-track", runId: "run-stale", kind: "scrape", stage: "scrape",
-          status: "paused", snapshot: snapshots.paused,
-        }],
-      },
-    });
-
-    expect(wrapper.get('[data-testid="parallel-boss-resume"]').attributes("disabled")).toBeDefined();
-    expect(wrapper.get('[data-testid="parallel-boss-stop"]').attributes("disabled")).toBeDefined();
-  });
-
-  // 轨道头部用 Track 状态覆盖快照状态，卡体走 TaskProgress 自己的口径：
-  // interrupted 之前只在头部有「已中断」、卡体落到「运行中」还转圈，
-  // 同一张卡自相矛盾。两处必须说同一句话，且都不得转圈。
-  it("shows one 已中断 wording in both the track header and the TaskProgress body", async () => {
-    const wrapper = mount(ParallelPlatformProgress, {
-      props: {
-        items: [{
-          platform: "boss", trackId: "interrupted-track", runId: "run-interrupted", kind: "scrape",
-          stage: "scrape", status: "interrupted",
-          snapshot: { ...snapshots.running, status: "interrupted" },
-        }],
-      },
-    });
-
-    expect(wrapper.get('[data-testid="parallel-track-status"]').text()).toBe("已中断");
-    expect(wrapper.get('[data-testid="parallel-track-boss"] .task-status').text()).toContain("已中断");
-    expect(wrapper.get('[data-testid="parallel-track-boss"] .task-status').text()).not.toContain("运行中");
-    expect(wrapper.find('[data-testid="parallel-track-boss"] .task-status .spin').exists()).toBe(false);
-    // interrupted 是可恢复态：继续按钮必须在，不得被当终态收掉。
-    expect(wrapper.find('[data-testid="parallel-boss-resume"]').exists()).toBe(true);
     wrapper.unmount();
   });
 
-  // 阶段卡说的是这一段的事：抓取段自己已经跑完，整条线往下走到 AI 段还在跑，
-  // 这张卡的头部与卡体都必须说「这一段完成了」——轨道状态不再只归头部，
-  // 它归「线当前所在的那一段」那张卡（carriesLineState 由 Flow 呈现层判定并下发）。
-  it("freezes a finished scrape stage while its Track is still running", () => {
-    const now = Date.now();
-    const wrapper = mount(ParallelPlatformProgress, {
-      props: {
-        items: [{
-          platform: "zhilian", trackId: "live-track", runId: "run-scrape-done", kind: "scrape",
-          stage: "scrape", status: "running", carriesLineState: false,
-          snapshot: {
-            ...snapshots.running,
-            status: "succeeded",
-            progress: { overall_percent: 100, stage: "done", current: 7, total: 7 },
-            started_at: now - 60_000,
-            finished_at: now - 1_000,
-          },
-        }],
-      },
-    });
-
-    expect(wrapper.get('[data-testid="parallel-track-status"]').text()).toBe("已完成");
-    const body = wrapper.get('[data-testid="parallel-track-zhilian"] .task-status').text();
-    expect(body).not.toContain("抓取中");
-    expect(body).not.toContain("运行中");
-    expect(body).not.toContain("进行中");
-    expect(wrapper.find('[data-testid="parallel-track-zhilian"] .task-status .spin').exists()).toBe(false);
-    expect(wrapper.get('[data-testid="parallel-track-zhilian"]').text()).not.toContain("已用");
-    wrapper.unmount();
-  });
-
-  // 真实缺陷：智联轨道 status=interrupted、阶段在 AI（服务重启打断筛选），
-  // 抓取 run 早在重启前就 100% 成功。02 页「智联 抓取」卡头部写「已中断」、
-  // 卡体写「完整成功」，无障碍朗读连成「智联 抓取 已中断 完整成功，列表抓取，
-  // 已抓取 377 个岗位」。轨道级状态只归中断发生的那一段，别的段不背这个锅。
-  it("routes the Track-level 已中断 badge to the stage the interruption actually hit", () => {
-    const scrape = mount(ParallelPlatformProgress, {
-      props: {
-        items: [{
-          platform: "zhilian", trackId: "interrupted-line", runId: "run-scrape-377", kind: "scrape",
-          stage: "scrape", status: "interrupted", carriesLineState: false,
-          snapshot: {
-            status: "succeeded",
-            progress: { overall_percent: 100, stage: "done", current: 377, total: 377 },
-            logs: [],
-            scraped_count: 377,
-            source_total: 377,
-            integrity: { conclusion: "succeeded", label: "完整成功" },
-          },
-        }],
-      },
-    });
-
-    const scrapeCard = scrape.get('[data-testid="parallel-track-zhilian"]');
-    // 头部徽章与卡体出自同一份状态词计算：这一段带着白箱「完整成功」结论，
-    // 头部就只能说这一句，不再另表一句状态别名（本行原写「已完成」，是两条口径
-    // 各说各话的产物；本段不背轨道中断的语义不变，见下面的 not.toContain）。
-    expect(scrapeCard.get('[data-testid="parallel-track-status"]').text()).toBe("完整成功");
-    expect(scrapeCard.text()).toContain("完整成功");
-    // 头部与卡体不得连读成矛盾文案：这一段没有任何中断可说。
-    expect(scrapeCard.text()).not.toContain("已中断");
-    // 动作按钮仍按轨道状态驱动：整条线可恢复，这张卡照旧只给「继续」。
-    expect(scrape.find('[data-testid="parallel-zhilian-pause"]').exists()).toBe(false);
-    expect(scrape.find('[data-testid="parallel-zhilian-stop"]').exists()).toBe(false);
-    expect(scrape.find('[data-testid="parallel-zhilian-resume"]').exists()).toBe(true);
-    scrape.unmount();
-
-    const screen = mount(ParallelPlatformProgress, {
-      props: {
-        items: [{
-          platform: "zhilian", trackId: "interrupted-line", runId: "run-ai-interrupted", kind: "screen",
-          stage: "screen", status: "interrupted", carriesLineState: true,
-          snapshot: { ...snapshots.running, status: "interrupted" },
-        }],
-      },
-    });
-    const screenCard = screen.get('[data-testid="parallel-track-zhilian"]');
-    expect(screenCard.get('[data-testid="parallel-track-status"]').text()).toBe("已中断");
-    expect(screen.find('[data-testid="parallel-zhilian-pause"]').exists()).toBe(false);
-    expect(screen.find('[data-testid="parallel-zhilian-stop"]').exists()).toBe(false);
-    expect(screen.find('[data-testid="parallel-zhilian-resume"]').exists()).toBe(true);
-    screen.unmount();
-  });
-
-  // 中断的轨道没有活着的工人：只给恢复动作，不再给注定失败的暂停/停止。
-  it("offers only the recovery action for an interrupted Track", () => {
-    const wrapper = mount(ParallelPlatformProgress, {
-      props: {
-        items: [{
-          platform: "zhilian", trackId: "interrupted-live-track", runId: "run-screen-interrupted",
-          kind: "screen", stage: "screen", status: "interrupted",
-          snapshot: { ...snapshots.running, status: "interrupted" },
-        }],
-      },
-    });
-
-    expect(wrapper.get('[data-testid="parallel-track-status"]').text()).toBe("已中断");
-    expect(wrapper.find('[data-testid="parallel-zhilian-pause"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="parallel-zhilian-stop"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="parallel-zhilian-resume"]').exists()).toBe(true);
-    wrapper.unmount();
-  });
-
-  // 同一张卡的头部与卡体必须同一套词：卡体（TaskProgress）的中文说法是唯一口径，
-  // 头部状态词表逐一对齐（queued 等待开始、running 运行中、failed 执行失败、
-  // partial/completed_with_pending 完成，但有待确认、pausing 正在暂停）。
-  it.each([
-    ["queued", "等待开始"],
-    ["running", "运行中"],
-    ["paused", "已暂停"],
-    ["pausing", "正在暂停"],
-    ["interrupted", "已中断"],
-    ["failed", "执行失败"],
-    ["cancelled", "已停止"],
-    ["stopped", "已停止"],
-    ["partial", "完成，但有待确认"],
-    ["completed_with_pending", "完成，但有待确认"],
-    ["succeeded", "已完成"],
-    ["done", "已完成"],
-    ["unavailable", "暂不可用"],
-  ])("shares one %s wording between the Track header and the card body", async (status, label) => {
-    const wrapper = mount(ParallelPlatformProgress, {
-      props: {
-        items: [{
-          platform: "boss", trackId: `${status}-track`, runId: `run-${status}`, kind: "scrape",
-          stage: "scrape", status,
-          snapshot: { status, progress: {}, logs: [], pause_info: { error_code: "user_paused", error_reason: "已暂停" } },
-        }],
-      },
-    });
-
-    expect(wrapper.get('[data-testid="parallel-track-status"]').text()).toBe(label);
-    expect(wrapper.get('[data-testid="parallel-track-boss"] .task-status').text()).toContain(label);
-    wrapper.unmount();
-  });
-
-  // 真实缺陷：轨道已经停止，本段快照还停在「正在暂停」——头部说「已停止」、
-  // 卡体说「正在暂停」，朗读连成两句互不相容的话。轨道状态往下压清单漏了
-  // pausing（呈现层把它算在飞），补齐后两处同说「已停止」且不转圈。
-  it("pushes a stopped Track down onto a stage still pausing in both header and body", () => {
-    const wrapper = mount(ParallelPlatformProgress, {
-      props: {
-        items: [{
-          platform: "boss", trackId: "pausing-track", runId: "run-pausing", kind: "screen",
-          stage: "screen", status: "stopped", carriesLineState: true,
-          snapshot: { ...snapshots.running, status: "pausing", progress: {} },
-        }],
-      },
-    });
-
-    expect(wrapper.get('[data-testid="parallel-track-status"]').text()).toBe("已停止");
-    expect(wrapper.get('[data-testid="parallel-track-boss"] .task-status').text()).toContain("已停止");
-    expect(wrapper.get('[data-testid="parallel-track-boss"] .task-status').text()).not.toContain("正在暂停");
-    expect(wrapper.find('[data-testid="parallel-track-boss"] .task-status .spin').exists()).toBe(false);
-    wrapper.unmount();
-  });
-
-  // 交接已发生、这张卡既不是当前段又拿不到本段证据，但它带着 runId——本段真的跑过，
-  // 只是这一轮读不到状态。说「等待开始」等于把跑过的段说成还没开始，progress 被清空
-  // 后卡体还会补一句「正在准备任务…」，同一张卡于是又是一套自相矛盾的话。
-  // 呈现层对这种卡下发读不到状态的兜底口径，头部与卡体同说「状态更新中」，都不转圈。
-  it("keeps a handed-off stage card that has a run but no readable state on the 状态更新中 fallback", () => {
-    const wrapper = mount(ParallelPlatformProgress, {
-      props: {
-        items: [{
-          platform: "zhilian", trackId: "handed-off-track", runId: "run-scrape-blind", kind: "scrape",
-          stage: "scrape", status: "interrupted", carriesLineState: false,
-          snapshot: { status: "unknown", progress: {}, logs: [] },
-        }],
-      },
-    });
-
-    const card = wrapper.get('[data-testid="parallel-track-zhilian"]');
-    expect(card.get('[data-testid="parallel-track-status"]').text()).toBe("状态更新中");
-    expect(card.get(".task-status").text()).toContain("状态更新中");
-    expect(card.text()).not.toContain("等待开始");
-    expect(card.text()).not.toContain("正在准备任务");
-    expect(card.text()).not.toContain("已中断");
-    expect(card.text()).not.toContain("已停止");
-    expect(card.text()).not.toContain("执行失败");
-    expect(card.find(".task-status .spin").exists()).toBe(false);
-    // 动作仍按轨道状态驱动：整条线可恢复。
-    expect(wrapper.find('[data-testid="parallel-zhilian-resume"]').exists()).toBe(true);
-    wrapper.unmount();
-  });
-
-  // 另一种无证据：这一段连 run 身份都还没有（呈现层此时才给中性 queued），
-  // 「等待开始」是事实，但也不许演成在跑。
-  it("keeps a handed-off stage card that never got a run on the neutral wording", () => {
-    const wrapper = mount(ParallelPlatformProgress, {
-      props: {
-        items: [{
-          platform: "zhilian", trackId: "never-started-track", runId: "", kind: "scrape",
-          stage: "scrape", status: "interrupted", carriesLineState: false,
-          snapshot: { status: "queued", progress: {}, logs: [] },
-        }],
-      },
-    });
-
-    const card = wrapper.get('[data-testid="parallel-track-zhilian"]');
-    expect(card.get('[data-testid="parallel-track-status"]').text()).toBe("等待开始");
-    expect(card.get(".task-status").text()).toContain("等待开始");
-    expect(card.text()).not.toContain("已中断");
-    expect(card.text()).not.toContain("已停止");
-    expect(card.text()).not.toContain("执行失败");
-    expect(card.find(".task-status .spin").exists()).toBe(false);
-    expect(wrapper.find('[data-testid="parallel-zhilian-resume"]').exists()).toBe(true);
-    wrapper.unmount();
-  });
-
-  // webui/task_status.py 把白箱 unverifiable 公开成 completed_with_pending，于是头部
-  // 按状态别名说「完成，但有待确认」、卡体按白箱结论说「无法确认是否完成」并走红叉——
-  // 同一张卡两句不同结论，头部把不确定报成了完成。两处状态词必须出自同一份计算，
-  // 且不得为了让字面相同把卡体的白箱口径改写成「完成，但有待确认」（丢白箱信号）。
+  // 白箱结论与状态别名同出一处（呈现层算好的 statusLabel），头部与卡体不许两句结论。
   it("says one single conclusion on a card whose whitebox verdict is unverifiable", () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {
         items: [{
-          platform: "boss", trackId: "unverifiable-track", runId: "run-unverifiable", kind: "screen",
-          stage: "screen", status: "completed_with_pending",
+          ...item({ platform: "boss", kind: "screen", stage: "screen", status: "completed_with_pending" }),
+          statusLabel: "无法确认是否完成",
           snapshot: {
             status: "completed_with_pending", progress: { overall_percent: 100 }, logs: [],
             integrity: { conclusion: "unverifiable", label: "无法确认", primary_reason: "证据不足" },
@@ -383,29 +347,21 @@ describe("ParallelPlatformProgress", () => {
       },
     });
 
-    const card = wrapper.get('[data-testid="parallel-track-boss"]');
-    expect(card.get('[data-testid="parallel-track-status"]').text()).toBe("无法确认是否完成");
+    const card = row(wrapper, "boss");
+    // 一句结论：行内表示状态的元素只剩卡体那一个，头部不再另说一遍。
+    expect(card.findAll(".task-status")).toHaveLength(1);
     expect(card.get(".task-status").text()).toContain("无法确认是否完成");
     expect(card.text()).not.toContain("完成，但有待确认");
     wrapper.unmount();
   });
 
-  // 并行时两张卡同时可见，每两秒轮询一次计数一变就各播一句；播报没有主语时
-  // 听者分不清是哪条线。播报必须带上本平台显示名，且不把百分比/用时卷进去。
+  // 并行时两张卡同时可见，播报必须带上本平台显示名，且不把百分比/用时卷进去。
   it("names the platform in each card's accessibility announcement", () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {
         items: [
-          {
-            platform: "boss", trackId: "announce-b", runId: "run-announce-b", kind: "scrape",
-            stage: "scrape", status: "running",
-            snapshot: { status: "running", progress: { overall_percent: 40, current: 4, total: 10, stage: "scrape" }, logs: [], scraped_count: 40 },
-          },
-          {
-            platform: "zhilian", trackId: "announce-z", runId: "run-announce-z", kind: "scrape",
-            stage: "scrape", status: "running",
-            snapshot: { status: "running", progress: { overall_percent: 20, current: 2, total: 10, stage: "scrape" }, logs: [], scraped_count: 20 },
-          },
+          item({ platform: "boss", snapshot: { status: "running", progress: { overall_percent: 40, current: 4, total: 10, stage: "scrape" }, logs: [], scraped_count: 40 } }),
+          item({ platform: "zhilian", snapshot: { status: "running", progress: { overall_percent: 20, current: 2, total: 10, stage: "scrape" }, logs: [], scraped_count: 20 } }),
         ],
       },
     });
@@ -419,10 +375,32 @@ describe("ParallelPlatformProgress", () => {
     wrapper.unmount();
   });
 
-  // 只允许一份口径：在飞状态清单此前在呈现层（含空串）与本组件（不含空串）各写一份，
-  // 活动态清单也各写一份，两份会各自漂移（历史上就漏过 pausing）。收敛进树干
-  // discovery.ts 后，消费方只许导入不许再自己声明；当前段判定（ownsTrackState /
-  // AI 阶段族集合）也必须只有呈现层一处定义。
+  // D-03 结构收敛：并行轨道不许再自带一套动作条与状态判定。
+  // 负向断言的每一条都配一条「复用还在」的正向断言，防止删功能换绿灯。
+  it("reuses the shared progress card and action bar instead of a parallel-only control set", () => {
+    const component = readFileSync(path.join(__dirname, "../ParallelPlatformProgress.vue"), "utf8");
+    const wrapper = mount(ParallelPlatformProgress, { props: { items: [item({ platform: "boss" })] } });
+
+    // 正向：每行都是既有 TaskProgress + 既有 ScreenRoundActions。
+    expect(component).toMatch(/import TaskProgress from "\.\/TaskProgress\.vue"/);
+    expect(component).toMatch(/import ScreenRoundActions from "\.\/ScreenRoundActions\.vue"/);
+    expect(wrapper.findAllComponents({ name: "TaskProgress" })).toHaveLength(1);
+    expect(wrapper.findAllComponents(ScreenRoundActions)).toHaveLength(1);
+    // 正向：动作仍有出口，页面据此发到后端。
+    expect(component).toMatch(/defineEmits/);
+    expect(component).toMatch(/emit\("action"/);
+    expect(component).toMatch(/emit\(['"]finish['"]/);
+
+    // 负向：没有裸按钮、没有自写显隐、没有第二套状态判定。
+    expect((component.match(/<button/g) ?? []).length).toBe(0);
+    expect(component).not.toMatch(/visibleButtons/);
+    for (const status of ["queued", "running", "pausing", "paused", "interrupted", "failed", "stopped", "cancelled", "succeeded", "done", "partial", "completed_with_pending", "unavailable"]) {
+      expect(component.includes(`"${status}"`)).toBe(false);
+    }
+    wrapper.unmount();
+  });
+
+  // 只允许一份口径：在飞/活动态清单与当前段判定都不许在这一层重复。
   it("shares one status vocabulary with the Flow presentation layer instead of declaring its own", () => {
     const component = readFileSync(path.join(__dirname, "../ParallelPlatformProgress.vue"), "utf8");
     const body = readFileSync(path.join(__dirname, "../TaskProgress.vue"), "utf8");
@@ -431,14 +409,19 @@ describe("ParallelPlatformProgress", () => {
 
     expect(trunk).toMatch(/export const STAGE_IN_FLIGHT_STATUSES/);
     expect(trunk).toMatch(/export const ACTIVE_TRACK_STATUSES/);
-    for (const consumer of [component, presentation, body]) {
+    for (const consumer of [body, presentation]) {
       expect(consumer).not.toMatch(/const STAGE_IN_FLIGHT_STATUSES\s*=/);
       expect(consumer).not.toMatch(/const ACTIVE_TRACK_STATUSES\s*=/);
       expect(consumer).toMatch(/from "\.\.\/discovery"/);
     }
-    // 当前段判定只有一处：组件与卡体都不得再自带一套阶段清单或第二个 ownsTrackState。
+    // 轨道行不解释状态：清单、当前段判定与状态词都不许出现在这一层。
     expect(component).not.toMatch(/AI_FAILURE_STAGES|ownsTrackState|isAiCurrentStage/);
+    expect(component).not.toMatch(/STAGE_IN_FLIGHT_STATUSES|ACTIVE_TRACK_STATUSES/);
     expect(body).not.toMatch(/AI_FAILURE_STAGES|ownsTrackState|isAiCurrentStage/);
     expect((presentation.match(/const AI_FAILURE_STAGES\s*=/g) ?? []).length).toBe(1);
+    // 正向：状态词仍然只有 discovery.ts 一份，头部与卡体都从那里取。
+    expect(trunk).toMatch(/export function stageStatusLabel/);
+    expect(body).toMatch(/stageStatusLabel/);
+    expect(presentation).toMatch(/stageStatusLabel/);
   });
 });

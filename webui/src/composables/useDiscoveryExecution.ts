@@ -42,7 +42,11 @@ import { setThemePlatform } from "../composables/useTheme";
 import type { AiScreenLaunch } from "./useDiscoveryState";
 import type { OneClickLaunch } from "./useDiscoveryState";
 import type { TaskSnapshot } from "./useDiscoveryState";
-import type { ScrapePrimaryAction } from "../screenFlow";
+import {
+  canFinishRunByStatus,
+  deriveScrapePrimaryAction,
+  type ScrapePrimaryAction,
+} from "../screenFlow";
 
 type CleanupActionResponse = {
   ok?: boolean;
@@ -93,32 +97,21 @@ export function useDiscoveryExecution(state: DiscoveryState, deps: ExecutionNeed
     return `/api/task-state/${encodeURIComponent(runId)}${query}`;
   }
 
-  const scrapeAction = computed<ScrapePrimaryAction>(() => {
-    const status = String(scrapeSnapshot.value?.status || "");
-    // Keep the clicked action visible while its request is in flight.  The
-    // optimistic continue snapshot is already running, but the user is still
-    // waiting for the continue request rather than being asked to pause it.
-    if (scrapeActionBusy.value === "continue-scrape") {
-      return { kind: "continue-scrape", label: "继续" };
-    }
-    if (scrapeActionBusy.value === "pause-scrape") {
-      return { kind: "pause-scrape", label: "暂停" };
-    }
-    if (scrapeTaskId.value && status !== "failed" && status !== "interrupted"
-        && (pausedRunId.value || status === "paused")) {
-      return { kind: "continue-scrape", label: "继续" };
-    }
-    if (scrapeTaskId.value && (scrapeBusy.value || status === "running" || status === "queued" || status === "pausing")) {
-      return { kind: "pause-scrape", label: "暂停" };
-    }
-    return { kind: "none" };
-  });
+  // 主动作与「结束并保存」的判定都在树干那一份里（screenFlow.ts）：
+  // 这里只把单平台现场喂进去，Flow 轨道用同一份函数各算一份，不再有两套判定。
+  const scrapeAction = computed<ScrapePrimaryAction>(() => deriveScrapePrimaryAction({
+    status: String(scrapeSnapshot.value?.status || ""),
+    hasTask: Boolean(scrapeTaskId.value),
+    hasPausedRun: Boolean(pausedRunId.value),
+    isBusy: Boolean(scrapeBusy.value),
+    busyAction: scrapeActionBusy.value,
+  }));
 
   // 失败/中断不再占用新任务槽，但已抓取的岗位仍可通过“结束并保存结果”
   // 收口。这个入口与暂停态共用 finish API，不能因为没有暂停/继续主动作而消失。
-  const scrapeCanFinish = computed(() => Boolean(
-    scrapeTaskId.value
-      && ["failed", "interrupted"].includes(String(scrapeSnapshot.value?.status || "")),
+  const scrapeCanFinish = computed(() => canFinishRunByStatus(
+    scrapeTaskId.value || "",
+    String(scrapeSnapshot.value?.status || ""),
   ));
 
 async function restoreRunningTask() {
@@ -343,8 +336,8 @@ async function restoreRunningTask() {
         ? (data.profile_facts as Record<string, unknown>) : {};
       if (data.round_context) deps.restoreLocationsFromContext(data.round_context);
       restoredTaskHint.value = data.status === "failed"
-        ? "上次 AI 筛选失败，已保留错误信息，可重新开始筛选"
-        : "上次 AI 筛选因服务重启被中断，已保留中断信息，可重新开始筛选";
+        ? "上次 AI 筛选失败，已保留错误信息，可开始新一轮"
+        : "上次 AI 筛选因服务重启被中断，已保留中断信息，可开始新一轮";
       return;
     }
     if (data.status === "interrupted") {

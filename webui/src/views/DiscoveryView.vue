@@ -149,6 +149,8 @@ const {
   restoredTaskHint,
   pausedRunId,
   interruptedRunId,
+  // 现场注入点：DiscoveryView.spec 用 setupState.pipelineResult 投一份恢复结果造现场；
+  // 判定本体已收进 useDiscoveryState（hasRenderableResult），这条绑定必须保留。
   pipelineResult,
   pipelineResultRunId,
   resultPlatformFilter,
@@ -190,7 +192,6 @@ const {
   profileInputEl,
   profileConfirmed,
   pipelineBusy,
-  oneClickDisabled,
   searchPanelsOpen,
   advancedPanelsOpen,
   pollTimer,
@@ -206,6 +207,7 @@ const {
   searchSummary,
   screenSummaryChips,
   filteredPipelineResult,
+  hasRenderableResult,
   groups,
   uncertainByPlatform,
   resultTabs,
@@ -414,10 +416,15 @@ const {
   historyFlowItems,
   flowFailureNotice,
   flowStatusNotice,
+  flowRoundPartialNotice,
   conditionSnapshot,
   parallelMappingError,
   parallelDialogPreparing,
   parallelPlatformGroups,
+  parallelStartBlockedNotice,
+  oneClickStartDisabled,
+  skipAvailabilityPrecheckForPackageRestore,
+  roundConditionLockSummary,
   selectParallelMode,
   openOneClickWithParallel,
   handleUnifiedFilterChange,
@@ -434,35 +441,9 @@ const modeWarnings = useModeWarnings(executionSelection, scopePreview);
 const platformSwitchLockHint = computed(() => (
   scopeLocked.value && !parallelFlow.hasActiveTrack.value ? scopeLockReason.value : ""
 ));
-const searchPackages = useSearchPackages({ keywords, selectedKeywords, customKeyword, cityText, customCity, profileSummary, profileFacts, conditionSnapshot, analysisReady }, { persistDraft: () => { state.saveSearchDraftFor(draftPlatform.value); if (conditionSnapshot.value) parallelFlow.restoreConditionSnapshot(conditionSnapshot.value); }, prepareSnapshot: () => { conditionSnapshot.value = parallelFlow.createConditionSnapshot(); }, restoreDraft: () => state.saveSearchDraftFor(draftPlatform.value), restoreConditions: (snapshot) => { if (snapshot) parallelFlow.restoreConditionSnapshot(snapshot); else parallelFlow.resetConditionState(); }, restoreStep: () => state.navigateStep("upload", { source: "system" }), enterSearchStep, notify }, { profileId: () => props.profileId, roundKey: () => sceneIdentity.value.runEpoch, analysisKey: () => state.resumeAnalysisPhase.value, fileKey: () => selectedFile.value ? `${selectedFile.value.name}:${selectedFile.value.size}:${selectedFile.value.lastModified}` : "" });
+const searchPackages = useSearchPackages({ keywords, selectedKeywords, customKeyword, cityText, customCity, profileSummary, profileFacts, conditionSnapshot, analysisReady }, { persistDraft: () => { state.saveSearchDraftFor(draftPlatform.value); if (conditionSnapshot.value) parallelFlow.restoreConditionSnapshot(conditionSnapshot.value); }, prepareSnapshot: () => { conditionSnapshot.value = parallelFlow.createConditionSnapshot(); }, restoreDraft: () => state.saveSearchDraftFor(draftPlatform.value), restoreConditions: (snapshot) => { if (snapshot) parallelFlow.restoreConditionSnapshot(snapshot); else parallelFlow.resetConditionState(); }, restoreStep: () => state.navigateStep("upload", { source: "system" }), enterSearchStep: () => { skipAvailabilityPrecheckForPackageRestore(); enterSearchStep(); }, notify }, { profileId: () => props.profileId, roundKey: () => sceneIdentity.value.runEpoch, analysisKey: () => state.resumeAnalysisPhase.value, fileKey: () => selectedFile.value ? `${selectedFile.value.name}:${selectedFile.value.size}:${selectedFile.value.lastModified}` : "" });
 
-// A result can arrive before the surrounding completion flags settle (for
-// example while restoring a persisted page or replacing a Flow projection).
-// The empty/loading banners must never mask an already renderable list, count,
-// or Flow error projection.
-const hasRenderableResult = computed(() => {
-  const result = pipelineResult.value as (typeof pipelineResult.value & {
-    flow_tracks?: Array<Record<string, unknown>>;
-  }) | null;
-  if (resultLoaded.value) return true;
-  if (!result) return false;
-  const jobs = Array.isArray(result.jobs) ? result.jobs : [];
-  const dropped = Array.isArray(result.dropped) ? result.dropped : [];
-  const hasCount = [
-    result.total_scraped,
-    result.total_kept,
-    result.total_matched,
-    result.total_dropped,
-  ].some((value) => Number(value || 0) > 0);
-  const hasTrackProjection = (result.flow_tracks || []).some((track) => (
-    (Array.isArray(track.jobs) && track.jobs.length > 0)
-    || (Array.isArray(track.dropped) && track.dropped.length > 0)
-    || Boolean(track.result_run_id)
-    || ["failed", "unavailable", "interrupted"].includes(String(track.status || ""))
-    || Boolean(String(track.message || track.reason || track.error || "").trim())
-  ));
-  return Boolean(jobs.length || dropped.length || hasCount || hasTrackProjection);
-});
+// 结果已可渲染的判定在 useDiscoveryState（hasRenderableResult），页面只绑定。
 const roundFlow = reactive(useScreenRoundFlow({
   refs: {
     filterValues,
@@ -868,8 +849,7 @@ watch(restoredTaskHint, (value) => {
           </div>
           </div>
         </CollapsibleCard>
-        <ParallelPlatformProgress v-if="parallelMode && flowPresentation.scrapeItems.value.length" :items="flowPresentation.scrapeItems.value"
-          :busy-platform="parallelFlow.operatingPlatform.value" :stale="parallelFlow.stale.value" @action="parallelFlow.operate" />
+        <ParallelPlatformProgress v-if="parallelMode && flowPresentation.scrapeItems.value.length" :items="flowPresentation.scrapeItems.value" :busy-platform="parallelFlow.operatingPlatform.value" :stale="parallelFlow.stale.value" :finish-busy="finishSaveBusy" @action="parallelFlow.operateTrack" @finish="finishPausedTask" />
         <TaskProgress v-if="!parallelMode" :snapshot="scrapeSnapshot" kind="scrape" :task-id="scrapeTaskId" :user-finished="finishedPartial" />
         <div
           v-if="loginGuide.visible"
@@ -895,7 +875,9 @@ watch(restoredTaskHint, (value) => {
           <p v-if="draftPlatformDisabled" class="platform-disabled-notice" data-testid="platform-disabled-notice" role="status">
             当前平台（{{ platformLabel(draftPlatform) }}）已禁用新建任务，请切换到可用平台。
           </p>
-          <button class="button primary one-click-cta" type="button" data-testid="start-one-click" :disabled="oneClickDisabled" @click="openOneClickWithParallel">
+          <!-- 046 Edge Cases：「全部」门禁覆盖所有平台线，不可用平台在提交前点名；判定与显示名都在 useDiscoveryFlowCoordinator。 -->
+          <p v-if="parallelStartBlockedNotice" class="platform-disabled-notice" data-testid="parallel-platform-disabled-notice" role="status">{{ parallelStartBlockedNotice }}</p>
+          <button class="button primary one-click-cta" type="button" data-testid="start-one-click" :disabled="oneClickStartDisabled" @click="openOneClickWithParallel">
             <Play :size="20" aria-hidden="true" />开始筛选并 AI 优化
           </button>
           <div class="one-click-secondary-actions">
@@ -934,7 +916,9 @@ watch(restoredTaskHint, (value) => {
             <Filter :size="17" aria-hidden="true" />
           </template>
           <template #summary>
-            <span v-if="screenSummaryChips.length" class="summary-chips">
+            <!-- 046 D-07：本轮锁定后的汇总读冻结条件那一份事实，判定在 useDiscoveryFlowCoordinator。 -->
+            <span v-if="roundConditionLockSummary" class="selection-summary" data-testid="screen-summary-locked">{{ roundConditionLockSummary }}</span>
+            <span v-else-if="screenSummaryChips.length" class="summary-chips">
               <span v-for="chip in screenSummaryChips" :key="chip.label" class="summary-chip">{{ chip.label }}: {{ chip.value }}</span>
             </span>
             <span v-else class="selection-summary">未设置筛选条件</span>
@@ -948,8 +932,8 @@ watch(restoredTaskHint, (value) => {
                 :busy-label="roundFlow.busyAction === 'pause' ? '正在暂停…' : roundFlow.busyAction === 'continue' ? '正在继续…' : ''"
                 :finish-busy="roundFlow.busyAction === 'finish' || finishSaveBusy"
                 :disabled="roundFlow.screenAction.kind === 'start' && (draftPlatformDisabled || !scrapeCompleted)"
-                :show-finish-save="roundFlow.screenAction.kind === 'pause' || roundFlow.screenAction.kind === 'continue'"
-                :show-cancel="roundFlow.screenAction.kind === 'pause' || roundFlow.screenAction.kind === 'continue'"
+                :show-finish-save="roundFlow.screenSecondaryActionsVisible"
+                :show-cancel="roundFlow.screenSecondaryActionsVisible"
                 cancel-label="放弃本轮"
                 cancel-test-id="abandon-screen-round"
                 :cancel-busy="cancelBusy"
@@ -989,7 +973,7 @@ watch(restoredTaskHint, (value) => {
           </div>
         </CollapsibleCard>
         <ContinuePlatformGuide v-if="!historyMode && roundFlow.continueGuide" :guide="roundFlow.continueGuide" @choose="roundFlow.chooseContinuePlatform" @cancel="roundFlow.cancelContinueGuide" />
-        <ParallelPlatformProgress v-if="parallelMode && flowPresentation.screenItems.value.length" :items="flowPresentation.screenItems.value" :busy-platform="parallelFlow.operatingPlatform.value" :stale="parallelFlow.stale.value" @action="parallelFlow.operate" />
+        <ParallelPlatformProgress v-if="parallelMode && flowPresentation.screenItems.value.length" :items="flowPresentation.screenItems.value" :busy-platform="parallelFlow.operatingPlatform.value" :stale="parallelFlow.stale.value" :finish-busy="finishSaveBusy" @action="parallelFlow.operateTrack" @finish="finishPausedTask" />
         <TaskProgress v-if="!parallelMode" :snapshot="screenSnapshot" kind="screen" :task-id="screenTaskId" :user-finished="finishedPartial" />
         <ScreenRecrawlProgress v-if="recrawlSnapshot || recrawlBusy" :snapshot="recrawlSnapshot" :task-id="recrawlTaskId" :action="roundFlow.recrawlAction" :busy="Boolean(roundFlow.busyAction)" :busy-action="roundFlow.busyAction" :busy-label="roundFlow.busyAction === 'pause-recrawl' ? '正在暂停重抓…' : ''" :show-finish-save="roundFlow.recrawlAction.kind === 'pause-recrawl' || roundFlow.recrawlAction.kind === 'continue-recrawl'" :show-cancel="roundFlow.recrawlAction.kind === 'pause-recrawl' || roundFlow.recrawlAction.kind === 'continue-recrawl'" :cancel-busy="roundFlow.busyAction === 'cancel-recrawl'" cancel-label="停止详情补抓" cancel-test-id="cancel-recrawl" @pause-recrawl="roundFlow.pauseRecrawl()" @continue-recrawl="roundFlow.continueRecrawl()" @finish-save="roundFlow.finishRecrawl()" @cancel="roundFlow.cancelRecrawl()" />
       </section>
@@ -1039,6 +1023,8 @@ watch(restoredTaskHint, (value) => {
             aria-live="polite"
             data-testid="flow-failure-notice"
           >{{ flowFailureNotice }}</div>
+          <!-- 046 D-08：本轮未结束、部分结果已可查的说明；判定（含历史轮不提示）在 useDiscoveryFlowCoordinator。 -->
+          <div v-if="flowRoundPartialNotice" class="flow-round-progress-notice" role="status" aria-live="polite" data-testid="flow-round-progress-notice">{{ flowRoundPartialNotice }}</div>
         </div>
         <ContinuePlatformGuide v-if="!historyMode && roundFlow.continueGuide" :guide="roundFlow.continueGuide" @choose="roundFlow.chooseContinuePlatform" @cancel="roundFlow.cancelContinueGuide" />
         <div v-if="!historyMode && activeCategory === 'uncertain' && recrawlPlatformGuide" class="recrawl-guide" data-testid="recrawl-platform-guide" role="dialog" aria-label="选择重抓平台">

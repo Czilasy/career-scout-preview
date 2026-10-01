@@ -3,7 +3,9 @@ import {
   ACTIVE_TRACK_STATUSES,
   STAGE_IN_FLIGHT_STATUSES,
   UNREADABLE_STAGE_STATUS,
+  stageStatusLabel,
 } from "../discovery";
+import { deriveTrackActionBar, type SharedPrimaryAction } from "../screenFlow";
 import type { Platform, TaskSnapshot as ApiTaskSnapshot } from "../types";
 
 export type FlowStepId = "search" | "screen" | "results";
@@ -16,17 +18,29 @@ export interface FlowProgressItem {
   stage: FlowProgressKind;
   status: string;
   runId: string;
+  /**
+   * 这一段自己的定稿快照：轨道状态能不能往本段压，这里已经判完并落进 status，
+   * 轨道行拿到的就是它要渲染的那一句，不再二次派生（同一张卡两头说两句话的源头）。
+   */
   snapshot: ApiTaskSnapshot;
   enteredAt: number;
   /**
    * 这张卡是否代表这条线当前所在的那一段（stage 与 durable run id 一起判）。
-   * 一条线只有一个当前阶段：轨道级状态（排队/进行/暂停/中断/失败/停止）只归
-   * 那一张卡，其它段的卡只说自己那一段跑到哪了；拿不到本段证据又不是当前段时，
-   * 快照会被换成本段的兜底口径（还没开始的段说「等待开始」，已经跑过的段说
-   * 「状态更新中」），绝不把整条线的问题态抄到这张卡上。
-   * 组件据此决定轨道状态能不能往本段快照上压。
+   * 缺省视为「是」，保持旧调用方口径不变；为「否」时轨道状态不再往本段快照上压，
+   * 头部与卡体就都说本段那一句（拿不到证据时是兜底口径，见下方 stageStatus）。
    */
   carriesLineState: boolean;
+  /** 头部徽章与卡体共用的一句话状态词（唯一词表在 discovery.ts）。 */
+  statusLabel: string;
+  /** 这一条线的动作事实：与单平台同一份派生，按轨道各算一份。 */
+  action: SharedPrimaryAction;
+  showFinishSave: boolean;
+  showCancel: boolean;
+  cancelLabel: string;
+  /** 本行「结束并保存」交给既有 run 级收尾路径的 run id。 */
+  finishRunId: string;
+  finishTestId: string;
+  cancelTestId: string;
 }
 
 export interface FlowPresentationTrack {
@@ -99,6 +113,26 @@ function ownsTrackState(kind: FlowProgressKind, track: FlowPresentationTrack): b
 
 function isTrackFailure(status: string): boolean {
   return TRACK_FAILURE_STATUSES.has(status);
+}
+
+/**
+ * 这一段最终说哪一句（轨道状态与阶段快照的唯一合流点，原先在轨道行组件里另算一份）。
+ * - 不承载轨道状态的卡只说自己那一段：轨道问题态不得压回它头上——它既不是当前段，
+ *   又没有本段证据时上面已经把快照换成兜底口径，压回去就是替整条线背「已中断」。
+ * - 轨道只能把一张卡往下压（暂停/终态），不能把已经跑完的阶段说成还在跑：
+ *   快照仍写在飞态而整条线已经不在活动态时，以线为准。
+ * 在飞与活动态清单都不在这里重复：唯一一份在 discovery.ts。
+ */
+function stageStatusOf(
+  snapshotStatus: string,
+  trackStatus: string,
+  carriesLineState: boolean,
+): string {
+  if (!carriesLineState) return snapshotStatus || UNREADABLE_STAGE_STATUS;
+  if (STAGE_IN_FLIGHT_STATUSES.includes(snapshotStatus) && !ACTIVE_TRACK_STATUSES.includes(trackStatus)) {
+    return trackStatus;
+  }
+  return snapshotStatus || trackStatus;
 }
 
 interface RuntimeState {
@@ -379,15 +413,38 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
       }
       const carriesLineState = ownsLineState
         || (hasOwnEvidence && STAGE_IN_FLIGHT_STATUSES.includes(String(snapshot.status || "")));
+      const trackStatus = String(entry.track.status || snapshot.status || "unknown");
+      const stageStatus = stageStatusOf(String(snapshot.status || ""), trackStatus, carriesLineState);
+      const displaySnapshot = snapshot.status === stageStatus
+        ? snapshot
+        : ({ ...snapshot, status: stageStatus } as ApiTaskSnapshot);
+      // 本行的收尾 run：AI 段用自己的 screen_run_id；交接窗口里 AI 段还没有 run 身份时，
+      // 这一条线唯一已有的 run 就是抓取 run，收尾照旧落在那条 run 上。
+      const finishRunId = entry.runId
+        || (kind === "screen" ? String(entry.track.scrape_run_id || "") : "");
+      const actionBar = deriveTrackActionBar({
+        stage: kind,
+        status: trackStatus,
+        runId: entry.runId,
+        finishRunId,
+      });
       fetched.push({
         platform: entry.track.platform,
         trackId: entry.track.id,
         kind,
         stage: kind,
-        status: String(entry.track.status || snapshot.status || "unknown"),
+        status: trackStatus,
         runId: entry.runId,
-        snapshot,
+        snapshot: displaySnapshot,
+        statusLabel: stageStatusLabel(stageStatus, displaySnapshot.integrity?.conclusion),
         carriesLineState,
+        action: actionBar.action,
+        showFinishSave: actionBar.showFinishSave,
+        showCancel: actionBar.showCancel,
+        cancelLabel: actionBar.cancelLabel,
+        finishRunId,
+        finishTestId: `parallel-track-${entry.track.platform}-finish-save`,
+        cancelTestId: `parallel-track-${entry.track.platform}-cancel`,
         enteredAt: firstEntered(entry.track, snapshot, kind),
         order: 0,
         index: entry.index,

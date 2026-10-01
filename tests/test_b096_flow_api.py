@@ -101,6 +101,25 @@ class B096FlowApiTests(unittest.TestCase):
         self.assertEqual(single.status_code, 201)
         self.assertEqual(len(single.get_json()["flow"]["tracks"]), 1)
 
+    def test_disabled_platform_message_does_not_leak_the_platform_code(self):
+        """SPEC 046 D-08 组：面向用户的文案不得把内部平台码直接吐到界面上。
+
+        显示名由前端既有的平台投影负责；后端只给中文说明与结构化 platform 字段。
+        """
+        self.enabled["zhilian"] = False
+        response = self.client.post(
+            "/api/flows",
+            json=self._payload(start_key="api-disabled-message"),
+        )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.get_json()
+        self.assertEqual(payload["error_code"], "platform_disabled")
+        self.assertEqual(payload["platform"], "zhilian")
+        self.assertNotIn("zhilian", payload["message"])
+        self.assertNotIn("boss", payload["message"])
+        self.assertTrue(payload["message"])
+
     def test_retry_key_returns_same_flow_and_active_gate_blocks_other_round(self):
         first = self.client.post("/api/flows", json=self._payload())
         self.assertEqual(first.status_code, 201)

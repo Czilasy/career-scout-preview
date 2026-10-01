@@ -94,8 +94,10 @@ const sceneStore = useDiscoverySceneState();
 // 037 灵动岛 v3：carousel 状态机接管打断轮转；onSinkInterrupt 把转完的打断
 // 沉入 islandNotices 作未读条目（kind:"interrupt" + tone 染色），角标由
 // DynamicIsland 组合 notices 未读 + badgeCount 显示。
+// 046 D-06：通知池的轮次归属直接用现场存档的轮次令牌（同一模块级事实源，
+// 开新一轮才换发），App 不再自己数轮次。
 // ---------------------------------------------------------------------------
-const islandNotices = createIslandNotices(roundStatus);
+const islandNotices = createIslandNotices(roundStatus, sceneStore.roundEpoch);
 const islandCarousel = useIslandCarousel(roundStatus, {
   onSinkInterrupt: (lane) => {
     // interrupt lane 的 content 是 IslandInterruptContent；窄化为 notice 字段。

@@ -802,3 +802,217 @@ it("keeps a failed scrape stage carrying the Track state and reassigns it after 
   expect(handedOff.presentation.scrapeItems.value[0]).toMatchObject({ kind: "scrape", carriesLineState: false });
   expect(handedOff.presentation.screenItems.value[0]).toMatchObject({ kind: "screen", carriesLineState: true });
 });
+
+// D-03 结构收敛：动作派生按轨道各算一份。一平台一行的动作、结束并保存与终止显隐
+// 都由这里下发，轨道行组件只渲染；两条线速度不同时必须各说各的出口。
+it("derives one action bar per Track from that Track's own stage facts", async () => {
+  const { presentation } = setup([
+    track({ id: "track-b", platform: "boss", scrape_run_id: "scrape-b", status: "running", stage: "scrape" }),
+    track({ id: "track-z", platform: "zhilian", scrape_run_id: "scrape-z", status: "paused", stage: "scrape" }),
+  ], { fetchTaskState: async (runId) => ({
+    status: runId === "scrape-b" ? "running" : "paused", progress: {}, logs: [],
+  }) });
+
+  await presentation.refresh();
+
+  expect(presentation.scrapeItems.value.map((entry) => entry.action)).toEqual([
+    { kind: "pause-scrape", label: "暂停" },
+    { kind: "continue-scrape", label: "继续" },
+  ]);
+  expect(presentation.scrapeItems.value.map((entry) => entry.showFinishSave)).toEqual([true, true]);
+  expect(presentation.scrapeItems.value.map((entry) => entry.showCancel)).toEqual([true, true]);
+  expect(presentation.scrapeItems.value[1]?.cancelLabel).toBe("终止本轨");
+});
+
+// 03 页的轨道行说 AI 的话；抓取段与筛选段的出口不能长成同一副样子。
+it("derives AI screening wording for the screen stage rows", async () => {
+  const { presentation } = setup([
+    track({ id: "track-b", platform: "boss", scrape_run_id: "scrape-b", screen_run_id: "screen-b", status: "running", stage: "ai" }),
+    track({ id: "track-z", platform: "zhilian", scrape_run_id: "scrape-z", screen_run_id: "screen-z", status: "paused", stage: "ai" }),
+  ], { fetchTaskState: async (runId) => ({
+    status: String(runId).endsWith("screen-b") ? "running" : "paused", progress: {}, logs: [],
+  }) });
+
+  await presentation.refresh();
+
+  expect(presentation.screenItems.value.map((entry) => entry.platform)).toEqual(["boss", "zhilian"]);
+  expect(presentation.screenItems.value.map((entry) => entry.action)).toEqual([
+    { kind: "pause", label: "暂停筛选" },
+    { kind: "continue", label: "继续 AI 筛选" },
+  ]);
+});
+
+// 状态词表：中断没有活体 worker，只能开新一轮；轨道行上不得再出现「继续」。
+it("gives an interrupted Track no continuation on either stage", async () => {
+  const { presentation } = setup([
+    track({ id: "track-b", platform: "boss", scrape_run_id: "scrape-b", screen_run_id: null, status: "interrupted", stage: "scrape" }),
+    track({ id: "track-z", platform: "zhilian", scrape_run_id: "scrape-z", screen_run_id: "screen-z", status: "interrupted", stage: "ai" }),
+  ], { fetchTaskState: async () => ({ status: "interrupted", progress: {}, logs: [] }) });
+
+  await presentation.refresh();
+
+  expect(presentation.scrapeItems.value[0]?.action).toEqual({ kind: "none" });
+  // 抓取段中断仍留着「结束并保存」这条收口出口，与单平台同一条路径。
+  expect(presentation.scrapeItems.value[0]?.showFinishSave).toBe(true);
+  expect(presentation.scrapeItems.value[0]?.showCancel).toBe(false);
+  expect(presentation.screenItems.value[0]?.action.kind).not.toBe("continue");
+});
+
+// 终态轨道没有任何出口：不给暂停、不给终止，也不给结束并保存。
+it("leaves a terminal Track row without any action", async () => {
+  const { presentation } = setup([
+    track({ id: "track-b", platform: "boss", scrape_run_id: "scrape-b", status: "stopped", stage: "scrape" }),
+  ], { fetchTaskState: async () => ({ status: "stopped", progress: {}, logs: [] }) });
+
+  await presentation.refresh();
+
+  expect(presentation.scrapeItems.value[0]?.action.kind).toBe("none");
+  expect(presentation.scrapeItems.value[0]?.showFinishSave).toBe(false);
+  expect(presentation.scrapeItems.value[0]?.showCancel).toBe(false);
+});
+
+// 轨道级「结束并保存」把这一条线自己的 run 交给既有 run 级收尾路径：
+// AI 段用自己的 screen_run_id；交接窗口里 AI 段还没有 run 身份时用整条线的 scrape_run_id。
+it("hands each row the run id its own stage closes out", async () => {
+  const { presentation } = setup([
+    track({
+      id: "track-b", platform: "boss", scrape_run_id: "scrape-b", screen_run_id: "screen-b",
+      status: "running", stage: "ai",
+    }),
+    track({
+      id: "track-z", platform: "zhilian", scrape_run_id: "scrape-z", screen_run_id: null,
+      status: "running", stage: "ai",
+    }),
+  ], { fetchTaskState: async () => ({ status: "running", progress: {}, logs: [] }) });
+
+  await presentation.refresh();
+
+  const bossScreen = presentation.screenItems.value.find((entry) => entry.platform === "boss");
+  expect(bossScreen?.finishRunId).toBe("screen-b");
+  expect(bossScreen?.finishTestId).toBe("parallel-track-boss-finish-save");
+  expect(bossScreen?.cancelTestId).toBe("parallel-track-boss-cancel");
+  expect(presentation.screenItems.value.find((entry) => entry.platform === "zhilian")?.finishRunId).toBe("scrape-z");
+  expect(presentation.scrapeItems.value.find((entry) => entry.platform === "boss")?.finishRunId).toBe("scrape-b");
+});
+
+// 阶段卡状态口径从组件收回呈现层：头部徽章、卡体与轨道行拿到同一份定稿快照，
+// 同一张卡不许两头各说一句（原先由 ParallelPlatformProgress 再压一遍，与呈现层重复派生）。
+it.each([
+  ["queued", "等待开始"],
+  ["running", "运行中"],
+  ["paused", "已暂停"],
+  ["pausing", "正在暂停"],
+  ["interrupted", "已中断"],
+  ["failed", "执行失败"],
+  ["cancelled", "已停止"],
+  ["stopped", "已停止"],
+  ["partial", "完成，但有待确认"],
+  ["completed_with_pending", "完成，但有待确认"],
+  ["succeeded", "已完成"],
+  ["done", "已完成"],
+  ["unavailable", "暂不可用"],
+])("resolves one %s wording for the row header and the card body", async (status, label) => {
+  const { presentation } = setup([
+    track({ id: "track-b", platform: "boss", scrape_run_id: "scrape-b", status, stage: "scrape" }),
+  ], { fetchTaskState: async () => ({ status, progress: {}, logs: [] }) });
+
+  await presentation.refresh();
+
+  const entry = presentation.scrapeItems.value[0];
+  expect(entry?.statusLabel).toBe(label);
+  expect(entry?.snapshot.status).toBe(status);
+});
+
+// 轨道已经停止、本段快照还停在「正在暂停」：以线为准把状态压进这一段，
+// 头部与卡体同说「已停止」，这一层不再由组件补第二遍。
+it("pushes a stopped Track down onto a stage still pausing", async () => {
+  const { presentation } = setup([
+    track({ id: "track-b", platform: "boss", scrape_run_id: "scrape-b", status: "stopped", stage: "scrape" }),
+  ], { fetchTaskState: async () => ({ status: "pausing", progress: {}, logs: [] }) });
+
+  await presentation.refresh();
+
+  expect(presentation.scrapeItems.value[0]?.statusLabel).toBe("已停止");
+  expect(presentation.scrapeItems.value[0]?.snapshot.status).toBe("stopped");
+});
+
+// 抓取段自己已完成、整条线还在跑：这张卡只说自己那一段（头部与卡体都是「已完成」），
+// 动作仍按轨道状态给暂停——一条线只有一个当前阶段。
+it("freezes a finished scrape stage while its Track is still running", async () => {
+  const { presentation } = setup([
+    track({
+      id: "track-z", platform: "zhilian", scrape_run_id: "scrape-z", screen_run_id: "screen-z",
+      status: "running", stage: "ai",
+    }),
+  ], {
+    fetchTaskState: async (runId) => (runId === "scrape-z"
+      ? { status: "succeeded", progress: { overall_percent: 100, current: 7, total: 7 }, logs: [] }
+      : { status: "running", progress: {}, logs: [] }),
+  });
+
+  await presentation.refresh();
+
+  expect(presentation.scrapeItems.value[0]?.statusLabel).toBe("已完成");
+  expect(presentation.scrapeItems.value[0]?.snapshot.status).toBe("succeeded");
+  expect(presentation.screenItems.value[0]?.action).toEqual({ kind: "pause", label: "暂停筛选" });
+});
+
+// 真实缺陷：智联轨道 interrupted、阶段在 AI；抓取 run 早在重启前就带白箱「完整成功」。
+// 轨道问题态只归中断发生的那一段，别的段不背这个锅，头部与卡体仍须同说一句。
+it("routes the Track-level 已中断 badge to the stage the interruption actually hit", async () => {
+  const { presentation } = setup([
+    track({
+      id: "track-z", platform: "zhilian", scrape_run_id: "scrape-z", screen_run_id: "screen-z",
+      status: "interrupted", stage: "ai",
+    }),
+  ], {
+    fetchTaskState: async (runId) => (runId === "scrape-z"
+      ? {
+        status: "succeeded", progress: { overall_percent: 100, current: 377, total: 377 }, logs: [],
+        scraped_count: 377, source_total: 377, integrity: { conclusion: "succeeded", label: "完整成功" },
+      }
+      : { status: "interrupted", progress: {}, logs: [] }),
+  });
+
+  await presentation.refresh();
+
+  expect(presentation.scrapeItems.value[0]?.statusLabel).toBe("完整成功");
+  expect(presentation.screenItems.value[0]?.statusLabel).toBe("已中断");
+  // 中断不给继续：这一条线不再有注定 503 的继续，但保存与终止两条出口照旧留着。
+  expect(presentation.screenItems.value[0]?.action).toEqual({ kind: "none" });
+  expect(presentation.screenItems.value[0]?.showCancel).toBe(true);
+  expect(presentation.screenItems.value[0]?.showFinishSave).toBe(true);
+});
+
+// 交接已发生、本段跑过却读不到状态：说「等待开始」会把跑过的段说成没跑过，
+// 头部与卡体同说「状态更新中」，也不替整条线背「已中断」。
+it("keeps a handed-off stage card that has a run but no readable state on the 状态更新中 fallback", async () => {
+  const { presentation } = setup([
+    track({
+      id: "track-z", platform: "zhilian", scrape_run_id: "scrape-z", screen_run_id: "screen-z",
+      status: "interrupted", stage: "ai",
+    }),
+  ], { fetchTaskState: async (runId) => (runId === "screen-z" ? { status: "interrupted", progress: {}, logs: [] } : null) });
+
+  await presentation.refresh();
+
+  expect(presentation.scrapeItems.value[0]?.statusLabel).toBe("状态更新中");
+  expect(presentation.scrapeItems.value[0]?.snapshot.status).toBe("unknown");
+});
+
+// 白箱 unverifiable 被后端公开成 completed_with_pending：两处必须同一句，
+// 不许头部把无法确认报成「完成，但有待确认」。
+it("says one single conclusion on a card whose whitebox verdict is unverifiable", async () => {
+  const { presentation } = setup([
+    track({ id: "track-b", platform: "boss", scrape_run_id: "scrape-b", status: "completed_with_pending", stage: "scrape" }),
+  ], {
+    fetchTaskState: async () => ({
+      status: "completed_with_pending", progress: { overall_percent: 100 }, logs: [],
+      integrity: { conclusion: "unverifiable", label: "无法确认", primary_reason: "证据不足" },
+    }),
+  });
+
+  await presentation.refresh();
+
+  expect(presentation.scrapeItems.value[0]?.statusLabel).toBe("无法确认是否完成");
+});

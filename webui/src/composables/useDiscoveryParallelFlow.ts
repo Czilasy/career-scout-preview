@@ -666,6 +666,20 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     }
   }
 
+  /**
+   * 轨道行上传来的动作出口：既有动作条的 kind 落到后端既有的三种轨道操作上。
+   * 树干不认识任何平台，也不新造端点——「终止本轨」就是这条线的 stop。
+   */
+  async function operateTrack(
+    platform: Platform,
+    action: "pause" | "continue" | "start" | "recrawl" | "pause-recrawl" | "continue-recrawl" | "pause-scrape" | "continue-scrape" | "cancel",
+  ) {
+    if (action === "cancel") return operate(platform, "stop");
+    if (action === "pause" || action === "pause-scrape") return operate(platform, "pause");
+    if (action === "continue" || action === "continue-scrape") return operate(platform, "resume");
+    return null;
+  }
+
   function restore(next: ParallelFlowState | null) {
     clearPolling();
     try {
@@ -744,6 +758,7 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     clearPolling,
     start,
     operate,
+    operateTrack,
     isFlowOwnedScrapeTask,
     restore,
   };

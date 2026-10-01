@@ -271,9 +271,17 @@ class B096V2StructuralGuardTests(unittest.TestCase):
         "webui/store_migrations_v8.py",
         "webui/src/parallelFilterMapping.ts",
         "webui/src/types.ts",
+        "webui/src/discovery.ts",
+        "webui/src/screenFlow.ts",
         "webui/src/components/OneClickScreenDialog.vue",
         "webui/src/components/ParallelPlatformProgress.vue",
+        "webui/src/components/ScreenRoundActions.vue",
+        # D-04：轨道动作条收进卡边框内部——落点是既有卡的一个可选 slot。
+        "webui/src/components/TaskProgress.vue",
+        # D-05：并行轨道模块与底部动作行同宽，横跨 02 页整行。
+        "webui/src/styles.css",
         "webui/src/composables/useDiscoveryParallelFlow.ts",
+        "webui/src/composables/useScreenRoundFlow.ts",
         "webui/src/composables/useDiscoveryFlowPresentation.ts",
         "webui/src/composables/useDiscoveryIslandBridge.ts",
         "webui/src/composables/useDiscoveryTasks.ts",
@@ -283,6 +291,7 @@ class B096V2StructuralGuardTests(unittest.TestCase):
         "webui/src/styles/theme.css",
         "webui/src/views/DiscoveryView.vue",
         "webui/src/__tests__/parallelFilterMapping.spec.ts",
+        "webui/src/__tests__/screenFlow.spec.ts",
         "webui/src/components/__tests__/OneClickScreenDialog.spec.ts",
         "webui/src/components/__tests__/ParallelPlatformProgress.spec.ts",
         "webui/src/composables/__tests__/useDiscoveryParallelFlow.spec.ts",
@@ -295,6 +304,27 @@ class B096V2StructuralGuardTests(unittest.TestCase):
         "webui/src/views/__tests__/DiscoveryRecovery.spec.ts",
         "webui/src/views/__tests__/DiscoverySearchPackages.spec.ts",
         "webui/src/views/__tests__/DiscoveryView.spec.ts",
+        # D-06 / D-07 / D-08 与 Edge Cases「平台禁用点名」的落点登记（2026-10-01 返修批）。
+        # 依据是 v2/spec.md 新增的 `## 状态所有权` 与 `## 状态词表` 两节，以及
+        # tasks.md 里 Forbidden files 清单尚未按这两节尺子更新这一事实：以规格为准。
+        # 逐条登记，只记实际改过且改动由上述条目要求的文件，不是整批放行：
+        # - App.vue：D-06 把通知池的轮次身份接成既有轮次令牌（Ref 形参），不在 App 数轮次。
+        # - useDiscoveryState.ts：状态词表要求中断与暂停两种性质各自的出路口径；
+        #   结果可渲染判定（hasRenderableResult）按状态所有权收进状态层。
+        # - useIslandNotices.ts：D-06 轮次身份登记与上一轮告警撤销。
+        # - useDiscoveryFlowCoordinator.ts：D-07 冻结快照汇总、D-08 本轮仍在进行说明、
+        #   Edge Cases「全部」的平台可用性点名（含恢复配置包路径不做逐平台预检）。
+        # - 三个 spec 文件是上述三条行为与点名的验收用例，不是顺手重构：
+        #   useDiscoveryExecution.spec.ts / useDiscoveryState.spec.ts 钉 D-06 状态词表
+        #   （中断只说「开始新一轮」，不再承诺界面上不存在的动作），
+        #   useIslandNotices.spec.ts 钉 D-06 轮次身份与上一轮告警撤销。
+        "webui/src/App.vue",
+        "webui/src/composables/useDiscoveryState.ts",
+        "webui/src/composables/useIslandNotices.ts",
+        "webui/src/composables/useDiscoveryFlowCoordinator.ts",
+        "webui/src/composables/__tests__/useDiscoveryExecution.spec.ts",
+        "webui/src/composables/__tests__/useDiscoveryState.spec.ts",
+        "webui/src/composables/__tests__/useIslandNotices.spec.ts",
     }
 
     E2E_FOLLOWUP_ALLOWED_PATHS = frozenset({
@@ -377,6 +407,67 @@ class B096V2StructuralGuardTests(unittest.TestCase):
         self.assertNotIn("65", source)
         self.assertNotIn("100", source)
         self.assertNotIn("grid-template-columns: repeat(2", source)
+
+    # D-03 结构门禁：并行轨道行不许自带动作条与状态判定。
+    # 每条负向断言都配一条「复用还在」的正向断言，防止删功能换绿灯。
+    TRACK_STATUS_LITERALS = (
+        "queued", "running", "pausing", "paused", "interrupted", "failed",
+        "stopped", "cancelled", "succeeded", "done", "partial",
+        "completed_with_pending", "unavailable",
+    )
+
+    def test_parallel_progress_renders_shared_controls_and_not_its_own(self):
+        source = self.PARALLEL_PROGRESS_PATH.read_text(encoding="utf-8")
+        # 正向：每一行都是既有 TaskProgress + 既有 ScreenRoundActions。
+        self.assertIn('import TaskProgress from "./TaskProgress.vue"', source)
+        self.assertIn('import ScreenRoundActions from "./ScreenRoundActions.vue"', source)
+        self.assertIn("<TaskProgress", source)
+        self.assertIn("<ScreenRoundActions", source)
+        # 负向：没有裸按钮、没有自写显隐、没有第二套状态判定。
+        self.assertEqual(source.count("<button"), 0)
+        self.assertNotIn("visibleButtons", source)
+        for status in self.TRACK_STATUS_LITERALS:
+            self.assertNotIn(f'"{status}"', source, f"轨道行不得自带状态 {status}")
+            self.assertNotIn(f"'{status}'", source, f"轨道行不得自带状态 {status}")
+
+    def test_track_actions_still_reach_the_backend(self):
+        # 上一条负向断言不许以砍掉动作为代价：轨道动作仍然要能发出去。
+        source = self.PARALLEL_PROGRESS_PATH.read_text(encoding="utf-8")
+        view = self.DISCOVERY_VIEW_PATH.read_text(encoding="utf-8")
+        self.assertIn('emit("action"', source)
+        self.assertRegex(source, r"emit\(['\"]finish['\"]")
+        self.assertIn('defineEmits(["action", "finish"])', source)
+        self.assertIn('@action="parallelFlow.operateTrack"', view)
+        self.assertIn("@finish=\"finishPausedTask\"", view)
+        # 轨道级收尾复用单平台同一条 run 级路径，不新增端点。
+        self.assertNotIn("/api/flows/", source)
+
+    def test_screen_round_actions_style_is_defined_only_in_the_shared_component(self):
+        source_root = self.ROOT / "webui" / "src"
+        markup_owners = []
+        style_owners = []
+        for path in source_root.rglob("*"):
+            if not path.is_file() or path.suffix not in {".vue", ".css", ".ts", ".tsx"}:
+                continue
+            if "__tests__" in path.parts:
+                continue
+            source = path.read_text(encoding="utf-8")
+            relative = str(path.relative_to(self.ROOT)).replace("\\", "/")
+            if 'class="screen-round-actions"' in source:
+                markup_owners.append(relative)
+            # 只查这个类名自己的样式规则；别处的前缀后代选择器不算定义处。
+            if "\n.screen-round-actions {" in source:
+                style_owners.append(relative)
+        # 正向：定义处仍然是成熟动作条本体，它照样渲染这片现场并自带这一段样式。
+        self.assertEqual(markup_owners, ["webui/src/components/ScreenRoundActions.vue"])
+        self.assertEqual(style_owners, ["webui/src/components/ScreenRoundActions.vue"])
+        shared = (source_root / "components" / "ScreenRoundActions.vue").read_text(encoding="utf-8")
+        self.assertIn("<button", shared)
+        # 负向：并行轨道行不许再自带同类名（那意味着第二套动作条回来了）。
+        self.assertNotIn(
+            "screen-round-actions",
+            self.PARALLEL_PROGRESS_PATH.read_text(encoding="utf-8"),
+        )
 
     def test_confirmation_gate_is_removed_from_parallel_sources(self):
         roots = [

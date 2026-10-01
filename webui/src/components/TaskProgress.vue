@@ -679,10 +679,17 @@ const timeLabel = computed(() => {
         </div>
       </div>
     </div>
+    <!-- 可选落点：并行轨道把这一条线的动作条交进来，于是按钮落在卡边框内、
+         左缘随卡内 padding 对齐；单平台调用点不传子节点，这里什么都不会出现。 -->
+    <slot />
   </section>
 </template>
 
 <style scoped>
+/* 卡内落点里的动作行：与计数行同一个上边距节奏（边框与背景仍然只有 .task-progress 一份）。 */
+.task-progress :deep(.screen-round-actions) {
+  margin-top: 10px;
+}
 /* 039：失败只是一个数字；用户主动悬停时才出现逐条原因的小浮窗（弱化样式，不抢暂停原因焦点）。 */
 .count-fail {
   position: relative;

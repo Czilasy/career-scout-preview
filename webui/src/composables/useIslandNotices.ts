@@ -24,11 +24,21 @@
 // 046 第五轮：paused 一族的行标题跟着事实走（见 attentionRow）——可恢复的暂停说
 // 「任务已暂停」，被服务重启打断的说「任务已中断」，与顶栏胶囊、同一屏阶段卡同一说法；
 // 性质由生产端随胶囊传下来，本池不再按 kind 猜第二次。id / 去重 / 落点 / 未读 / 轮播语义不变。
+//
+// 046 D-06：每一行都登记"它是哪一轮说的话"（轮次身份取现场存档既有的轮次令牌，
+// 本池不自己数轮次）。开新一轮换发新身份时，只撤销上一轮的中断/attention 告警族行
+// ——running 分支不清池（037：用户可能还没看），没有轮次归属就任何路径都撤不掉旧轮告警。
+// 撤销按归属逐行做，不整池清空：本轮刚到达的「结果已加入」等通知必须留下（US3 只提示一次），
+// 旧轮的完成历史行也按既有语义留在面板里。
 // ---------------------------------------------------------------------------
 import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
 import { pausedFamilyNoticeTitle, type CapsuleStatusPayload, type DynamicIslandState } from "./useDiscoveryState";
 
 export type IslandNoticeKind = "completed" | "error" | "paused" | "interrupt" | "notice";
+
+/** 随轮次结束而失效的告警族：中断（沉入的旧轮恢复提示）与 attention 派生行
+ *  （error / paused）。completed / notice 是历史与本轮新到达的事实，不在此列。 */
+const ROUND_SCOPED_KINDS: readonly IslandNoticeKind[] = ["interrupt", "paused", "error"];
 
 export interface IslandNotice {
   id: string;
@@ -43,6 +53,8 @@ export interface IslandNotice {
   target: IslandNoticeTarget;
   at: number;
   read: boolean;
+  /** 046 D-06：这行通知到达时所属的轮次身份（现场存档的轮次令牌；空串＝当时无轮次身份）。 */
+  round?: string;
 }
 
 /** 通知行 navigate 目标：三个胶囊导航目标 + "reminders"（App 层拦截开提醒抽屉，
@@ -89,13 +101,32 @@ function makeId(kind: IslandNoticeKind, seq: number): string {
 
 export function createIslandNotices(
   roundStatus: Ref<CapsuleStatusPayload | null>,
+  roundId?: Ref<string>,
 ): IslandNoticesApi {
   const notices = ref<IslandNotice[]>([]);
   const unreadCount = computed(() => notices.value.filter((n) => !n.read).length);
   let seq = 0;
   let prev: DynamicIslandState | null = null;
 
+  /** 当前轮次身份：没有接线（或未换发身份）时是空串——空串的行不参与撤销。 */
+  function currentRound(): string {
+    return String(roundId?.value ?? "");
+  }
+
+  /** 046 D-06：撤销上一轮留下的告警族行（中断 / attention 派生行）。
+   *  只按轮次归属逐行撤，绝不整池清空：本轮新到达的通知、以及旧轮的完成
+   *  历史行都必须按既有语义留在面板里。 */
+  function revokePreviousRounds(): void {
+    const round = currentRound();
+    if (!round) return;
+    const kept = notices.value.filter(
+      (n) => !ROUND_SCOPED_KINDS.includes(n.kind) || n.round === round || !n.round,
+    );
+    if (kept.length !== notices.value.length) notices.value = kept;
+  }
+
   function upsert(next: IslandNotice): void {
+    revokePreviousRounds();
     const list = notices.value.slice();
     const idx = list.findIndex((n) => n.kind === next.kind);
     if (idx >= 0) {
@@ -153,6 +184,7 @@ export function createIslandNotices(
         detail,
         target: "results",
         at: Date.now(),
+        round: currentRound(),
         // read:true（P2-1 裁决）：完成信号已由 pill completed live state 展示，
         // panel 行只是历史；不产生未读，完成后点 pill 直达结果页（FR-008）。
         read: true,
@@ -167,6 +199,7 @@ export function createIslandNotices(
           detail: next.attention.message,
           target: "attention",
           at: Date.now(),
+          round: currentRound(),
           read: false,
         });
       }
@@ -189,6 +222,15 @@ export function createIslandNotices(
     },
     { immediate: true, flush: "sync" },
   );
+
+  // 046 D-06：轮次身份换发（开新一轮）即撤销上一轮留下的告警族行。
+  // flush:sync——必须在下一次状态跃迁进池前完成，否则同一 tick 里旧轮告警
+  // 会被读面板的用户看成"本轮还在喊"。
+  if (roundId) {
+    watch(roundId, () => {
+      revokePreviousRounds();
+    }, { flush: "sync" });
+  }
 
   function markRead(id: string): void {
     markReadBatch([id]);
@@ -217,12 +259,20 @@ export function createIslandNotices(
    *  不适用终态通知"同 kind 只保留最新一条"的去重语义（复审 P1-1：
    *  多条打断连沉时 upsert 会互相吞掉，panel 只剩 1 条）。 */
   function sinkInterrupt(notice: Omit<IslandNotice, "at" | "read">): void {
-    notices.value = [...notices.value, { ...notice, at: Date.now(), read: false }];
+    revokePreviousRounds();
+    notices.value = [
+      ...notices.value,
+      { ...notice, at: Date.now(), read: false, round: currentRound() },
+    ];
   }
 
   /** 043：显式推入一条"一次性提醒"（append；kind 固定 "notice"，未读）。 */
   function pushNotice(notice: Omit<IslandNotice, "at" | "read" | "kind">): void {
-    notices.value = [...notices.value, { ...notice, kind: "notice", at: Date.now(), read: false }];
+    revokePreviousRounds();
+    notices.value = [
+      ...notices.value,
+      { ...notice, kind: "notice", at: Date.now(), read: false, round: currentRound() },
+    ];
   }
 
   function reset(): void {

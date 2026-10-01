@@ -86,7 +86,7 @@ def register_flow_routes(app, ctx):
         except PlatformUnavailableError as exc:
             return _error(
                 "platform_disabled",
-                f"平台暂不可用：{exc.platform}",
+                _platform_unavailable_message(exc.platform),
                 503,
                 platform=exc.platform,
             )
@@ -194,6 +194,19 @@ def _platform_enabled(platform: str) -> bool:
 
     registry = get_platform_or_none(platform)
     return bool(registry and registry.enabled_for_new_tasks)
+
+
+def _platform_unavailable_message(platform: str) -> str:
+    """平台不可用的用户可读文案（与抓取入口同一口径：只转注册表给出的原因）。
+
+    内部平台码不回吐给用户；结构化 ``platform`` 字段照常带上，
+    显示名由前端的平台显示名投影负责。
+    """
+    from webui.platforms import get_platform_or_none
+
+    registry = get_platform_or_none(platform)
+    reason = str(getattr(registry, "availability_reason", "") or "").strip()
+    return reason or "该平台暂不可用，请改用可用平台后重新开始"
 
 
 def _track_finalizing(ctx, _flow, track) -> bool:

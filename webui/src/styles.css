@@ -583,6 +583,7 @@ button:disabled {
   grid-row: 1;
   align-self: stretch;
 }.search-layout > .task-progress,
+.search-layout > .parallel-platform-progress,
 .search-layout > .workflow-actions {
   grid-column: 1 / -1;
 }
@@ -1465,6 +1466,16 @@ button:disabled {
   color: var(--danger);
   font-size: 13px;
   font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}/* 本轮仍在进行说明（046 D-08）：分轨合流下 04 页可以只含一条平台线的结果，
+   这句话决定用户会不会把"先到的结果"读成"整轮跑完了"，任何宽度都必须可见 */
+.flow-round-progress-notice {
+  flex: 1 1 260px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }.result-tabs {

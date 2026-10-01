@@ -1,7 +1,7 @@
 import { computed, onBeforeUnmount, ref, watch, type Ref } from "vue";
 import type { ConditionSnapshotV2, Notice, Platform, TaskSnapshot as ApiTaskSnapshot } from "../types";
-import { errorMessage } from "../api";
-import { platformLabel } from "../discovery";
+import { errorMessage, userFacingMessage } from "../api";
+import { platformLabel, ACTIVE_TRACK_STATUSES } from "../discovery";
 import type { DiscoveryState, StepId } from "./useDiscoveryState";
 import { setThemePlatform } from "./useTheme";
 import {
@@ -10,6 +10,7 @@ import {
   registerDiscoveryParallelRecovery,
   type ParallelFlowState,
   type ParallelSelection,
+  type ParallelTrackState,
   type useDiscoveryParallelFlow,
 } from "./useDiscoveryParallelFlow";
 import { useDiscoveryFlowPresentation } from "./useDiscoveryFlowPresentation";
@@ -341,6 +342,101 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
     zhilian: flow.platformGroups.zhilian?.length ? flow.platformGroups.zhilian : state.oneClickGroups.value,
   }));
 
+  // ---------------------------------------------------------------------------
+  // SPEC 046 Edge Cases：任一平台被系统禁用新建任务时，「全部」必须在提交前挡住并
+  // 指出不可用平台；可用平台仍可单独启动。
+  // 缺陷现场：门禁只看草稿平台的 schema，选了「全部」时另一条线的禁用要等后端 503
+  // 才知道，而且提示语把内部平台码直接吐给用户。可用性事实仍取既有的平台 schema
+  // 投影（enabled_for_new_tasks，与草稿平台那条门禁同一来源），显示名走平台显示名
+  // 投影——树干不写平台名，也不新造第二份可用性判定。「全部」的可用性要等平台侧
+  // 真读过一次才知道，所以进「全部」就把各平台 schema 取回来。
+  // ---------------------------------------------------------------------------
+  const parallelDisabledPlatforms = computed<Platform[]>(() => Object.entries(flow.platformSchemas)
+    .filter(([, schema]) => schema?.enabled_for_new_tasks === false)
+    .map(([platform]) => platform) as Platform[]);
+
+  const parallelStartBlockedNotice = computed(() => {
+    if (!parallelMode.value || !parallelDisabledPlatforms.value.length) return "";
+    const names = parallelDisabledPlatforms.value.map((platform) => platformLabel(platform)).join("、");
+    return `「全部」需要各平台都能新建任务：${names} 已停用。可切换到可用平台单独开始这一轮。`;
+  });
+
+  // 主启动按钮的禁用判定合并在这一层：页面只绑定结果，不再自己拼「草稿平台门禁 ||
+  // 全部门禁」这条口径（同一份事实在 openOneClickWithParallel / confirmParallelOneClick
+  // 里各挡一次，三处必须同源）。
+  const oneClickStartDisabled = computed(
+    () => Boolean(state.oneClickDisabled.value || parallelStartBlockedNotice.value),
+  );
+
+  // 「全部」的可用性要等平台侧真读过一次才知道，所以在启动入口（02 页）就把各平台
+  // schema 投影取回一次；已在其它步骤时不发这个请求，避免与单平台 schema 加载抢同一
+  // 份在飞请求。可用性判定本身仍只读平台 schema 投影那一份事实。
+  // 配置包恢复是唯一的例外（044：同一套配置包两个平台共用）：它只是把草稿回填到 02
+  // 页，不代表用户要用「全部」开新一轮，因此这条路径不做逐平台预检；预检回到用户点
+  // 提交入口那一次（对话框准备本来就读各平台 schema 一次，两份门禁共用同一份结果），
+  // 门禁照旧——被禁用的平台绝不可能把流程发出去。落位标记只吃掉一次预检时机。
+  let packageRestoreLandingPending = false;
+  function skipAvailabilityPrecheckForPackageRestore(): void {
+    packageRestoreLandingPending = true;
+  }
+
+  watch(
+    [parallelMode, state.activeStep, () => Object.values(flow.platformSchemas).some(Boolean)],
+    ([allPlatforms, step, availabilityKnown]) => {
+      if (!allPlatforms || step !== "search" || availabilityKnown) return;
+      if (packageRestoreLandingPending) {
+        packageRestoreLandingPending = false;
+        return;
+      }
+      void flow.loadPlatformGroups();
+    },
+    { immediate: true },
+  );
+
+  // 对话框已经打开时不可用事实才到达：把原因写进对话框既有的错误位，
+  // 让「确认」按同一份事实保持禁用，不再让用户点下去才知道。
+  watch(parallelStartBlockedNotice, (message) => {
+    if (message && state.oneClickOpen.value) parallelMappingError.value = message;
+  });
+
+  // ---------------------------------------------------------------------------
+  // SPEC 046 D-07：本轮范围锁定时，03 页卡片汇总必须说本轮冻结的那一份事实。
+  // 条件草稿按平台分槽，「全部」轮锁定后草稿槽与用户看到的芯片不再是同一件事
+  // （芯片按空草稿把「不限 / 全部」点亮，汇总却写「未设置筛选条件」）。本轮条件的
+  // 唯一事实源是轨道的 confirmed_filters_snapshot：这里只如实报"已锁定、只读"，
+  // 不重算条件、不抄原始 JSON，也不去改芯片的渲染口径掩盖矛盾。
+  // ---------------------------------------------------------------------------
+  const roundConditionLockSummary = computed(() => {
+    const current = flow.flow.value;
+    if (!parallelMode.value || current?.selection !== "all" || !flow.hasActiveTrack.value) return "";
+    const frozen = current.tracks.some((track) => {
+      const snapshot = track.confirmed_filters_snapshot;
+      return Boolean(snapshot && typeof snapshot === "object" && Object.keys(snapshot).length);
+    });
+    return frozen ? "已按本轮确认条件锁定，当前只读" : "";
+  });
+
+  // ---------------------------------------------------------------------------
+  // SPEC 046 D-08：04 页在整轮未完成时开放是分轨合流的设计要求（先出结果的平台
+  // 立刻可查），缺陷只是没说清。判定不另起一套：本轮是否未结束取状态词表的唯一
+  // 谓词（hasActiveTrack），还在追赶的轨道取树干的活动态词表（排队中 / 进行中）；
+  // 已中断 / 失败的轨道由既有的失败通知负责，这里不重复许诺它会完成。历史轮浏览的是
+  // 已归档的那一份结果，本轮追赶的说法在这儿一并关掉，页面不再自己加一层 !historyMode。
+  // ---------------------------------------------------------------------------
+  const flowRoundPartialNotice = computed(() => {
+    const current = flow.flow.value;
+    if (!parallelMode.value || current?.selection !== "all" || !flow.hasActiveTrack.value) return "";
+    if (state.historyMode.value) return "";
+    const trackName = (track: ParallelTrackState) => platformLabel(track.platform);
+    const delivered = current.tracks.filter((track) => String(track.result_run_id || "").trim());
+    const catchingUp = current.tracks.filter((track) => !String(track.result_run_id || "").trim()
+      && ACTIVE_TRACK_STATUSES.includes(String(track.status || "")));
+    if (!delivered.length || !catchingUp.length) return "";
+    const arrived = delivered.map(trackName).filter(Boolean).join("、");
+    const pending = catchingUp.map(trackName).filter(Boolean).join("、");
+    return `本轮仍在进行，当前只含 ${arrived} 的结果；${pending} 完成后会原地加入，无需等待。`;
+  });
+
   function parallelDialogInputKey(): string {
     try {
       return JSON.stringify({
@@ -391,6 +487,9 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
       { isCurrent: () => isCurrentPreparation(requestIntent) },
     ), isCurrentPreparation).then((applied) => {
       if (applied) conditionSnapshot.value = flow.createConditionSnapshot();
+      if (applied && parallelStartBlockedNotice.value) {
+        parallelMappingError.value = parallelStartBlockedNotice.value;
+      }
     }).catch((error) => {
       if (isCurrentPreparation(intent)) {
         parallelMappingError.value = errorMessage(error, "平台筛选条件已变化，请更新后重试");
@@ -402,6 +501,10 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
 
   function openOneClickWithParallel(): void {
     parallelMappingError.value = "";
+    if (parallelStartBlockedNotice.value) {
+      options.notify(parallelStartBlockedNotice.value, "warning");
+      return;
+    }
     options.openOneClick();
     prepareParallelDialog();
   }
@@ -447,6 +550,12 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
 
   async function confirmParallelOneClick(fields: Record<Platform, Record<string, string[]>>): Promise<void> {
     if (parallelMappingError.value || parallelDialogPreparing.value || flow.loading.value) return;
+    // 提交前最后一道：可用性事实到达得比对话框晚时也不能把请求发出去等 503。
+    if (parallelStartBlockedNotice.value) {
+      parallelMappingError.value = parallelStartBlockedNotice.value;
+      options.notify(parallelStartBlockedNotice.value, "warning");
+      return;
+    }
     const requestIntent = intent;
     try {
       conditionSnapshot.value = flow.createConditionSnapshot(fields);
@@ -461,7 +570,7 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
         return;
       }
       parallelMappingError.value = errorMessage(error, "平台筛选条件已变化，请更新后重试");
-      options.notify(errorMessage(error, "流程启动失败"), "error");
+      options.notify(userFacingMessage(error, "流程启动失败"), "error");
     }
   }
 
@@ -594,6 +703,11 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
     parallelMappingError,
     parallelDialogPreparing,
     parallelPlatformGroups,
+    parallelStartBlockedNotice,
+    oneClickStartDisabled,
+    skipAvailabilityPrecheckForPackageRestore,
+    roundConditionLockSummary,
+    flowRoundPartialNotice,
     selectParallelMode,
     openOneClickWithParallel,
     prepareParallelDialog,

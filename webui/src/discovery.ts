@@ -156,8 +156,7 @@ export function stageStatusLabel(status?: string | null, integrityConclusion?: s
   return "运行中";
 }
 
-export function historyStatusLabel(status: string, jobCount: number): string {
-  const normalized = String(status || "").toLowerCase();
+export function historyStatusLabel(status: string, jobCount: number): string {  const normalized = String(status || "").toLowerCase();
   if (["scraped_only"].includes(normalized)) return "已抓取，未筛选";
   if (["done", "succeeded", "completed"].includes(normalized)) return "完成";
   if (["partial", "completed_with_pending"].includes(normalized)) return "部分结果";

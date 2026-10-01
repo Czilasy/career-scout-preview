@@ -3,6 +3,7 @@ import type { Ref } from "vue";
 import { apiRequest, errorMessage } from "../api";
 import { stripNationwideCities } from "../discovery";
 import {
+  canFinishRunByStatus,
   deriveScreenPrimaryAction,
   continueTargets,
   isRoundClosedSaved,
@@ -209,14 +210,29 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     return action;
   });
 
+  /**
+   * 「结束并保存 / 放弃本轮」的可见性只在这一处判定（树干），页面与轨道行都取它。
+   * 现场是暂停或继续时两条都在；中断/失败这一类还能收口的现场也留着——
+   * 状态词表把「继续」从中断轮次摘掉后，用户仍要能把已判定的岗位保存下来。
+   */
+  const screenSecondaryActionsVisible = computed(() => Boolean(
+    screenAction.value.kind === "pause"
+    || screenAction.value.kind === "continue"
+    || canFinishRunByStatus(
+      deps.refs.screenTaskId.value || deps.refs.pausedRunId.value,
+      screenStatus.value,
+    ),
+  ));
+
   const recrawlAction = computed<ScreenPrimaryAction>(() => {
     const status = recrawlStatus.value;
     if (status === "running" || status === "queued") {
       return { kind: "pause-recrawl", label: "暂停重抓" };
     }
-    if (status === "paused" || status === "failed" || status === "interrupted") {
+    if (status === "paused" || status === "failed") {
       return { kind: "continue-recrawl", label: "继续重抓" };
     }
+    // 状态词表：中断的重抓没有活体批次可续，只能由新一轮重新发起。
     return { kind: "none" };
   });
   const continueTargetList = computed(() => continueTargets(
@@ -771,6 +787,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     screenStatus,
     recrawlStatus,
     screenAction,
+    screenSecondaryActionsVisible,
     recrawlAction,
     restoreRoundContext,
     registerRoundContext,
