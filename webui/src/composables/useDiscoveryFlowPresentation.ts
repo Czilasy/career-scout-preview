@@ -7,6 +7,7 @@ import {
   UNREADABLE_STAGE_STATUS,
 } from "../discovery";
 import { deriveTrackActionBar, type SharedPrimaryAction } from "../screenFlow";
+import { hasUnfinishedParallelRound } from "./useDiscoveryParallelFlow";
 import type { Platform, TaskSnapshot as ApiTaskSnapshot } from "../types";
 
 export type FlowStepId = "search" | "screen" | "results";
@@ -34,6 +35,12 @@ export interface FlowProgressItem {
   finishRunId: string;
   finishTestId: string;
   cancelTestId: string;
+  /**
+   * 本轮已收尾（flows 外壳与 flow_tracks 都说这一轮结束了）。
+   * 卡上的 interrupted 是不是残留由这一份轮次事实回答：状态词表里「中断」＝本轮未结束，
+   * 已收尾的轮次不配这个词。展示改写仍只有共享卡里那一份豁免，这里只带事实不带文案。
+   */
+  roundClosed?: boolean;
 }
 
 export interface FlowPresentationTrack {
@@ -59,6 +66,11 @@ export interface FlowResultProjectionTrack {
 export interface FlowPresentationInput {
   flowId?: string;
   id?: string;
+  /**
+   * 流程外壳状态（后端由 flow_tracks 读时派生，webui/store_flow_core.py
+   * `_derive_flow_status`）。本轮收没收尾只由那一份轮次谓词读它算，不在这里另判。
+   */
+  status?: string;
   tracks: FlowPresentationTrack[];
 }
 
@@ -89,6 +101,13 @@ const AI_FAILURE_STAGES = new Set(["ai", "screen", "ai_screen", "complete"]);
 const NEUTRAL_STAGE_STATUS = "queued";
 
 /**
+ * 「中断」那一个词：问题态清单的唯一一份仍在 discovery.ts（TRACK_PROBLEM_STATUSES），
+ * 这里只取其中的中断一支——它说的是那段任务被停止或重启打断，不是这一轮收没收尾。
+ * 本轮已收尾时它是残留，见 stageStatusOf。
+ */
+const INTERRUPTED_STAGE_STATUS = "interrupted";
+
+/**
  * 「这一段是不是这条线当前所在的那一段」的唯一判定。
  * 只读可变 stage 会漏掉后端已确立的一态——durable run id 优先于 stage：
  * AI 硬停可以把 stage 留在抓取段而把具体任务绑进 screen_run_id
@@ -116,13 +135,21 @@ function isTrackFailure(status: string): boolean {
  *   又没有本段证据时上面已经把快照换成兜底口径，压回去就是替整条线背「已中断」。
  * - 轨道只能把一张卡往下压（暂停/终态），不能把已经跑完的阶段说成还在跑：
  *   快照仍写在飞态而整条线已经不在活动态时，以线为准。
- * 在飞与活动态清单都不在这里重复：唯一一份在 discovery.ts。
+ * - 本轮已收尾时，快照里那句「中断」说的是那段任务的残留，不是这一行的事实：
+ *   状态词表把「中断」定义成「无活体 worker 且本轮未结束」，轮次已经结束就没有这个词，
+ *   这一行跟随轨道自己的终态（与同一轮里另一条线同一个口径，046 D-09 同一类症状）。
+ * 在飞与活动态清单都不在这里重复：唯一一份在 discovery.ts；轮次清单也不在这里重复：
+ * 唯一一份在 useDiscoveryParallelFlow。
  */
 function stageStatusOf(
   snapshotStatus: string,
   trackStatus: string,
   carriesLineState: boolean,
+  roundClosed: boolean,
 ): string {
+  if (roundClosed && snapshotStatus === INTERRUPTED_STAGE_STATUS) {
+    return trackStatus || snapshotStatus;
+  }
   if (!carriesLineState) return snapshotStatus || UNREADABLE_STAGE_STATUS;
   if (STAGE_IN_FLIGHT_STATUSES.includes(snapshotStatus) && !ACTIVE_TRACK_STATUSES.includes(trackStatus)) {
     return trackStatus;
@@ -173,9 +200,16 @@ function hasVisibleJobs(track: FlowPresentationTrack): boolean {
  * 那句说明必须读同一份事实。只认 result_run_id 会把「AI 失败但已持久化部分岗位」那条线
  * 说成还没有结果——页面按分轨合流规则已经开了（contracts/flow-presentation.md 第 2、6 节），
  * 说明却没有，用户就把半条线的结果读成整轮筛完。
+ *
+ * 反过来，**已经在跑的那条线手里那批岗位不算结果**：后端 `store_flow_results.py` 会给
+ * 在抓轨道把原始抓取岗位一并挂上（它们还没判定），把"有岗位"当成"已交付"会让 04 那句
+ * 「本轮仍在进行」永远不出现（2026-10-01 真实轮实测：智联 15:25 已交付、BOSS 还在抓，
+ * 那句话整段没渲染）。判活口径不在这里另抄一份，读树干那一份活动态清单。
  */
 export function trackHasDeliveredResult(track: FlowPresentationTrack): boolean {
-  return Boolean(String(track.result_run_id || "").trim()) || hasVisibleJobs(track);
+  if (String(track.result_run_id || "").trim()) return true;
+  if (!hasVisibleJobs(track)) return false;
+  return !ACTIVE_TRACK_STATUSES.includes(String(track.status || ""));
 }
 
 export interface FlowPresentationOptions {
@@ -213,6 +247,17 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
 
   function isCurrentRefresh(generation: number, id: string): boolean {
     return generation === refreshGeneration && flowId.value === id;
+  }
+
+  /**
+   * 本轮是否已收尾：只由那一份轮次谓词回答（流程外壳 + flow_tracks 的轨道状态）。
+   * 外壳状态读不到时不宣称收尾——把「读不到」当成「已结束」，会顺手抹掉真被打断
+   * 那一轮唯一的报警现场。
+   */
+  function roundHasClosed(): boolean {
+    const projection = input.flow.value;
+    if (!projection || !String(projection.status || "")) return false;
+    return !hasUnfinishedParallelRound(projection);
   }
 
   function clearResultRefreshRetry(resetAttempts = false): void {
@@ -382,6 +427,8 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
       });
 
     const fetched: Array<FlowProgressItem & { order: number; index: number }> = [];
+    // 轮次事实一次读取、整批同口径：本轮收没收尾决定「中断」这个词还能不能用。
+    const roundClosed = roundHasClosed();
     for (const entry of candidates) {
       // 单条 run 的状态读取会真实抛错：webui/task_state_api.py 对 run 不存在或画像
       // 不符返回 404，webui/src/api.ts 对非 2xx 抛 ApiError。一条读失败只降级那一张卡
@@ -423,7 +470,9 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
       const carriesLineState = ownsLineState
         || (hasOwnEvidence && STAGE_IN_FLIGHT_STATUSES.includes(String(snapshot.status || "")));
       const trackStatus = String(entry.track.status || snapshot.status || "unknown");
-      const stageStatus = stageStatusOf(String(snapshot.status || ""), trackStatus, carriesLineState);
+      const stageStatus = stageStatusOf(
+        String(snapshot.status || ""), trackStatus, carriesLineState, roundClosed,
+      );
       const displaySnapshot = snapshot.status === stageStatus
         ? snapshot
         : ({ ...snapshot, status: stageStatus } as ApiTaskSnapshot);
@@ -452,6 +501,7 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
         finishRunId,
         finishTestId: `parallel-track-${entry.track.platform}-finish-save`,
         cancelTestId: `parallel-track-${entry.track.platform}-cancel`,
+        roundClosed,
         enteredAt: firstEntered(entry.track, snapshot, kind),
         order: 0,
         index: entry.index,

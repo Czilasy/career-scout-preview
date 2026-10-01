@@ -718,6 +718,47 @@ describe("useDiscoveryResults latest platform identity", () => {
     expect(state.pipelineResult.value?.jobs?.map((job) => job.title)).toEqual(["BOSS 岗位"]);
   });
 
+  // SPEC 046 v2 D-13：真实轮实测的失败组合——刷新接回活体轮次时，单平台遗留现场（另一个
+  // 抓取任务 id / 抓取忙碌标记）还在，旧的三道闸把整轮的结果读入整个挡掉：接口每 2 秒 200、
+  // payload 里有已交付平台的判定结果，界面四桶全 0。Flow 轮次的 payload 与本轮严格同域，
+  // 按 FR-013 就要求活体轮次照样读进来。
+  it("进行中的 Flow 轮次照样读进已交付平台的岗位（单平台遗留现场不再挡道）", async () => {
+    apiRequestMock.mockResolvedValue({
+      ok: true,
+      results: {
+        flow_id: "flow-live-d13",
+        selection: "all",
+        status: "running",
+        tracks: [
+          {
+            platform: "zhilian", status: "done", stage: "complete",
+            scrape_run_id: "scrape-zhilian-d13", screen_run_id: "screen-zhilian-d13",
+            result_run_id: "zhilian-result-d13",
+            jobs: [{ job_id: "z1", platform: "zhilian", title: "智联已交付岗位", verdict: "match" }], dropped: [],
+          },
+          {
+            platform: "boss", status: "running", stage: "scrape",
+            scrape_run_id: "scrape-boss-d13", screen_run_id: null, result_run_id: null,
+            jobs: [{ job_id: "b1", platform: "boss", title: "BOSS 在抓岗位" }], dropped: [],
+          },
+        ],
+      },
+    });
+    const state = useDiscoveryState({ profileId: "flow-live-d13" }, () => {});
+    state.setFlowActive(true);
+    state.setFlowLiveWorker(true);
+    // 单平台遗留现场：抓取任务 id 属于另一条轨道，且抓取忙碌标记还在。
+    state.scrapeTaskId.value = "scrape-boss-d13";
+    state.scrapeBusy.value = true;
+    const deps = makeDeps();
+    const results = useDiscoveryResults(state, deps, ref("flow-live-d13"), undefined, ref<"all" | "boss" | "zhilian">("all"));
+
+    await results.loadLatestResult({ preservePresentation: true });
+
+    expect(state.pipelineResult.value?.jobs?.map((job) => job.title))
+      .toEqual(["智联已交付岗位", "BOSS 在抓岗位"]);
+  });
+
   it("本轮结果没能载入时给出用户可见提示，且不残留错误态", async () => {
     apiRequestMock.mockRejectedValue(new Error("Request failed with status code 503"));
     const currentFlowId = ref("flow-unreachable");

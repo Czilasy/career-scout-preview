@@ -58,6 +58,13 @@ const props = defineProps<{
   platform?: Platform | null;
   /** 本轮是用户主动「结束并保存」收尾的：不把 interrupted 当异常展示。 */
   userFinished?: boolean;
+  /**
+   * 本轮已收尾（轮次那一份事实：flows + flow_tracks 都说这一轮结束了）。
+   * 状态词表里「中断」说的是「无活体 worker 且本轮未结束」，收尾后的 interrupted
+   * 只是那段任务留下的残留，展示同样按轮次走——与 userFinished 共用下面那一份豁免，
+   * 不在此另起一套判定。
+   */
+  roundClosed?: boolean;
 }>();
 
 // 终态与完成态口径以后端 flow_tracks 状态白名单为唯一权威
@@ -105,16 +112,28 @@ function isTerminalStatus(status?: string) {
 
 const integrity = computed<IntegritySnapshot | null>(() => {
   const raw = props.snapshot?.integrity ?? null;
+  if (!raw || raw.conclusion !== "interrupted") return raw;
   // 用户主动「结束并保存」的轮次：白箱如实记 interrupted（任务确实被停止），
   // 但那是用户自己的收尾动作，展示口径按轮次走（部分完成 / 已结束保存），
   // 不再出现"任务因取消或停止而中断"。
-  if (raw && props.userFinished && raw.conclusion === "interrupted") {
+  if (props.userFinished) {
     return {
       ...raw,
       conclusion: "partial",
       label: "部分完成",
       primary_code: "user_finished",
       primary_reason: "已结束保存部分结果",
+    };
+  }
+  // 本轮已收尾（不是用户主动收尾的那一种）：同一份豁免、同一个口径，只是收尾的
+  // 主体不是用户，所以不改写错误字段，只把「中断」换成轮次说法。证据没全部落地
+  // 就仍然说「部分完成」，不把它谎报成完整成功（046 D-09：已收尾的轮不报中断）。
+  if (props.roundClosed) {
+    return {
+      ...raw,
+      conclusion: "partial",
+      label: "部分完成",
+      primary_reason: "本轮已结束，部分结果未能确认",
     };
   }
   return raw;
@@ -590,7 +609,9 @@ const timeLabel = computed(() => {
         <PauseCircle v-else-if="explicitStatus === 'paused' || explicitStatus === 'interrupted' || integrityConclusion === 'interrupted'" :size="17" aria-hidden="true" />
         <Octagon v-else-if="snapshot.status === 'cancelled' || snapshot.status === 'stopped'" :size="17" aria-hidden="true" />
         <!-- 排队 / 读不到状态：这一段没有证据可说，图标静止，不用转圈把它演成在跑。 -->
-        <LoaderCircle v-else-if="idleStageStatus" :size="17" aria-hidden="true" />
+        <!-- 状态已进终态同样静止：本轮收尾后按轮次口径改写的「部分完成」也是一张已停的卡，
+             转圈是把已收尾的轮演成还在跑（与「用时/已用」同一个进行时口径）。 -->
+        <LoaderCircle v-else-if="idleStageStatus || isTerminalStatus(snapshot.status)" :size="17" aria-hidden="true" />
         <LoaderCircle v-else class="spin" :size="17" aria-hidden="true" />
         {{ statusLabel }}
       </span>

@@ -893,7 +893,12 @@ describe("Discovery recovery paths", () => {
     vi.unstubAllGlobals();
   });
 
-  it("仍有活体轨道时 04 不接本轮结果，也不记「已进 04 页」", async () => {
+  // SPEC 046 v2 D-13（本条原先钉的是错的一半）：「分轨合流」的用户口径是**谁先出结果谁先可看**
+  // （FR-013 第二个平台原地加入的前提，也是用户 2026-09-30 亲自确认的设计）。真实轮实测过：
+  // 智联 15:25 已交付、BOSS 还在抓，04 却整段空、四桶全 0——接口每 2 秒 200 且 payload 里
+  // 就有已交付那一条的判定结果。本条按规格改成：先到平台的四桶照样给；「已进 04 页」这份
+  // 水位仍留到整轮收尾再记（它管的是刷新接回时旧结果不许覆盖 02/03，不是能不能看结果）。
+  it("仍有活体轨道时 04 照样给出先到平台的四个桶，但「已进 04 页」留到整轮收尾再记", async () => {
     const profileId = "profile-interrupted-round";
     seedInterruptedRoundScene(profileId);
     stubInterruptedRoundFetch("running");
@@ -908,8 +913,8 @@ describe("Discovery recovery paths", () => {
     await enterResultsStep(wrapper);
 
     expect(vm.resultsPageSeen).toBe(false);
-    expect(vm.resultLoaded).toBe(false);
-    expect(wrapper.findAll(".vtab-count").map((count) => count.text())).toEqual(["0", "0", "0", "0"]);
+    expect(vm.resultLoaded).toBe(true);
+    expect(wrapper.findAll(".vtab-count").map((count) => count.text())).toEqual(["11", "23", "377", "642"]);
     wrapper.unmount();
     vi.unstubAllGlobals();
   });

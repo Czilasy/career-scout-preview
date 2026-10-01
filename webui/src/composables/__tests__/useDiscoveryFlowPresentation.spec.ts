@@ -1,7 +1,7 @@
 import { nextTick, ref } from "vue";
 import { flushPromises } from "@vue/test-utils";
 import { vi } from "vitest";
-import { useDiscoveryFlowPresentation } from "../useDiscoveryFlowPresentation";
+import { trackHasDeliveredResult, useDiscoveryFlowPresentation } from "../useDiscoveryFlowPresentation";
 import type { FlowPresentationDeps, FlowPresentationTrack } from "../useDiscoveryFlowPresentation";
 import type { TaskSnapshot as ApiTaskSnapshot } from "../../types";
 import { useDiscoveryState } from "../useDiscoveryState";
@@ -781,6 +781,69 @@ it("hands the Track state only to the card of the stage the Track is currently a
   expect(theRowSays(presentation.screenItems.value[0])).toBe("已中断");
 });
 
+// 一轮已收尾之后，任务快照里那句 interrupted 就只是那段任务留下的残留：状态词表
+//（SPEC 046 v2）把「中断」定义成「无活体 worker 且本轮未结束」，本轮两条轨道都已 done
+// 时这一行根本不该说「已中断」——同一轮里另一条线说的是「完整成功…用时」，
+// 一个组件两种口径就是 D-09 报过两轮的症状落在轨道卡上。
+// 呈现层是这个状态的唯一合流点：它把这一行换成轨道自己的终态，并把「本轮已收尾」
+// 那一份事实交给卡（卡按既有豁免展示，不在此另写一套结论）。
+function setupRound(tracks: FlowPresentationTrack[], status: string, deps: FlowPresentationDeps) {
+  const flow = ref<{ id: string; status: string; tracks: FlowPresentationTrack[] } | null>({
+    id: "flow-1", status, tracks,
+  });
+  return useDiscoveryFlowPresentation({ flow, deps });
+}
+
+const interruptedRun = {
+  status: "interrupted",
+  progress: { overall_percent: 100, current: 31, total: 31 },
+  logs: [],
+  integrity: {
+    conclusion: "interrupted", label: "已中断",
+    primary_code: "interrupted", primary_reason: "任务因取消或停止而中断",
+    recommendation: "可继续或重新执行",
+  },
+} as unknown as ApiTaskSnapshot;
+
+it("settles a closed round's interrupted residue on the Track's own terminal status", async () => {
+  const presentation = setupRound(
+    [track({
+      id: "track-b", platform: "boss", status: "done", stage: "complete",
+      scrape_run_id: "scrape-b", screen_run_id: "screen-b",
+    })],
+    "done",
+    { fetchTaskState: async () => interruptedRun },
+  );
+
+  await presentation.refresh();
+
+  const screen = presentation.screenItems.value[0];
+  // 这一行跟随轨道自己的终态，不再是快照里那句 interrupted。
+  expect(screen?.snapshot.status).toBe("done");
+  // 轮次事实交给卡：非用户主动收尾的已收尾轮同样走既有豁免。
+  expect(screen?.roundClosed).toBe(true);
+});
+
+// 反向不越界：本轮还没收尾（外壳与轨道都在中断态）时，中断就是这一行的事实，
+// 一个字都不许改——否则真被打断的一轮会失去唯一的报警现场。
+it("keeps the interrupted wording while the round itself is still unfinished", async () => {
+  const presentation = setupRound(
+    [track({
+      id: "track-b", platform: "boss", status: "interrupted", stage: "complete",
+      scrape_run_id: "scrape-b", screen_run_id: "screen-b",
+    })],
+    "interrupted",
+    { fetchTaskState: async () => interruptedRun },
+  );
+
+  await presentation.refresh();
+
+  const screen = presentation.screenItems.value[0];
+  expect(screen?.snapshot.status).toBe("interrupted");
+  expect(screen?.roundClosed).toBe(false);
+  expect(theRowSays(screen)).toBe("已中断");
+});
+
 it("keeps the in-flight stage card carrying the Track state", async () => {
   const { presentation } = setup([
     track({ id: "track-z", platform: "zhilian", status: "running", stage: "scrape", scrape_run_id: "scrape-z" }),
@@ -1125,4 +1188,59 @@ it("counts a failed Track's persisted jobs as a delivered result for the same pr
   // 同一份投影外抛给页面层：说明文案读的就是这一份，不再自己数 result_run_id。
   expect(presentation.flowTracks.value.some((entry) => entry.platform === "boss"
     && Array.isArray((entry as Record<string, unknown>).jobs))).toBe(true);
+});
+
+// SPEC 046 v2 D-13：这句判定要按**真实载荷形状**钉住。后端 `store_flow_results.py` 会给
+// 还在抓的那条轨道一并挂上原始抓取岗位（它们还没判定），把"有岗位"当成"已交付"会让 04 的
+// 「本轮仍在进行」永远不出现——2026-10-01 正式入口真实轮实测：智联 15:25 已交付、BOSS 还在抓，
+// 那句话整段没渲染，04 顶着一句遗留空态念"暂无结果"。
+describe("trackHasDeliveredResult 按真实载荷形状判交付（SPEC 046 v2 D-13）", () => {
+  it("绑定结果快照的线算交付；还在抓的线手里那批未判定岗位不算", () => {
+    const delivered = {
+      id: "t-zhilian",
+      platform: "zhilian",
+      status: "done",
+      stage: "complete",
+      result_run_id: "c50be9bb-4474-442e-9f9f-c38c8ce90483",
+      jobs: [{ job_id: "z1", verdict: "match" }],
+    } as unknown as FlowPresentationTrack;
+    const catchingUp = {
+      id: "t-boss",
+      platform: "boss",
+      status: "running",
+      stage: "scrape",
+      result_run_id: null,
+      jobs: [{ job_id: "b1" }, { job_id: "b2" }],
+    } as unknown as FlowPresentationTrack;
+
+    expect(trackHasDeliveredResult(delivered)).toBe(true);
+    expect(trackHasDeliveredResult(catchingUp)).toBe(false);
+  });
+
+  it("停下来的线留下的可见岗位仍算交付（AI 失败但已持久化部分结果）", () => {
+    const failedWithPartial = {
+      id: "t-boss",
+      platform: "boss",
+      status: "failed",
+      stage: "ai",
+      result_run_id: null,
+      jobs: [{ job_id: "b1" }],
+    } as unknown as FlowPresentationTrack;
+    const interruptedWithPartial = { ...failedWithPartial, status: "interrupted" } as unknown as FlowPresentationTrack;
+
+    expect(trackHasDeliveredResult(failedWithPartial)).toBe(true);
+    expect(trackHasDeliveredResult(interruptedWithPartial)).toBe(true);
+  });
+
+  it("既没有结果快照也没有可见岗位的线不算交付", () => {
+    const empty = {
+      id: "t-boss",
+      platform: "boss",
+      status: "running",
+      stage: "scrape",
+      result_run_id: null,
+      jobs: [],
+    } as unknown as FlowPresentationTrack;
+    expect(trackHasDeliveredResult(empty)).toBe(false);
+  });
 });

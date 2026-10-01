@@ -193,14 +193,20 @@ function hasLiveTaskState(): boolean {
 
 
 async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean; preservePresentation?: boolean }) {
+  // Flow 拥有的轮次（「全部」分轨合流）：结果只从 `/api/flows/<id>/results` 那一条簇来，
+  // 它与本轮严格同域，按 FR-013「谁先交付谁先可见、原地加入」就要求活体轮次照样读。
+  // 下面三道闸问的都是**单平台遗留轮次**的现场（那份「最近结果」快照可能是别的任务写下的），
+  // 用在 Flow 轮上会把进行中的 04 永久挡成空——2026-10-01 真实轮实测：接口每 2 秒 200、
+  // payload 里有已交付平台的判定结果，界面四桶全 0、列表 0 项。
+  const flowOwnedRound = Boolean(readCurrentFlowId());
   // B068：刷新接回未完成轮次时，04 尚未出现，旧结果不能覆盖 02/03 的当前状态。
-  if (unfinishedWorkflowRestored.value && !resultsPageSeen.value) return;
+  if (!flowOwnedRound && unfinishedWorkflowRestored.value && !resultsPageSeen.value) return;
   // 暂停中的任务未结束，不得把暂停时保存的安全网快照当作结果加载，否则 resultLoaded
   // 被误置 true、04 结果页对用户开放造成「任务还在跑」误解。中断不在这里：状态词表说它
   // 没有活体 worker、本轮的唯一出路是开新一轮，而那一轮的既有结果必须能在 04 查到
   // （046 收口第一单：这道闸门此前还 OR 着 interruptedRunId，老存档冷启动就把 04 永久
   // 挡成 0/0/0/0；那份断点事实现由 hasUnfinishedRound 的 legacy 一支回答「要不要告警」）。
-  if (pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
+  if (!flowOwnedRound && (pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value)) return;
   const requestEpoch = workflowEpoch.value;
   const flowRequestEpoch = ++flowResultRequestEpoch;
   const requestedFlowId = readCurrentFlowId();
@@ -214,7 +220,12 @@ async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean; preserv
   if (!flowRequestStillCurrent(flowRequestEpoch, requestedFlowId, requestedSelection)) return;
   if (!fetched) return;
   const { newer } = fetched;
-  if (hasLiveTaskState() && newer.data.scrape_task_id && scrapeTaskId.value && newer.data.scrape_task_id !== scrapeTaskId.value) return;
+  // 单平台遗留轮次：活体任务换了抓取任务时，「最近结果」可能还是上一个任务的存档，不能拿它
+  // 覆盖现场。Flow 轮次里 payload 已经按 Flow 同域过滤，且两条轨道各有自己的抓取任务 id，
+  // 这条比较（拿其中一条去比单平台 scrapeTaskId）对并行轮没有意义。
+  if (!flowOwnedRound && hasLiveTaskState()
+    && newer.data.scrape_task_id && scrapeTaskId.value
+    && newer.data.scrape_task_id !== scrapeTaskId.value) return;
   const live = hasLiveTaskState();
   await applyFetchedLatestResult(fetched, opts, live);
 }

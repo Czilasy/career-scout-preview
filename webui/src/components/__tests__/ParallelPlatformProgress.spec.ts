@@ -306,6 +306,47 @@ describe("ParallelPlatformProgress", () => {
     wrapper.unmount();
   });
 
+  // 本轮已收尾（轨道 done、整轮结束）而任务快照仍写着 interrupted：状态词表里「中断」
+  // 说的是「本轮未结束」，这一行不该再说已中断；同一轮另一条线说的是「完整成功…用时」，
+  // 同一个组件两种口径就是用户报过两轮的同一类症状（046 D-09）落在轨道卡上。
+  // 豁免只有一份、落在共享卡里；轨道行负责把呈现层算好的轮次事实喂进去。
+  it("keeps a settled round's Track card off 已中断 and off the live clock wording", () => {
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: {
+        items: [{
+          ...item({
+            platform: "boss", kind: "screen", stage: "screen",
+            status: "done", runId: "screen-boss",
+          }),
+          roundClosed: true,
+          snapshot: {
+            status: "done", stage: "done",
+            progress: { overall_percent: 100, current: 31, total: 31 },
+            logs: [], active_elapsed_ms: 295_000,
+            total: 31, source_total: 651, scraped_count: 651, kept_count: 31, dropped_count: 620,
+            success_count: 31, unstarted_count: 0,
+            integrity: {
+              conclusion: "interrupted", label: "已中断",
+              primary_code: "interrupted", primary_reason: "任务因取消或停止而中断",
+              recommendation: "可继续或重新执行",
+            },
+          },
+        }],
+      },
+    });
+
+    const card = row(wrapper, "boss");
+    expect(card.text()).not.toContain("已中断");
+    expect(card.text()).not.toContain("任务因取消或停止而中断");
+    // 收尾的轮次仍然如实说证据没全落地，不谎报成完整成功。
+    expect(card.get(".task-status").text()).toContain("部分完成");
+    // 终态卡不继续用进行时口径：计时定格成「用时」，图标也不再转。
+    expect(card.get(".task-elapsed").text()).toContain("用时 4分55秒");
+    expect(card.find(".task-status .spin").exists()).toBe(false);
+    expect(card.find('[data-testid="pause-reason"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("shows a failed track through TaskProgress instead of a fake completed bar", () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {

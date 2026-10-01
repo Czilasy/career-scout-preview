@@ -51,6 +51,7 @@ function actionHandlers(item: FlowProgressItem): Record<string, () => void> {
         :kind="item.kind"
         :task-id="item.runId || undefined"
         :platform="item.platform"
+        :round-closed="item.roundClosed"
       >
         <!-- 动作条是这张卡的一部分：交给卡的落点，不再另起一行掉在卡外。 -->
         <ScreenRoundActions

@@ -87,6 +87,15 @@ function flowLocksNewRound(flow: ParallelFlowState | null | undefined): boolean 
 }
 
 /**
+ * 轮次谓词真正读的两份状态：流程外壳 + 各轨道。参数面收窄到这两份，是为了让轨道现场的
+ * 呈现层引用同一份判定，而不是把上面那份清单再抄一遍（状态所有权：清单只许这一处）。
+ */
+export interface ParallelRoundStatuses {
+  status?: string;
+  tracks: Array<{ status?: string }>;
+}
+
+/**
  * A Flow owns the round while either its envelope or one of its Tracks is
  * active.  The envelope check matters during the short queued/running window
  * in which the server has not materialized Track rows yet.
@@ -94,7 +103,7 @@ function flowLocksNewRound(flow: ParallelFlowState | null | undefined): boolean 
  * 这是「本轮还没结束」的谓词（锁范围、锁提交新任务），不是「现在有活体任务在跑」；
  * 判活一律用 flowHasLiveWorker。
  */
-export function hasUnfinishedParallelRound(flow: ParallelFlowState | null | undefined): boolean {
+export function hasUnfinishedParallelRound(flow: ParallelRoundStatuses | null | undefined): boolean {
   return Boolean(
     flow && (
       UNFINISHED_ROUND_FLOW_STATUSES.has(String(flow.status || ""))
