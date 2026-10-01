@@ -203,12 +203,88 @@ describe("B096 V2 unified filter mapping", () => {
     });
   });
 
+  it("follows the frozen salary contract for every unified salary option", () => {
+    const salaryCases: Array<[string, string[], string[]]> = [
+      ["5K 以下", ["1", "2"], ["401", "402"]],
+      ["5K-10K", ["3"], ["402", "403", "404"]],
+      ["10K-20K", ["4"], ["405", "406"]],
+      ["20K-50K", ["406"], ["406", "407", "408"]],
+      ["50K 以上", ["807"], ["409"]],
+    ];
+    for (const [label, bossCodes, zhilianCodes] of salaryCases) {
+      const unified = {
+        salary: [label], experience: [], degree: [], industry: [], scale: [], recruiter_activity: [],
+      };
+      expect(resolveMappedValues("boss", unified, schemas).salary, label).toEqual(bossCodes);
+      expect(resolveMappedValues("zhilian", unified, schemas).salary, label).toEqual(zhilianCodes);
+    }
+  });
+
+  it("never stacks a narrower tier when resume semantics state the flexible experience tier", () => {
+    // 「经验不限」是岗位自身属性档；反向投影不得因为它含在「1年以下」的映射里就写出窄档。
+    const projected = projectResumeSemantic({ experience: ["经验不限"] }, schemas);
+    expect(projected.unifiedValues.experience).toEqual(["经验不限"]);
+    expect(projected.platformValues.boss.experience).toEqual(["103"]);
+    expect(projected.platformValues.zhilian.experience).toEqual(["103"]);
+  });
+
+  it("reverse-projects only a unique unified tier and writes nothing when it is ambiguous", () => {
+    const student = projectResumeSemantic({ experience: ["在校生"] }, schemas);
+    expect(student.unifiedValues.experience).toEqual(["1年以下"]);
+    // 「4K-6K」同时属于「5K 以下」与「5K-10K」的映射，反向投影不许猜。
+    const ambiguous = projectResumeSemantic({ salary: ["4K-6K"] }, schemas);
+    expect(ambiguous.unifiedValues.salary).toEqual([]);
+    expect(ambiguous.platformValues.boss.salary).toEqual([]);
+    expect(ambiguous.platformValues.zhilian.salary).toEqual([]);
+    // 平台字段级不限制标签不是任何统一档位，不得反推出具体档。
+    expect(projectResumeSemantic({ experience: ["全部"] }, schemas).unifiedValues.experience).toEqual([]);
+  });
+
+  it("keeps the unified sentinel exclusive against every tier on both platforms", () => {
+    const unified = {
+      salary: [], experience: ["不限", "1年以下", "1-3年"], degree: [], industry: [], scale: [], recruiter_activity: [],
+    };
+    expect(normalizeUnifiedValues(unified).experience).toEqual([]);
+    expect(resolveMappedValues("boss", unified, schemas).experience).toEqual([]);
+    const zhilian = resolveMappedValues("zhilian", unified, schemas);
+    expect(zhilian.experience).toEqual([]);
+    // 「经验不限」只是岗位属性档，映射结果不得写成智联的字段级不限制码。
+    expect(resolveMappedValues("zhilian", {
+      salary: [], experience: ["经验不限"], degree: [], industry: [], scale: [], recruiter_activity: [],
+    }, schemas).experience).toEqual(["103"]);
+  });
+
+  it("treats a platform field-level unrestricted code as no restriction in final values", () => {
+    const unified = {
+      salary: [], experience: [], degree: [], industry: [], scale: [], recruiter_activity: [],
+    };
+    const snapshot = buildConditionSnapshot(unified, {
+      boss: { experience: ["105"] },
+      zhilian: { experience: ["-99", "0103"], salary: ["-1", "6001,8000"], scale: ["-1", "3"] },
+    }, schemas);
+    // 字段级不限制码（智联经验「全部」=-99）命中即该字段不增加限制，不得再叠加具体档。
+    expect(snapshot.platformValues).toMatchObject({
+      boss: { experience: ["105"] },
+      zhilian: { experience: ["-99"], salary: ["-1", "6001,8000"], scale: ["-1"] },
+    });
+    expect(snapshot.overrides).toMatchObject({ zhilian: { experience: ["-99"] } });
+    // 「经验不限」（智联 -1 / BOSS 101）是普通档，不触发互斥。
+    const flexible = buildConditionSnapshot(unified, {
+      boss: { experience: ["101", "103"] },
+      zhilian: { experience: ["-1", "0001"] },
+    }, schemas);
+    expect(flexible.platformValues).toMatchObject({
+      boss: { experience: ["101", "103"] },
+      zhilian: { experience: ["-1", "0001"] },
+    });
+  });
+
   it("keeps exclusive fields and projects resume semantic suggestions", () => {
     const projected = projectResumeSemantic({
       salary: ["5K-10K"], experience: ["1-3年"], degree: [], industry: [], scale: [], recruiter_activity: [],
     }, schemas);
     expect(projected.platformValues.boss.salary).toEqual(["3"]);
-    expect(projected.platformValues.zhilian.salary).toEqual(["403", "404"]);
+    expect(projected.platformValues.zhilian.salary).toEqual(["402", "403", "404"]);
     const snapshot = buildConditionSnapshot(
       projected.unifiedValues,
       {

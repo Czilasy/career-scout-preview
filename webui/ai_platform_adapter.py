@@ -220,9 +220,13 @@ class ZhilianAiAdapter(PlatformAiAdapter):
     key = "zhilian"
     filter_fields = ("experience", "degree", "scale", "industry", "company_nature")
 
+    #: 字段级不限制码：命中即该字段不增加限制（``ai_filters`` 会剔除后放行）。
+    #: 智联经验只有 ``-99``「全部」是字段级不限制；``-1``「经验不限」是岗位自身
+    #: 属性档，必须留在硬筛相交集合里，否则标注「经验不限」的岗位会被窄档刷掉。
+    #: 码表出处 ``webui/platforms_zhilian.py`` 的 ``_ZHILIAN_FIELD_OPTIONS``。
     _UNRESTRICTED_CODES = {
         "salary": frozenset({"0000,9999999"}),
-        "experience": frozenset({"-99", "-1"}),
+        "experience": frozenset({"-99"}),
         "degree": frozenset({"-1"}),
         "industry": frozenset({"-1"}),
         "scale": frozenset({"-1"}),

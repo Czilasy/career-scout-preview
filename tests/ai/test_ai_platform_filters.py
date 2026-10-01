@@ -151,6 +151,124 @@ class ZhilianFilterMapperTests(unittest.TestCase):
 
         self.assertIs(filters_codes, adapter_codes)
 
+    def test_zhilian_experience_field_level_unrestricted_code_is_only_all(self):
+        """智联经验只有 ``-99``（全部）是字段级不限制；``-1``（经验不限）是岗位属性档。"""
+        from webui.ai_platform_adapter import resolve_platform_ai_adapter
+
+        adapter = resolve_platform_ai_adapter("zhilian")
+        self.assertTrue(adapter.is_unrestricted("experience", "-99"))
+        self.assertFalse(adapter.is_unrestricted("experience", "-1"))
+        self.assertTrue(adapter.is_unrestricted("degree", "-1"))
+        self.assertTrue(adapter.is_unrestricted("salary", "0000,9999999"))
+        self.assertFalse(adapter.is_unrestricted("salary", "-1"))
+
+    def test_zhilian_flexible_experience_job_survives_the_under_one_year_mapping(self):
+        """契约「1年以下」= 经验不限 + 1年以下，标注「经验不限」的岗位必须放行。"""
+        from webui.ai_filters import _job_criteria_hard_mismatch
+
+        job = {**self._job(), "experience": "经验不限"}
+        field, reason = _job_criteria_hard_mismatch(
+            job, {"experience": ["-1", "0001"]}, platform="zhilian",
+        )
+
+        self.assertIsNone(field, reason)
+
+    def test_zhilian_flexible_experience_code_still_hard_filters_other_tiers(self):
+        """``-1`` 回归普通档后，只选「经验不限」时 3-5年 岗位必须被刷掉。"""
+        from webui.ai_filters import _job_criteria_hard_mismatch
+
+        field, reason = _job_criteria_hard_mismatch(
+            self._job(), {"experience": ["-1"]}, platform="zhilian",
+        )
+
+        self.assertEqual(field, "experience")
+        self.assertIn("不在筛选范围", reason)
+
+    def test_zhilian_experience_all_code_adds_no_hard_filter(self):
+        """字段级不限制码单独出现即该字段不增加限制。"""
+        from webui.ai_filters import _job_criteria_hard_mismatch
+
+        field, reason = _job_criteria_hard_mismatch(
+            self._job(), {"experience": ["-99"]}, platform="zhilian",
+        )
+
+        self.assertIsNone(field, reason)
+
+
+class BossExperienceFieldAdapterTests(unittest.TestCase):
+    """BOSS 经验字段适配：码表见 ``scripts/boss/constants.py`` 的 ``EXPERIENCE_MAP``。"""
+
+    @staticmethod
+    def _job(*, experience: str) -> dict:
+        return {
+            "platform": "boss",
+            "job_id": "boss-j1",
+            "title": "后端工程师",
+            "salary": "15-20K",
+            "location": "上海",
+            "job_labels": experience,
+        }
+
+    def test_boss_unrestricted_codes_match_the_platform_code_table(self):
+        """逐码核对 BOSS 适配：只有码表里名为「不限」的码是字段级不限制。
+
+        码表出处 ``scripts/boss/constants.py``（SALARY_MAP/EXPERIENCE_MAP/
+        DEGREE_MAP 各有一个「不限」=0；INDUSTRY_MAP/SCALE_MAP/STAGE_MAP 没有）。
+        「经验不限」=101 是岗位自身属性档，必须按普通档参与硬筛。
+        """
+        from scripts import boss_cdp_raw as boss
+        from webui.ai_platform_adapter import resolve_platform_ai_adapter
+
+        adapter = resolve_platform_ai_adapter("boss")
+        code_maps = {
+            "salary": boss.SALARY_MAP, "experience": boss.EXPERIENCE_MAP,
+            "degree": boss.DEGREE_MAP, "industry": boss.INDUSTRY_MAP,
+            "scale": boss.SCALE_MAP, "stage": boss.STAGE_MAP,
+        }
+        for field, mapping in code_maps.items():
+            for label, code in mapping.items():
+                with self.subTest(field=field, label=label):
+                    self.assertEqual(
+                        adapter.is_unrestricted(field, code), label == "不限",
+                    )
+        self.assertEqual(boss.EXPERIENCE_MAP["经验不限"], "101")
+        self.assertFalse(adapter.is_unrestricted("experience", "101"))
+
+    def test_boss_experience_without_selection_adds_no_hard_filter(self):
+        """用户未挑经验 ⇒ BOSS 经验字段不产生任何硬筛。"""
+        from webui.ai_filters import _job_criteria_hard_mismatch
+
+        for criteria in ({"experience": []}, {}, {"experience": ["0"]}):
+            with self.subTest(criteria=criteria):
+                field, reason = _job_criteria_hard_mismatch(
+                    self._job(experience="3-5年"), criteria, platform="boss",
+                )
+                self.assertIsNone(field, reason)
+
+    def test_boss_under_one_year_mapping_keeps_flexible_and_student_jobs(self):
+        """契约「1年以下」= 在校生 + 应届生 + 经验不限 + 1年以内，四类岗位全部放行。"""
+        from webui.ai_filters import _job_criteria_hard_mismatch
+
+        selected = ["108", "102", "101", "103"]
+        for experience in ("在校生", "应届生", "经验不限", "1年以内", "在校/应届"):
+            with self.subTest(experience=experience):
+                field, reason = _job_criteria_hard_mismatch(
+                    self._job(experience=experience),
+                    {"experience": selected},
+                    platform="boss",
+                )
+                self.assertIsNone(field, reason)
+
+    def test_boss_flexible_experience_code_still_hard_filters_other_tiers(self):
+        from webui.ai_filters import _job_criteria_hard_mismatch
+
+        field, reason = _job_criteria_hard_mismatch(
+            self._job(experience="3-5年"), {"experience": ["101"]}, platform="boss",
+        )
+
+        self.assertEqual(field, "experience")
+        self.assertIn("经验", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

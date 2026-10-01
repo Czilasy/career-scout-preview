@@ -102,7 +102,7 @@ const MAPPING: MappingTable = {
       "20K-50K": ["20-50K"], "50K 以上": ["50K以上"],
     },
     zhilian: {
-      "5K 以下": ["4K以下", "4K-6K"], "5K-10K": ["6K-8K", "8K-10K"],
+      "5K 以下": ["4K以下", "4K-6K"], "5K-10K": ["4K-6K", "6K-8K", "8K-10K"],
       "10K-20K": ["10K-15K", "15K-25K"], "20K-50K": ["15K-25K", "25K-35K", "35K-50K"],
       "50K 以上": ["50K以上"],
     },
@@ -165,6 +165,34 @@ function normalizeList(value: unknown): string[] {
     .map((item) => item.trim()))];
 }
 
+/**
+ * 各平台每个共同字段的「字段级不限制」码，取自两平台已冻结的筛选 schema
+ * （``webui/platforms_boss.py`` 复用 ``scripts/boss/constants.py`` 码表、
+ * ``webui/platforms_zhilian.py`` 的 ``_ZHILIAN_FIELD_OPTIONS``）。
+ * 命中该码即表示该字段不增加限制，最终取值只保留这一个码、不再叠加具体档；
+ * 岗位自身属性档（智联经验 ``-1``「经验不限」、BOSS 经验 ``101``「经验不限」）
+ * 不在表内，按普通档参与硬筛。
+ */
+const FIELD_UNRESTRICTED_CODES: Record<Platform, Partial<Record<UnifiedFilterField, readonly string[]>>> = {
+  boss: { salary: ["0"], experience: ["0"], degree: ["0"] },
+  zhilian: {
+    salary: ["0000,9999999"], experience: ["-99"], degree: ["-1"],
+    industry: ["-1"], scale: ["-1"],
+  },
+};
+
+function dropTiersBelowUnrestricted(
+  platform: Platform,
+  field: UnifiedFilterField,
+  values: string[],
+): string[] {
+  if (values.length < 2) return values;
+  const unrestricted = FIELD_UNRESTRICTED_CODES[platform][field];
+  if (!unrestricted || !unrestricted.length) return values;
+  const sentinel = values.find((value) => unrestricted.includes(value));
+  return sentinel === undefined ? values : [sentinel];
+}
+
 export function normalizeUnifiedValues(raw: Partial<UnifiedFilterValues> | null | undefined): UnifiedFilterValues {
   const next = {} as UnifiedFilterValues;
   for (const field of UNIFIED_FILTER_FIELDS) next[field] = normalizeList(raw?.[field]);
@@ -186,6 +214,10 @@ export function normalizePlatformValues(
     // mapper owns. Preserve every array-valued field so platform-only schema
     // additions survive a later unified edit and a V2 snapshot round-trip.
     if (Array.isArray(value)) next[key] = normalizeList(value);
+  }
+  for (const [key, values] of Object.entries(next)) {
+    if (!MAPPED_FIELDS.has(key as UnifiedFilterField)) continue;
+    next[key] = dropTiersBelowUnrestricted(platform, key as UnifiedFilterField, values);
   }
   return next;
 }
@@ -344,14 +376,18 @@ function projectSemanticToUnified(
       const canonicalLabels = new Set(UNIFIED_FILTER_SCHEMA[field].options.map(([label]) => label));
       for (const value of values) {
         if (directField === field && canonicalLabels.has(value)) append(field, value);
+        const inferred = new Set<string>();
         for (const platform of ["boss", "zhilian"] as const) {
           const platformOptions = optionValues(schemas[platform], field);
           if (!platformOptions.some((option) => option.label === value)) continue;
           const mapping = MAPPING[field][platform] || {};
           for (const [canonical, mappedLabels] of Object.entries(mapping)) {
-            if (mappedLabels.includes(value)) append(field, canonical);
+            if (mappedLabels.includes(value)) inferred.add(canonical);
           }
         }
+        // 反向投影只认唯一命中：一个平台标签同时落在多个统一档上时一个都不写，
+        // 让该字段保持不增加限制，也不把窄档塞进冻结快照。
+        if (inferred.size === 1) append(field, [...inferred][0]);
       }
     }
   }
