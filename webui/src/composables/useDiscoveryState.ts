@@ -1288,6 +1288,17 @@ const resultsBootstrapPending = ref(false);
 // 纯函数、模块级唯一实现，顶栏胶囊与展开面板的通知行标题共读这一份，不各写一套。
 // ---------------------------------------------------------------------------
 
+// 树干两个谓词（hasLiveTaskState / hasUnfinishedRound）在本域的输入面：把已经存在的
+// 那几份事实原样交给那一份判定，胶囊派生不在此另写口径，也不新增任何状态位。
+const trunkRoundFacts = {
+  flowActive,
+  flowLiveWorker,
+  pausedRunId,
+  scrapeSnapshot,
+  screenSnapshot,
+  recrawlSnapshot,
+};
+
 // ---------------------------------------------------------------------------
 // 顶栏本轮状态胶囊数据（纯派生，不发请求）：
 // 四态按 spec FR-013 优先级判定；平台优先取任务自身平台（恢复任务快照携带），
@@ -1371,16 +1382,28 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
     // 登记的是可恢复的暂停断点就说已暂停，否则就是被打断的断点，说已中断。
     const pausedFact = pausedFamilyScreenSide || pausedFamilyScrape
       || (pausedRunId.value ? "paused" : "interrupted");
-    return {
-      platform, phase: "scraping" as const, judged: 0, scope: platform,
-      ...capsuleNavigationMeta(stuckAt),
-      capsule: {
-        state: "attention", platform,
-        // pausedFact 一起上抛：展开面板的通知行标题读它，与岛上同一份性质。
-        attention: { kind: "paused", pausedFact, message: pausedFamilyIslandMessage(pausedFact) },
-      },
-      integrity: snapshots.find((s) => s && s.integrity)?.integrity,
-    };
+    // SPEC 046 D-09（状态词表 + 状态所有权）：任务快照的 interrupted 是「那段任务没跑完」
+    // 的任务事实，不是「这一轮还没结束」的轮次事实——后者只由轮次那一份事实回答，即树干
+    // 唯一谓词 hasUnfinishedRound（读协调器从 flows + flow_tracks 派生投影来的 flowActive，
+    // 加活体与暂停断点）。冷启动实测：最新轮两条轨道已 done，库里一条 2026-09-29 的旧 run
+    // 仍是 interrupted，岛却对着已收尾的轮次喊「任务已中断，请开始新一轮」。轮次已收尾时
+    // 这条残留只留在快照里供查看错误，不再上岛报警；可恢复的暂停（paused 一族）不在否定内。
+    const closedRoundInterruptedResidue = pausedFact === "interrupted"
+      && !pausedRunId.value
+      && !interruptedRunId.value
+      && !hasUnfinishedRound(trunkRoundFacts);
+    if (!closedRoundInterruptedResidue) {
+      return {
+        platform, phase: "scraping" as const, judged: 0, scope: platform,
+        ...capsuleNavigationMeta(stuckAt),
+        capsule: {
+          state: "attention", platform,
+          // pausedFact 一起上抛：展开面板的通知行标题读它，与岛上同一份性质。
+          attention: { kind: "paused", pausedFact, message: pausedFamilyIslandMessage(pausedFact) },
+        },
+        integrity: snapshots.find((s) => s && s.integrity)?.integrity,
+      };
+    }
   }
 
   // ---- running：抓取 / 筛选 / 补抓进行中 ----
@@ -1705,6 +1728,22 @@ return {
 export type DiscoveryState = ReturnType<typeof useDiscoveryState>;
 
 /**
+ * 状态词表的输入面（SPEC 046「状态所有权」）：判活（A）与本轮未结束（B）这两个
+ * 谓词只读这几份既有事实——Flow 投影（flowActive / flowLiveWorker 由协调器从
+ * flows + flow_tracks 读时派生后投影进来）、任务快照状态与暂停断点。
+ * 把它命名出来不是为了新增第四份状态：任何调用方传齐这几份即可复用同一份判定，
+ * DiscoveryState 结构上就满足它。
+ */
+export interface TrunkRoundFacts {
+  flowActive: { value: boolean };
+  flowLiveWorker: { value: boolean | null };
+  pausedRunId: { value: string };
+  scrapeSnapshot: { value: { status?: string | null } | null };
+  screenSnapshot: { value: { status?: string | null } | null };
+  recrawlSnapshot: { value: { status?: string | null } | null };
+}
+
+/**
  * 判活（问题 A「此刻有没有活体 worker 在跑」）：决定迟到响应能不能覆盖现场、
  * 04 能不能认「已进结果页」并把本轮结果接进来。
  * 词表 A 侧唯一定义：只有「排队中 / 运行中」算活体——Flow 侧只认活体轨道投影，
@@ -1712,7 +1751,7 @@ export type DiscoveryState = ReturnType<typeof useDiscoveryState>;
  * 「这一轮还没结束」，一律用 hasUnfinishedRound 回答；把它们并回判活，
  * 中断/暂停轮就会被当成「有人在干活」，04 的结果接回与「已看过」置位永开关死。
  */
-export function hasLiveTaskState(state: DiscoveryState): boolean {
+export function hasLiveTaskState(state: TrunkRoundFacts): boolean {
   // 页面还没投影活体事实（flowLiveWorker === null：单平台传统链路、未经协调器投影的
   // 调用方与单元现场）时退回活动线——那不是新语义，是没有活体事实可依据时唯一的
   // 保守口径：宁可当作有活，也不能凭空判成「本轮已结束」。
@@ -1738,7 +1777,7 @@ export function hasLiveTaskState(state: DiscoveryState): boolean {
  * 否则上传入口守卫会把用户带进「开新一轮」，把刚中断的这一轮冲掉（SPEC 046 第五轮修过的两个缺陷）。
  * 词表 B 侧成员（paused）在 A 侧被剔除后由这里自持，两份谓词不得再互相借道。
  */
-export function hasUnfinishedRound(state: DiscoveryState): boolean {
+export function hasUnfinishedRound(state: TrunkRoundFacts): boolean {
   if (state.flowActive.value || hasLiveTaskState(state)) return true;
   if (state.pausedRunId.value) return true;
   return [

@@ -722,6 +722,51 @@ describe("useDiscoveryTasks.pollTask 错误态不阻塞新任务", () => {
     },
   );
 
+  // SPEC 046 D-09：轮次事实只由 Flow 投影回答。轮次已收尾时，轮询到一个残留中断的
+  // 旧任务只保留错误现场，不再把它说成"上一轮被中断、请开始新一轮"。
+  it("轮次已收尾 + 轮询到 AI 筛选 interrupted → 保留错误快照但不给中断文案", async () => {
+    const state = makeState({
+      screenTaskId: ref("screen-old"),
+      screenBusy: ref(true),
+      flowActive: ref(false),
+      flowLiveWorker: ref(false),
+    });
+    apiRequestMock.mockResolvedValue({
+      status: "interrupted",
+      progress: { message: "上次 AI 筛选因服务重启被中断" },
+      logs: [],
+      error: "",
+    });
+    const tasks = useDiscoveryTasks(state, makeDeps());
+
+    await tasks.pollTask("screen-old", "screen");
+
+    expect(state.screenSnapshot.value?.status).toBe("interrupted");
+    expect(state.restoredTaskHint.value).toBe("");
+  });
+
+  it("本轮未收尾（Flow 投影 interrupted）+ 轮询到 AI 筛选 interrupted → 仍给中断提示", async () => {
+    const state = makeState({
+      screenTaskId: ref("screen-live"),
+      screenBusy: ref(true),
+      flowActive: ref(true),
+      flowLiveWorker: ref(false),
+    });
+    apiRequestMock.mockResolvedValue({
+      status: "interrupted",
+      progress: { message: "上次 AI 筛选因服务重启被中断" },
+      logs: [],
+      error: "",
+    });
+    const tasks = useDiscoveryTasks(state, makeDeps());
+
+    await tasks.pollTask("screen-live", "screen");
+
+    expect(state.restoredTaskHint.value).toContain("中断");
+    // 状态词表分层：中断的唯一出路是开新一轮，不许写成"处理后继续"。
+    expect(state.restoredTaskHint.value).not.toContain("继续");
+  });
+
   it("新一轮开始后，旧重抓轮询的完成响应不再回写", async () => {
     const state = makeState({
       recrawlBusy: ref(true),

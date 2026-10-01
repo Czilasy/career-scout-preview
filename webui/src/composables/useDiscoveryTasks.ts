@@ -88,6 +88,11 @@ export function useDiscoveryTasks(state: DiscoveryState, deps: TasksNeeds) {
 
 async function pollTask(taskId: string, kind: "scrape" | "screen") {
   const roundEpoch = workflowEpoch.value;
+  // SPEC 046 D-09：轮询开口时先取一次 B（树干唯一谓词 hasUnfinishedRound，读 Flow 投影
+  // 派生的 flowActive + 当前活体/暂停事实）。之后任务报 interrupted 有两种截然不同的现场：
+  // 本轮真被打断（开口时还没收尾，Flow 也会把轨道归一成 interrupted）与只是查到一条
+  // 已收尾轮次的残留。前者照旧提示，后者不得再冒充「上一轮被中断，请开始新一轮」。
+  const roundOpenWhenPollStarted = hasUnfinishedRound(state);
   try {
     const data = await apiRequest<TaskSnapshot>(taskStateUrl(taskId));
     if (roundEpoch !== workflowEpoch.value) return;
@@ -311,13 +316,17 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
     if (data.status === "interrupted") {
       // 服务重启打断：工作线程已死，不能继续轮询；停止 busy 并回到可操作的中断态。
       pollRetryCount.value = 0;
+      // 轮次事实仍然成立才说「被中断」：开口时本轮没收尾，或现在仍没收尾。
+      const roundStillOpen = roundOpenWhenPollStarted || hasUnfinishedRound(state);
       if (kind === "scrape") {
         scrapeBusy.value = false;
         clearScrapeRecoveryMarkers();
         scrapeTaskId.value = taskId;
         analysisReady.value = true;
         navigateStep("search", { source: "system" });
-        restoredTaskHint.value = "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取";
+        restoredTaskHint.value = roundStillOpen
+          ? "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取"
+          : "";
       } else {
         // 服务中断属于错误终态：保留快照和查看入口，但不把它登记为
         // 可恢复占用，避免切平台/新任务被旧 AI 任务卡住。
@@ -328,7 +337,9 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
         pausingScreen.value = false;
         analysisReady.value = true;
         deps.enterScreenStep();
-        restoredTaskHint.value = "上次 AI 筛选因服务重启被中断；重新开始 AI 筛选会接着上次进度，不重复消耗";
+        restoredTaskHint.value = roundStillOpen
+          ? "上次 AI 筛选因服务重启被中断；重新开始 AI 筛选会接着上次进度，不重复消耗"
+          : "";
       }
       data.progress = { ...(data.progress || {}), message: "任务因服务重启被中断，已保存进度" };
       if (kind === "scrape") scrapeSnapshot.value = data;

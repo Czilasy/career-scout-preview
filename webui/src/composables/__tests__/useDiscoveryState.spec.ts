@@ -238,6 +238,9 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
   // 失败，界面上也不存在这个入口；中断的唯一出路是开新一轮。文案不得再承诺「继续」。
   it("筛选被服务重启打断 → 岛上说已中断，不再谎报已暂停", () => {
     const state = useDiscoveryState({ profileId: "test" }, () => {});
+    // 真实的服务重启形态：协调器把 Flow 投影（flows + flow_tracks 里 interrupted 的轨道）
+    // 投成 flowActive——中断告警的依据是轮次事实，任务快照只负责把错误留在页面上。
+    state.flowActive.value = true;
     state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
     state.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
     const payload = state.roundStatusPayload.value;
@@ -267,6 +270,7 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
 
   it("只剩中断断点（interruptedRunId）→ 岛同样说已中断", () => {
     const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.flowActive.value = true;
     state.interruptedRunId.value = "interrupted-run-1";
     const payload = state.roundStatusPayload.value;
     const capsule = payload?.capsule;
@@ -281,6 +285,7 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
 
   it("抓取被服务重启打断 → 岛说已中断且落点仍是抓取页", () => {
     const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.flowActive.value = true;
     state.scrapeSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
     const payload = state.roundStatusPayload.value;
     const capsule = payload?.capsule;
@@ -298,6 +303,7 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
   // 一并交给下游，展示端不再判第二次，否则同一行的标题与详情两个说法。
   it("暂停族把性质一并交给下游：快照中断与中断断点都给 interrupted", () => {
     const interruptedScreen = useDiscoveryState({ profileId: "test" }, () => {});
+    interruptedScreen.flowActive.value = true;
     interruptedScreen.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
     interruptedScreen.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
     const screenCapsule = interruptedScreen.roundStatusPayload.value?.capsule;
@@ -307,6 +313,7 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
     }
 
     const interruptedRun = useDiscoveryState({ profileId: "test" }, () => {});
+    interruptedRun.flowActive.value = true;
     interruptedRun.interruptedRunId.value = "interrupted-run-1";
     const runCapsule = interruptedRun.roundStatusPayload.value?.capsule;
     expect(runCapsule?.state).toBe("attention");
@@ -326,6 +333,70 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
       expect(capsule.attention.pausedFact).toBe("paused");
     }
     expect(payload?.stuckAt).toBe("scrape");
+  });
+
+  // SPEC 046 D-09（状态词表 + 状态所有权）：冷启动走查实测——最新一轮的两条轨道都是
+  // done/complete，screening_runs 里一条 2026-09-29 的 zhilian run 却仍是 interrupted，
+  // 恢复分支把它摆回页面，灵动岛于是对着一张已收尾的轮次喊「任务已中断，请开始新一轮」。
+  // 任务快照的 interrupted 说的是「那段任务没跑完」，不是「这一轮还没结束」；后者只由
+  // Flow 投影回答（树干唯一谓词 hasUnfinishedRound，读协调器投影的 flowActive 与活体/暂停事实）。
+  describe("已收尾轮次残留的中断快照不再冒充轮次告警（046 D-09）", () => {
+    // 现场①：轮次已终态（Flow 投影收尾、无活体、无暂停断点）+ 残留 interrupted 快照。
+    it("轮次已收尾 + 残留中断快照 → 岛不再产出中断告警，错误现场仍在快照里", () => {
+      const state = useDiscoveryState({ profileId: "test" }, () => {});
+      state.flowActive.value = false;
+      state.flowLiveWorker.value = false;
+      state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+      state.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [], error: "服务重启" };
+      const payload = state.roundStatusPayload.value;
+      expect(payload?.capsule?.state).not.toBe("attention");
+      // 现场不得被抹掉：快照与任务身份仍可查错误，只是不再冒充「上一轮被中断」。
+      expect(state.screenSnapshot.value?.status).toBe("interrupted");
+    });
+
+    it("轮次已收尾 + 抓取侧残留中断快照 → 同样不上岛报警", () => {
+      const state = useDiscoveryState({ profileId: "test" }, () => {});
+      state.flowActive.value = false;
+      state.flowLiveWorker.value = false;
+      state.scrapeSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
+      expect(state.roundStatusPayload.value?.capsule?.state).not.toBe("attention");
+    });
+
+    // 现场②：轮次确实被服务重启打断（Flow 轨道 interrupted 投影成 flowActive）。
+    it("轮次被服务重启打断（Flow 投影未收尾）→ 岛照旧说「已中断，请开始新一轮」", () => {
+      const state = useDiscoveryState({ profileId: "test" }, () => {});
+      state.flowActive.value = true;
+      state.flowLiveWorker.value = false;
+      state.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
+      const payload = state.roundStatusPayload.value;
+      const capsule = payload?.capsule;
+      expect(capsule?.state).toBe("attention");
+      if (capsule?.state === "attention") {
+        expect(capsule.attention.kind).toBe("paused");
+        expect(capsule.attention.pausedFact).toBe("interrupted");
+        expect(capsule.attention.message).toContain("已中断");
+        expect(capsule.attention.message).toContain("开始新一轮");
+      }
+      expect(payload?.stuckAt).toBe("screen");
+    });
+
+    // 现场③：用户主动暂停（paused）——文案归 paused 一族，门控不得把它一起吞掉，
+    // 也不许把「处理后继续」写成「开始新一轮」。
+    it("用户主动暂停 → 告警仍是「已暂停，请处理后继续」，不与中断文案混用", () => {
+      const state = useDiscoveryState({ profileId: "test" }, () => {});
+      state.flowActive.value = true;
+      state.flowLiveWorker.value = false;
+      state.screenSnapshot.value = { status: "paused", progress: {}, logs: [] };
+      const capsule = state.roundStatusPayload.value?.capsule;
+      expect(capsule?.state).toBe("attention");
+      if (capsule?.state === "attention") {
+        expect(capsule.attention.pausedFact).toBe("paused");
+        expect(capsule.attention.message).toContain("已暂停");
+        expect(capsule.attention.message).toContain("处理后继续");
+        expect(capsule.attention.message).not.toContain("中断");
+        expect(capsule.attention.message).not.toContain("开始新一轮");
+      }
+    });
   });
 
   it("失败 → attention error", () => {

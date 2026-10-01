@@ -401,6 +401,8 @@ describe("useIslandNotices — 暂停族行标题与事实一致", () => {
 
   it("现场回归：胶囊判定为服务重启打断时，行标题跟着说已中断", () => {
     const state = useDiscoveryState({ profileId: "notice-paused-family" }, () => {});
+    // 真实的服务重启现场：Flow 投影把这一轮报成未收尾（协调器投成 flowActive）。
+    state.flowActive.value = true;
     state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
     const status = ref<CapsuleStatusPayload | null>(
       makeStatus({ state: "running", platform: "boss", progress: { phase: "screening", done: 5 } }),
@@ -418,6 +420,27 @@ describe("useIslandNotices — 暂停族行标题与事实一致", () => {
     expect(row.title).not.toContain("已暂停");
     expect(row.detail).toContain("已中断");
     expect(row.detail).not.toContain("已暂停");
+  });
+
+  // SPEC 046 D-09：已收尾轮次残留的中断快照不是轮次事实，不进通知池、不占展示位——
+  // 岛按本轮真实收尾状态说话（池里的行仍按 D-06 逐行撤销，这里不涉及整池清空）。
+  it("轮次已收尾的残留中断快照不产告警行", () => {
+    const state = useDiscoveryState({ profileId: "notice-closed-round" }, () => {});
+    state.flowActive.value = false;
+    state.flowLiveWorker.value = false;
+    const status = ref<CapsuleStatusPayload | null>(
+      makeStatus({ state: "running", platform: "boss", progress: { phase: "screening", done: 5 } }),
+    );
+    const api = createIslandNotices(status);
+
+    state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
+    const payload = state.roundStatusPayload.value;
+    expect(payload?.capsule.state).not.toBe("attention");
+    status.value = payload;
+
+    expect(api.notices.value.some((row) => row.title.includes("已中断"))).toBe(false);
+    expect(api.notices.value.some((row) => row.kind === "paused")).toBe(false);
   });
 
   it("现场回归：用户主动暂停的轮次，行标题仍说已暂停", () => {

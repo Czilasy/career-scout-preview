@@ -238,8 +238,10 @@ describe("useDiscoveryExecution.restoreRunningTask（026 B078）", () => {
     },
   );
 
+  // 现场②：轮次确实被服务重启打断——协调器把未收尾的 Flow 投影投成 flowActive，
+  // 恢复分支才有资格说「被中断、可开始新一轮」（状态词表：interrupted 属"本轮未结束"）。
   it.each(["failed", "interrupted"] as const)(
-    "未进 04 页 + AI 筛选 %s → 恢复提示指向「开始新一轮」这条真出路（D-06）",
+    "未进 04 页 + 本轮未收尾 + AI 筛选 %s → 恢复提示指向「开始新一轮」这条真出路（D-06）",
     async (status) => {
       apiRequestMock.mockResolvedValue({
         ...interruptedScreenResponse,
@@ -247,7 +249,11 @@ describe("useDiscoveryExecution.restoreRunningTask（026 B078）", () => {
         status,
         error: status === "failed" ? "AI 服务失败" : "服务重启导致 AI 筛选中断",
       });
-      const state = makeState({ resultsPageSeen: ref(false) });
+      const state = makeState({
+        resultsPageSeen: ref(false),
+        flowActive: ref(true),
+        flowLiveWorker: ref(false),
+      });
       const deps = makeDeps();
       const execution = useDiscoveryExecution(state, deps);
 
@@ -260,6 +266,87 @@ describe("useDiscoveryExecution.restoreRunningTask（026 B078）", () => {
       expect(hint).not.toContain("可重新开始筛选");
     },
   );
+
+  // 现场①（046 D-09，冷启动走查实测）：最新一轮两条轨道都 done/complete，库里却残留
+  // 一条 2026-09-29 的 interrupted 筛选 run；恢复分支不许替这张已收尾的轮次喊"被中断"。
+  it.each([
+    ["screen", { ...interruptedScreenResponse, task_id: "screen-closed", kind: "ai_screen", status: "interrupted" }],
+    ["scrape", { ...interruptedScreenResponse, task_id: "scrape-closed", kind: "scrape", status: "interrupted" }],
+    ["recrawl", { ...interruptedScreenResponse, task_id: "recrawl-closed", kind: "recrawl", status: "interrupted" }],
+  ] as const)(
+    "轮次已收尾 + %s 残留 interrupted → 保留错误现场但不给中断告警文案",
+    async (kind, response) => {
+      apiRequestMock.mockResolvedValue(response);
+      const state = makeState({
+        resultsPageSeen: ref(false),
+        flowActive: ref(false),
+        flowLiveWorker: ref(false),
+      });
+      const deps = makeDeps();
+      const execution = useDiscoveryExecution(state, deps);
+
+      await execution.restoreRunningTask();
+
+      // 不再冒充"上一轮被中断，请开始新一轮"。
+      expect(state.restoredTaskHint.value).toBe("");
+      // 但现场照旧保留：快照与任务身份仍可查错误，恢复完成标记与既有语义不变。
+      const snapshot = kind === "screen"
+        ? state.screenSnapshot.value
+        : kind === "scrape"
+          ? state.scrapeSnapshot.value
+          : state.recrawlSnapshot.value;
+      expect(snapshot?.status).toBe("interrupted");
+      expect(state.activeTaskRestored.value).toBe(true);
+      // 已收尾轮次的残留不占用新任务槽（既有行为，不能被本次改动带跑）。
+      expect(state.pausedRunId.value).toBe("");
+      expect(state.interruptedRunId.value).toBe("");
+      expect(state.screenBusy.value).toBe(false);
+    },
+  );
+
+  it("轮次已收尾 + 抓取残留 interrupted → 仍不阻塞切平台与新任务（占位 flags 清空）", async () => {
+    apiRequestMock.mockResolvedValue({
+      ...interruptedScreenResponse,
+      task_id: "scrape-closed-lock",
+      kind: "scrape",
+      status: "interrupted",
+    });
+    const state = makeState({
+      resultsPageSeen: ref(false),
+      flowActive: ref(false),
+      flowLiveWorker: ref(false),
+      pausedRunId: ref("stale-paused"),
+      interruptedRunId: ref("stale-interrupted"),
+    });
+    const execution = useDiscoveryExecution(state, makeDeps());
+
+    await execution.restoreRunningTask();
+
+    expect(state.pipelineBusy.value).toBe(false);
+    expect(state.scopeLocked.value).toBe(false);
+  });
+
+  // 现场③：用户主动暂停（paused）是"本轮未结束"里可继续的一族，文案必须与中断分层。
+  it("恢复 paused 任务 → 文案是「处理后点继续」，不写成中断口径", async () => {
+    apiRequestMock.mockResolvedValue({
+      ...interruptedScreenResponse,
+      task_id: "screen-paused-copy",
+      kind: "ai_screen",
+      status: "paused",
+      pause_info: { error_code: "user_paused", error_reason: "用户主动暂停" },
+    });
+    const state = makeState({ resultsPageSeen: ref(false) });
+    const execution = useDiscoveryExecution(state, makeDeps());
+
+    await execution.restoreRunningTask();
+
+    const hint = state.restoredTaskHint.value;
+    expect(hint).toContain("暂停");
+    expect(hint).toContain("继续");
+    expect(hint).not.toContain("中断");
+    expect(hint).not.toContain("开始新一轮");
+    expect(state.pausedRunId.value).toBe("screen-paused-copy");
+  });
 
   it("paused 分支同样受「已结束」闸门约束：已进 04 页则不恢复暂停任务", async () => {
     apiRequestMock.mockResolvedValue({

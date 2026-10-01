@@ -3,6 +3,7 @@
 import { computed, nextTick } from "vue";
 import type { Ref } from "vue";
 import type { DiscoveryState } from "./useDiscoveryState";
+import { hasUnfinishedRound } from "./useDiscoveryState";
 import type { ExecutionNeeds } from "./discoveryDeps";
 import { ApiError, apiRequest, errorMessage, settingsApi, userFacingMessage } from "../api";
 import type { PipelineResult, RoundStatusPayload } from "../discovery";
@@ -199,6 +200,12 @@ async function restoreRunningTask() {
       .includes(String(data.status || ""));
     if ((resultsPageSeen.value || finishedPartial.value) && !liveRestoredStatus) return;
     activeTaskRestored.value = true;
+    // SPEC 046 D-09（状态词表）：装现场之前先问一次 B——「这一轮还没结束」只由树干那一份
+    // 谓词回答（hasUnfinishedRound 读协调器从 flows + flow_tracks 派生投影来的 flowActive，
+    // 加此刻的活体任务与暂停断点）。后端 latest-running-task 的 interrupted 说的是那段任务
+    // 没跑完，不是这一轮没结束；轮次已收尾时它只是残留，恢复出的现场仍可查错误，但不再被
+    // 说成「上一轮被中断，请开始新一轮」。
+    const roundStillOpen = hasUnfinishedRound(state);
     // T509：先设置任务自身平台，再加载对应 schema/城市（platform-schema.md L157）。
     // 不改草稿平台（不变式 2：setTaskPlatform 不改 draft/result）。
     const taskPlatform = data.platform;
@@ -335,9 +342,12 @@ async function restoreRunningTask() {
       profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
         ? (data.profile_facts as Record<string, unknown>) : {};
       if (data.round_context) deps.restoreLocationsFromContext(data.round_context);
+      // 轮次已收尾时不报「被中断、请开始新一轮」；失败是终态事实，照旧说清楚。
       restoredTaskHint.value = data.status === "failed"
         ? "上次 AI 筛选失败，已保留错误信息，可开始新一轮"
-        : "上次 AI 筛选因服务重启被中断，已保留中断信息，可开始新一轮";
+        : roundStillOpen
+          ? "上次 AI 筛选因服务重启被中断，已保留中断信息，可开始新一轮"
+          : "";
       return;
     }
     if (data.status === "interrupted") {
@@ -350,7 +360,9 @@ async function restoreRunningTask() {
         scrapeTaskId.value = data.task_id;
         analysisReady.value = true;
         navigateStep("search", { source: "system" });
-        restoredTaskHint.value = "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取";
+        restoredTaskHint.value = roundStillOpen
+          ? "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取"
+          : "";
         // 039（用户拍板·单一来源）：恢复出的面板与实时面板同一口径——完成/跳过/
         // 未开始/已抓从该任务真实快照补齐，不让计数行整行消失（与暂停恢复同一条路径）。
         await deps.enrichPausedSnapshot(data.task_id, snapshot, kind);
@@ -380,7 +392,9 @@ async function restoreRunningTask() {
             message: "任务因服务重启被中断，已保存进度",
           },
         };
-        restoredTaskHint.value = "上次补抓因服务重启被中断；可结束保存已有结果";
+        restoredTaskHint.value = roundStillOpen
+          ? "上次补抓因服务重启被中断；可结束保存已有结果"
+          : "";
         return;
       }
     }
