@@ -504,4 +504,84 @@ describe("DiscoveryView 常用搜索配置包", () => {
     ).toBe(true);
     expect(wrapper.find('[data-testid="package-current-name"]').exists()).toBe(false);
   });
+
+  // SPEC 046 Edge Cases 缺口补测（走真实路径，不测谓词返回值）：配置包恢复刻意不做
+  // 逐平台预检（044：同一套包两个平台共用），不可用事实到提交入口的对话框准备阶段
+  // 才取回。第一页选包 → 第二页点提交 → 必须被挡住并点名不可用平台（显示名，不吐
+  // 内部平台码）；切到可用单平台仍能单独提交。
+  it("配置包恢复后某平台被禁用新建任务：提交被挡住并点名不可用平台，可用单平台仍能单独提交", async () => {
+    const baseFetch = makeFetchMock({ items: [{ id: "pkg-1", name: "产品经理 · 上海" }] });
+    const launches: Array<Record<string, unknown>> = [];
+    const flowStarts: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method || "GET").toUpperCase();
+      if (url.includes("/api/filter-labels") && url.includes("platform=zhilian")) {
+        return response({ ok: true, platform: "zhilian", schema_version: 1, enabled_for_new_tasks: false, fields: [] });
+      }
+      if (url === "/api/flows" && method === "POST") {
+        flowStarts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return response({ ok: false, error: { code: "platform_unavailable", message: "智联已停用，不能新建任务" } }, 503);
+      }
+      if (url === "/api/execute-search" && method === "POST") {
+        launches.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return response({ ok: true, task_id: `package-gate-${launches.length}` });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        return response({
+          ok: true,
+          scope: {
+            keywords: ["产品经理"], scope_kind: "cities", cities: ["上海"],
+            pages_per_combination: 3, combination_count: 1, planned_pages: 3,
+            task_size: "small", scope_digest: "sha256:package-gate",
+          },
+          deduplicated: { keywords: ["产品经理"], cities: ["上海市"] },
+        });
+      }
+      return baseFetch(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, {
+      props: { profileId: "profile-044" },
+      global: { stubs: { Teleport: true } },
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-testid="saved-package-entry"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="package-item"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get(".upload-layout").isVisible()).toBe(false);
+    await wrapper.get('[data-testid="profile-confirm"]').trigger("click");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    // 挡住落在提交入口本身：主按钮禁用 + 页面点名不可用平台（显示名，不吐内部码）。
+    const blocked = wrapper.get('[data-testid="parallel-platform-disabled-notice"]');
+    expect(blocked.text()).toContain("智联");
+    expect(blocked.text()).not.toMatch(/boss|zhilian/i);
+    expect(wrapper.get('[data-testid="start-one-click"]').attributes("disabled")).toBeDefined();
+    // 请求一个都没发出去：不许让用户等 503 才知道哪个平台不可用。
+    expect(flowStarts).toHaveLength(0);
+    expect(launches).toHaveLength(0);
+
+    await wrapper.get('[data-testid="platform-segment-boss"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await flushPromises();
+    await flushPromises();
+    expect(wrapper.get('[data-testid="one-click-confirm"]').attributes("disabled")).toBeUndefined();
+    await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    expect(flowStarts).toHaveLength(0);
+    expect(launches.map((body) => body.platform)).toEqual(["boss"]);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
 });

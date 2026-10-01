@@ -175,8 +175,12 @@ function hasVisibleJobs(track: FlowPresentationTrack): boolean {
 
 export interface FlowPresentationOptions {
   flow: Ref<FlowPresentationInput | null>;
-  /** Project Flow reachability into the page owner's navigation guard. */
-  projectReachableSteps?: (steps: Set<FlowStepId> | null) => void;
+  /**
+   * Project Flow reachability into the page owner's navigation guard.
+   * 第二条形参是这条投影所属的 Flow 身份：页面守卫用它判断「还是不是同一条 Flow」，
+   * 同一条 Flow 的解锁集合只增不减，换到另一条 Flow 时水位重新起步。
+   */
+  projectReachableSteps?: (steps: Set<FlowStepId> | null, flowId: string) => void;
   /** The page state owns navigation; Flow only requests a transition through this callback. */
   navigateStep?: (step: FlowStepId) => void;
   deps?: FlowPresentationDeps;
@@ -296,7 +300,7 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
     clearResultRefreshRetry(true);
     projectedTracks.value = null;
     resetRuntime();
-    projectReachableSteps?.(null);
+    projectReachableSteps?.(null, "");
   }
 
   function timestamp(value: unknown): number {
@@ -340,7 +344,7 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
     const order: FlowStepId[] = ["search", "screen", "results"];
     highestUnlocked.value = order.filter((step) => runtimeState.unlocked.has(step)).at(-1) || "search";
     enabledSteps.value = new Set(runtimeState.unlocked);
-    projectReachableSteps?.(new Set(enabledSteps.value));
+    projectReachableSteps?.(new Set(enabledSteps.value), flowId.value);
     if (!changed || !allowAutoAdvance || !runtimeState.hydrated || runtimeState.manualHold) return;
     navigationHandler?.(step);
   }
@@ -535,7 +539,7 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
       if (!isCurrentRefresh(generation, id)) return;
       projectedTracks.value = null;
       resetRuntime();
-      projectReachableSteps?.(null);
+      projectReachableSteps?.(null, "");
       return;
     }
     const projectionLoaded = await hydrateResultProjection(id, generation);
@@ -613,7 +617,7 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
     if (!hold) {
       const target = highestUnlocked.value;
       if (!runtimeState.hydrated || runtimeState.manualHold) return;
-      projectReachableSteps?.(new Set(enabledSteps.value));
+      projectReachableSteps?.(new Set(enabledSteps.value), flowId.value);
       navigationHandler?.(target);
     }
   }

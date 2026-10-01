@@ -210,8 +210,8 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
 
   const flowPresentation = useDiscoveryFlowPresentation({
     flow: computed(() => flow.flow.value || null),
-    projectReachableSteps: (steps) => {
-      if (ownsParallelFlowNavigation()) state.setFlowReachableSteps(steps);
+    projectReachableSteps: (steps, flowId) => {
+      if (ownsParallelFlowNavigation()) state.setFlowReachableSteps(steps, flowId);
     },
     navigateStep: (step) => {
       if (ownsParallelFlowNavigation()) state.navigateStep(step, { source: "flow" });
@@ -302,7 +302,10 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
         state.setNavigationManualHold(false);
         if (!parallelMode.value || selection !== undefined) restoreNavigationPending = false;
       }
-      if (ownsFlow) state.setFlowReachableSteps(hydrated ? projected : null);
+      // SPEC 046 V2 状态所有权：页面可达性唯一来源是 Flow 投影一处。水合还没完成时
+      // 也要发布投影当前持有的这一份（同一 Flow 只增不减的解锁集合），不再用 null
+      // 表示「还没查到」——null 落进守卫就是刷新/轮询间隙里把已解锁页重新锁住的空窗。
+      if (ownsFlow) state.setFlowReachableSteps(projected, flow.flow.value?.id || "");
       if (ownsFlow && hydrated && restoreNavigationPending) {
         restoreNavigationPending = false;
         const restoredStep = state.restoredWorkflowSnapshot.value?.activeStep;

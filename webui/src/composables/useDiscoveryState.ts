@@ -258,6 +258,19 @@ const activeStep = ref<StepId>("upload");
 // 由 Flow 把可达阶段投影到这里。页面、灵动岛和后台恢复都只经过下面的守卫，
 // 不再各自维护一份“能不能进”的集合。
 const flowReachableSteps = ref<Set<StepId> | null>(null);
+// SPEC 046 V2 FR-011 / 契约「同一 Flow 的解锁集合只增不减」：Flow 可达水位。
+// 它只记「这一页在本 Flow 内已经放行过」，用于同一条 Flow 的投影暂时缺位或回退
+// （重新水合、轮询间隙、离开「全部」再回来）时不回锁。它不是第四份流程外壳状态：
+// 外壳事实（Flow / Track / 结果）仍然只读服务端投影一处，水位既不上报后端也不写进
+// 任何存档，只在内存里累积，并随 Flow 身份或换轮/换画像重置。
+// 写入通道只有两条，都在这道守卫里：投影到达（带 Flow 身份）、守卫自己放行的落点
+// （含刷新从现场存档恢复出的落点）。
+const flowReachWatermark = ref<Set<StepId>>(new Set<StepId>());
+// 水位所属的 Flow 身份：与投影一起写入，只用来判断「是不是同一条 Flow」。
+// 空串 = 还没拿到过带身份的投影（此时水位只由落点喂过，任何 Flow 都视为同一条）。
+const flowReachWatermarkOwner = ref("");
+// Flow 归属：投影在场即为真。null（离开「全部」、Flow 不再由本页持有）即交回 legacy 分支。
+const flowNavigationOwned = ref(false);
 const navigationManualHold = ref(false);
 // B096：并行 Flow 的活动 Track 是页面级占用事实，不属于任一平台草稿。
 // 由页面把 parallelFlow.hasActiveTrack 投影进来，所有新任务/范围守卫共用。
@@ -831,20 +844,50 @@ const legacyEnabledSteps = computed<StepId[]>(() => {
 
 const STEP_ORDER: StepId[] = ["upload", "search", "screen", "results"];
 
+// Flow 归属判据（可达性单一来源的开关）：Flow 投影在场，或本轮流程活动线在场
+// （Flow 外壳已成立、第一份投影还没到达）。两者都不成立才是「确实没有 Flow 归属」
+// 的旧形态——单平台 legacy 链路，只有那条路径允许读 legacyEnabledSteps 与活体任务探针。
+const hasFlowOwnership = computed(() => flowNavigationOwned.value || flowActive.value);
+
+/** 把放行过的步骤并进水位（同一条 Flow 只增不减）。 */
+function rememberFlowReach(steps: Iterable<StepId>): void {
+  const next = new Set(flowReachWatermark.value);
+  for (const step of steps) {
+    if (STEP_ORDER.includes(step)) next.add(step);
+  }
+  if (next.size !== flowReachWatermark.value.size) flowReachWatermark.value = next;
+}
+
+/** 清空 Flow 可达水位（换轮、换画像、归属结束、投影换到另一条 Flow）。 */
+function clearFlowReachWatermark(): void {
+  flowReachWatermark.value = new Set<StepId>();
+  flowReachWatermarkOwner.value = "";
+}
+
+/** 页面先后顺序里，某一步及其之前的全部步骤（「用户已经站在这一页」的可达证据）。 */
+function stepPrefixThrough(step: StepId): StepId[] {
+  const rank = STEP_ORDER.indexOf(step);
+  return rank < 0 ? [] : STEP_ORDER.slice(0, rank + 1);
+}
+
 const enabledSteps = computed<StepId[]>(() => {
   if (historyMode.value) return ["results"];
-  const projected = flowReachableSteps.value;
-  // An active Flow envelope owns the round even before Track rows/projected
-  // steps arrive.  A legacy/single-platform view must not expose screen or
-  // result actions during that gap, otherwise a second round can be started
-  // while the Flow is only queued on the server.
-  if (flowActive.value && !projected) return ["upload", "search"];
-  const reachable = projected
-    ? new Set<StepId>([
-      "upload",
-      ...Array.from(projected).filter((step): step is StepId => STEP_ORDER.includes(step)),
-    ])
-    : new Set<StepId>(legacyEnabledSteps.value);
+  if (hasFlowOwnership.value) {
+    // 状态所有权：页面可达性唯一来源是 Flow 投影一处，不再并 legacy 现场、
+    // 也不再叠加活体任务探针（那是第二套「能不能进」的口径）。
+    // 同一条 Flow 的投影暂时缺位或回退时沿用已到达的水位（只增不减，FR-011）；
+    // 用户当前所在的这一页永远算已解锁——刷新恢复出的落点先于投影到达，
+    // 撤场重来的 null 会清水位，这一段空窗不能把用户脚下这一页锁掉。
+    // 01 发起页与 02 本轮关键词页是 Flow 自己的最小开放面（投影基线也从 02 起步），
+    // 不属于任何 legacy 现场。
+    const reached = new Set<StepId>(flowReachWatermark.value);
+    const projected = flowReachableSteps.value;
+    if (projected) for (const step of projected) reached.add(step);
+    for (const step of stepPrefixThrough(activeStep.value)) reached.add(step);
+    return STEP_ORDER.filter((step) => step === "upload" || step === "search" || reached.has(step));
+  }
+  // 没有 Flow 归属的旧形态（单平台 legacy 路径）：沿用本轮抓取/结果现场与活体探针。
+  const reachable = new Set<StepId>(legacyEnabledSteps.value);
   const liveStep = deriveLiveTaskStep({
     scrapeBusy: scrapeBusy.value,
     scrapeSnapshot: scrapeSnapshot.value,
@@ -859,10 +902,23 @@ const enabledSteps = computed<StepId[]>(() => {
   return STEP_ORDER.filter((step) => reachable.has(step));
 });
 
-function setFlowReachableSteps(steps: Iterable<string> | null): void {
-  flowReachableSteps.value = steps === null
-    ? null
-    : new Set(Array.from(steps).filter((step): step is StepId => STEP_ORDER.includes(step as StepId)));
+function setFlowReachableSteps(steps: Iterable<string> | null, flowId = ""): void {
+  if (steps === null) {
+    // 投影撤场 = 这条 Flow 不再由本页持有：可达性交回 legacy 分支，水位一并清空。
+    flowNavigationOwned.value = false;
+    flowReachableSteps.value = null;
+    clearFlowReachWatermark();
+    return;
+  }
+  const next = new Set(Array.from(steps).filter((step): step is StepId => STEP_ORDER.includes(step as StepId)));
+  const id = String(flowId || "");
+  // 投影换到另一条 Flow：上一轮的入口不带给这一轮，水位按 Flow 身份重新起步。
+  // 身份未知（空串，未经协调器投影的调用方）时不猜，沿用同一份水位。
+  if (id && flowReachWatermarkOwner.value && id !== flowReachWatermarkOwner.value) clearFlowReachWatermark();
+  flowNavigationOwned.value = true;
+  flowReachableSteps.value = next;
+  if (id) flowReachWatermarkOwner.value = id;
+  rememberFlowReach(next);
 }
 
 function setNavigationManualHold(hold: boolean): void {
@@ -897,6 +953,13 @@ function navigateStep(
   // clicks and restore reconciliation remain allowed to establish a landing
   // page in the first place.
   if ((source === "flow" || source === "system") && navigationManualHold.value) return targetRef.value;
+  // SPEC 046 V2 FR-011 / 契约第 3 节第 7 条：刷新先恢复本地 activeStep，再水合 Flow。
+  // Flow 归属已成立时，存档里的落点就是「刷新前已解锁的那一页」，先记进水位再校正，
+  // 免得投影还窄于现场时把恢复出来的页钳走（没有 Flow 归属的旧形态不享有这条待遇，
+  // 由 legacy 事实判定落点是否有效）。
+  if (source === "restore" && hasFlowOwnership.value) {
+    rememberFlowReach(stepPrefixThrough(requested));
+  }
   const landing = options.allowUnreachable || source === "system" || source === "reset"
     ? requested
     : reachableStep(requested, new Set(enabledSteps.value)) as StepId;
@@ -906,6 +969,11 @@ function navigateStep(
     if (requestedRank < highestRank) navigationManualHold.value = true;
   }
   targetRef.value = landing;
+  // 守卫放行的落点即「已解锁页面」：并进水位，投影后续缺位时不再把它锁回去。
+  // 强制落点（system/reset/allowUnreachable）是绕过可达性判定的出口，不作为解锁证据。
+  if (!options.allowUnreachable && source !== "system" && source !== "reset") {
+    rememberFlowReach(stepPrefixThrough(landing));
+  }
   return landing;
 }
 
@@ -916,6 +984,9 @@ function reconcileActiveStep(this: NavigationOwner | undefined, step?: string): 
 
 function resetNavigation(this: NavigationOwner | undefined): void {
   flowReachableSteps.value = null;
+  // 换轮 / 换画像：上一轮的入口不带给新一轮，水位与归属一并清空。
+  flowNavigationOwned.value = false;
+  clearFlowReachWatermark();
   navigationManualHold.value = false;
   const targetRef = this?.activeStep || activeStep;
   targetRef.value = "upload";

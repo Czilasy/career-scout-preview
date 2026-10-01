@@ -1016,3 +1016,42 @@ it("says one single conclusion on a card whose whitebox verdict is unverifiable"
 
   expect(presentation.scrapeItems.value[0]?.statusLabel).toBe("无法确认是否完成");
 });
+
+// SPEC 046 V2 FR-011 / contracts/flow-presentation.md 第 3 节第 1 条：
+// 同一 Flow 的解锁集合只增不减，投影暂时缺位（重新水合、轮询间隙）也不能把已解锁页
+// 锁回去——可达性的对外出口只有页面守卫的 enabledSteps 一处。
+it("同一 Flow 重新水合与投影回退都不回退已解锁集合", async () => {
+  const state = useDiscoveryState({ profileId: "presentation-monotonic" }, () => {});
+  const published: Array<Set<string> | null> = [];
+  const flow = ref<{ id: string; tracks: FlowPresentationTrack[] } | null>({
+    id: "flow-monotonic",
+    tracks: [track({ screen_run_id: "screen-m", result_run_id: "result-m" })],
+  });
+  const presentation = useDiscoveryFlowPresentation({
+    flow,
+    navigateStep: (step) => state.navigateStep(step, { source: "flow" }),
+    projectReachableSteps: (steps, flowId) => {
+      published.push(steps);
+      state.setFlowReachableSteps(steps, flowId);
+    },
+    deps: { fetchTaskState: async () => ({ status: "running", progress: {}, logs: [] }) },
+  });
+
+  await presentation.refresh();
+  expect(presentation.unlockedSteps.value).toEqual(new Set(["search", "screen", "results"]));
+  expect(state.enabledSteps.value).toEqual(["upload", "search", "screen", "results"]);
+
+  // 轮询间隙：同一条 Flow 的下一次快照暂时缺字段，解锁集合仍不得回退、也不得发布 null。
+  flow.value = { id: "flow-monotonic", tracks: [track()] };
+  await presentation.refresh();
+  expect(presentation.unlockedSteps.value).toEqual(new Set(["search", "screen", "results"]));
+  expect(published.filter((entry) => entry === null)).toHaveLength(0);
+
+  // 守卫侧：投影给回更窄一份（重新水合的基线）时，已解锁的 03/04 仍可进入。
+  state.setFlowReachableSteps(new Set(["search"]), "flow-monotonic");
+  expect(state.enabledSteps.value).toEqual(["upload", "search", "screen", "results"]);
+
+  // 换到另一条 Flow：上一轮的入口不带给这一轮。
+  state.setFlowReachableSteps(new Set(["search"]), "flow-next-round");
+  expect(state.enabledSteps.value).toEqual(["upload", "search"]);
+});

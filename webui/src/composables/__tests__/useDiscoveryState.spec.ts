@@ -706,3 +706,87 @@ describe("useDiscoveryState 判活与落点同源（SPEC 046 第五轮）", () =
     expect(liveTaskStep(state)).toBe("screen");
   });
 });
+
+// SPEC 046 V2 FR-011 / SC-005 / US4-1：页面可达性的唯一来源是 Flow 投影一处，
+// 同一 Flow 的解锁集合只增不减。
+// 缺陷现场：Flow 归属成立而投影还没到位（刷新重新水合、轮询间隙、投影给回更窄一份）时，
+// 可达集合退回 ["upload","search"]，此前已解锁的 03/04 被重新锁住；同时可达集合还并了
+// legacy 现场与活体任务探针，使「谁是权威」出现第二套口径。
+describe("useDiscoveryState FR-011 可达性单一来源与投影空窗不回锁", () => {
+  it("① 同一条 Flow 的投影回退或撤场都不回锁，撤场后才交回 legacy", () => {
+    const state = useDiscoveryState({ profileId: "reachability-gap" }, () => {});
+    state.analysisReady.value = true;
+    state.setFlowReachableSteps(new Set(["search", "screen", "results"]), "flow-gap");
+    expect(state.enabledSteps.value).toEqual(["upload", "search", "screen", "results"]);
+
+    // 轮询间隙／重新水合基线：同一条 Flow 的投影暂时只给出 02，已解锁页不回锁。
+    state.setFlowReachableSteps(new Set(["search"]), "flow-gap");
+    expect(state.enabledSteps.value).toEqual(["upload", "search", "screen", "results"]);
+
+    // 投影撤场（离开「全部」）：Flow 归属结束，可达性交回没有归属的 legacy 分支。
+    state.setFlowReachableSteps(null);
+    expect(state.enabledSteps.value).toEqual(["upload", "search"]);
+  });
+
+  it("② Flow 归属存在时可达集合只读投影一处，不再并 legacy 现场与活体探针", () => {
+    const state = useDiscoveryState({ profileId: "reachability-single-source" }, () => {});
+    // legacy 现场齐备（会给出 03/04）、AI 筛选快照仍在跑（探针会给出 03）。
+    state.analysisReady.value = true;
+    state.scrapeCompleted.value = true;
+    state.resultLoaded.value = true;
+    state.screenSnapshot.value = { status: "running", progress: {}, logs: [] };
+    state.setFlowReachableSteps(new Set(["search"]));
+
+    // 本轮 Flow 只开到 02：legacy 事实与探针都不许再加出一页。
+    expect(state.enabledSteps.value).toEqual(["upload", "search"]);
+  });
+
+  it("③ 刷新恢复出的落点在投影只开到 02 时不得回锁", () => {
+    const state = useDiscoveryState({ profileId: "reachability-restored-landing" }, () => {});
+    const navigation = state as typeof state & {
+      navigateStep: (step: string, options?: { source?: "restore" | "user" }) => string;
+    };
+    state.analysisReady.value = true;
+    state.scrapeCompleted.value = true;
+    state.resultLoaded.value = true;
+    // 现场存档把用户放回 04（此刻还没有 Flow 归属，走 legacy 落点）。
+    expect(navigation.navigateStep("results", { source: "restore" })).toBe("results");
+    expect(state.enabledSteps.value).toEqual(["upload", "search", "screen", "results"]);
+
+    // Flow 归属成立、投影刚起步只开到 02：刷新前的入口必须仍可进入。
+    state.setFlowReachableSteps(new Set(["search"]), "flow-restored");
+    expect(state.enabledSteps.value).toEqual(["upload", "search", "screen", "results"]);
+  });
+
+  it("④ 换轮、换画像与换到另一条 Flow 都清空水位，新一轮不继承上一轮入口", () => {
+    const state = useDiscoveryState({ profileId: "reachability-new-round" }, () => {});
+    state.analysisReady.value = true;
+    state.setFlowReachableSteps(new Set(["search", "screen", "results"]), "flow-previous");
+    expect(state.enabledSteps.value).toEqual(["upload", "search", "screen", "results"]);
+
+    state.resetForProfileSwitch();
+    expect(state.enabledSteps.value).toEqual(["upload"]);
+
+    // 换画像后是另一条 Flow：即使不重置，投影带着新身份到达时也只给 01+02。
+    state.setFlowReachableSteps(new Set(["search"]), "flow-next");
+    expect(state.enabledSteps.value).toEqual(["upload", "search"]);
+
+    // 同一页面上换到另一条 Flow（没有经过重置）同样不继承上一轮入口。
+    const inherited = useDiscoveryState({ profileId: "reachability-new-flow" }, () => {});
+    inherited.analysisReady.value = true;
+    inherited.setFlowReachableSteps(new Set(["search", "screen", "results"]), "flow-old");
+    inherited.setFlowReachableSteps(new Set(["search"]), "flow-new");
+    expect(inherited.enabledSteps.value).toEqual(["upload", "search"]);
+  });
+
+  it("⑤ 没有 Flow 归属的旧形态仍由 legacy 现场与活体探针供页（树枝边界）", () => {
+    const state = useDiscoveryState({ profileId: "reachability-legacy-only" }, () => {});
+    state.analysisReady.value = true;
+    state.scrapeCompleted.value = true;
+    state.resultLoaded.value = true;
+    expect(state.enabledSteps.value).toEqual(["upload", "search", "screen", "results"]);
+    state.resultLoaded.value = false;
+    state.screenSnapshot.value = { status: "running", progress: {}, logs: [] };
+    expect(state.enabledSteps.value).toEqual(["upload", "search", "screen"]);
+  });
+});

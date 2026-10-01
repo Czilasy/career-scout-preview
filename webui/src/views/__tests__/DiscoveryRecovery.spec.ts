@@ -1198,4 +1198,110 @@ describe("Discovery recovery paths", () => {
     wrapper.unmount();
     vi.unstubAllGlobals();
   });
+
+  // ---------- SPEC 046 V2 SC-005 / US4-1：刷新后已解锁入口仍可进入 ----------
+  // 真实路径：挂载 → 现场存档落位 → Flow 归属成立 → Flow 结果投影仍在飞（水合空窗）。
+  // 缺陷现场：空窗里可达集合退回 01+02，用户刚刷新的一页与其余已解锁入口一起被锁回去。
+  function v2RefreshFlow(profileId: string): Record<string, unknown> {
+    return {
+      id: "flow-v2-refresh",
+      profile_id: profileId,
+      selection: "all",
+      status: "running",
+      tracks: [
+        {
+          id: "track-boss", platform: "boss",
+          scrape_run_id: "scrape-v2-b", screen_run_id: "screen-v2-b", result_run_id: "result-v2-b",
+          status: "done", stage: "complete",
+        },
+        {
+          id: "track-zhilian", platform: "zhilian",
+          scrape_run_id: "scrape-v2-z", screen_run_id: null, result_run_id: null,
+          status: "running", stage: "scrape",
+        },
+      ],
+    };
+  }
+
+  /** 挂起 Flow 结果投影，把页面停在「Flow 已成立、水合还没完成」的那段空窗里。 */
+  function stubV2RefreshWindow(profileId: string) {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/flows/current")) return response({ ok: true, flow: v2RefreshFlow(profileId) });
+      if (url.includes("/api/flows/flow-v2-refresh/results")) {
+        await pending;
+        return response({ ok: true, results: {
+          flow_id: "flow-v2-refresh", selection: "all", status: "running",
+          tracks: [
+            { platform: "boss", status: "done", stage: "complete", result_run_id: "result-v2-b", jobs: [{ job_id: "v2-refresh-job", platform: "boss", title: "刷新前已有岗位", verdict: "match" }], dropped: [] },
+            { platform: "zhilian", status: "running", stage: "scrape", result_run_id: null, jobs: [], dropped: [] },
+          ],
+        } });
+      }
+      if (url.includes("/api/task-state/")) return response({ status: "running", progress: {}, logs: [] });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/flows/flow-v2-refresh/tracks/")) return response({ ok: true, track: {} });
+      return commonResponse(url) || response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return { fetchMock, release };
+  }
+
+  /** 步骤导航的禁用读数：true = 这一页此刻进不去。 */
+  function stepNavLocked(wrapper: ReturnType<typeof mount>): boolean[] {
+    return wrapper.findAll(".step-nav button").map((button) => button.attributes("disabled") !== undefined);
+  }
+
+  it.each([
+    { landing: "search", label: "02" },
+    { landing: "screen", label: "03" },
+    { landing: "results", label: "04" },
+  ] as Array<{ landing: string; label: string }>)(
+    "SC-005：$label 刷新后回到原页，水合空窗内已解锁入口不回锁",
+    async ({ landing }) => {
+      const profileId = `profile-v2-refresh-${landing}`;
+      sessionStorage.setItem(`career-scout-workflow:${profileId}`, JSON.stringify({
+        version: 2, unfinished: true, activeStep: landing, analysisReady: true,
+        keywords: [], selectedKeywords: [], cityText: "", filterValues: { boss: {}, zhilian: {} },
+        profileSummary: "", profileFacts: {},
+        scrapeTaskId: "scrape-v2-b", screenTaskId: "screen-v2-b", pausedRunId: "", interruptedRunId: "", recrawlTaskId: "",
+        scrapeCompleted: true,
+        scrapeSnapshot: { status: "completed", progress: {}, logs: [] },
+        screenSnapshot: { status: "running", progress: {}, logs: [] },
+        recrawlSnapshot: null,
+        pipelineResult: {
+          ok: true, platform: "boss", jobs: [{ job_id: "v2-refresh-job", platform: "boss", title: "刷新前已有岗位", verdict: "match" }],
+          dropped: [], total_scraped: 1, total_kept: 1, total_matched: 1, total_dropped: 0,
+        },
+        pipelineResultRunId: "result-v2-b",
+        currentRoundStatus: "screened",
+        resultLoaded: true, resultsPageSeen: landing === "results",
+        activeCategory: "matched", resultPlatformFilter: "all",
+        platform: "boss", resultPlatform: "boss",
+      }));
+      const { release } = stubV2RefreshWindow(profileId);
+
+      const wrapper = mount(DiscoveryView, { props: { profileId } });
+      await flushPromises();
+      await flushPromises();
+
+      const vm = recoveryViewModel(wrapper);
+      // 刷新落回原页，水合本身不自动前进。
+      expect(vm.activeStep).toBe(landing);
+      // Flow 归属已成立、结果投影仍在飞：刷新前已解锁的入口必须仍进得去。
+      const highest = ["upload", "search", "screen", "results"].indexOf(landing);
+      expect(stepNavLocked(wrapper).slice(0, highest + 1)).toEqual(Array.from({ length: highest + 1 }, () => false));
+
+      release();
+      await flushPromises();
+      await flushPromises();
+
+      expect(recoveryViewModel(wrapper).activeStep).toBe(landing);
+      expect(stepNavLocked(wrapper)).toEqual([false, false, false, false]);
+      wrapper.unmount();
+      vi.unstubAllGlobals();
+    },
+  );
 });
