@@ -349,6 +349,10 @@ class B096V2StructuralGuardTests(unittest.TestCase):
         # - platforms_boss.py：Edge Cases「任一平台被系统禁用新建任务时…指出不可用平台」
         #   ——BOSS 侧被停用时要有可读原因，树干与前端显示名投影不动。
         "webui/platforms_boss.py",
+        # - platforms_zhilian.py：同上 Edge Cases 的智联侧——禁用原因串要点名平台
+        #   （用注册表既有显示名「智联招聘」）、说中文、不含内部字段名；接线形状与
+        #   BOSS 一致不动，树干 flow_api.py 与前端显示名投影同样不动。
+        "webui/platforms_zhilian.py",
         # - task_state_api.py / task_status.py：`## 状态词表`「活体任务」只算真有 worker
         #   在跑——排队中与已中断/终态一律让时长定格，不再随轮询增长。
         "webui/task_state_api.py",

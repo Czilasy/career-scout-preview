@@ -139,9 +139,11 @@ ZHILIAN_NATIONWIDE_NAME = "全国"
 
 
 
-#: 智联禁用原因（真实页面核验后置空）。
+#: 智联不可用原因（与 BOSS_AVAILABILITY_REASON 同一形状：注册数据缺项时才带上，
+#: 会被 /api/flows 等入口原样转述给用户，所以点名平台、只说中文、不带内部字段名；
+#: 树干只转述这一份原因，不硬编码平台名）。
 ZHILIAN_AVAILABILITY_REASON = (
-    "company_nature options / non-nationwide city codes / page markers "
+    "智联招聘 筛选选项 / 城市目录 "
     "未由当前真实页面核验"
 )
 
