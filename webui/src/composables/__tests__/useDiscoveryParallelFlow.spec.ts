@@ -46,7 +46,10 @@ describe("useDiscoveryParallelFlow", () => {
     state.clearPolling();
   });
 
-  it("allows reset for paused or restart-interrupted Flow Tracks", () => {
+  // SPEC 046 FR-015 + 状态词表：暂停的 worker 还在等处理，本轮未结束、锁住开新轮
+  // （出路是就地继续，或「结束并保存 / 放弃本轮」收口后自然解锁）；
+  // 服务重启打断的已中断轮没有活体 worker，唯一出路就是开新一轮，必须放行 reset。
+  it("locks a new round while paused yet allows reset for restart-interrupted Tracks", () => {
     const state = useDiscoveryParallelFlow({ profileId: "profile-resettable-flow" });
     state.restore({
       id: "flow-resettable",
@@ -59,7 +62,9 @@ describe("useDiscoveryParallelFlow", () => {
       }],
     });
     expect(state.hasActiveTrack.value).toBe(true);
-    expect(state.canResetNewRound.value).toBe(true);
+    expect(state.canStartNewRound.value).toBe(false);
+    expect(state.canResetNewRound.value).toBe(false);
+    expect(state.newRoundBlockReason.value).toBe("任务已暂停，平台已锁定");
 
     state.restore({
       id: "flow-resettable-interrupted",
@@ -72,7 +77,57 @@ describe("useDiscoveryParallelFlow", () => {
       }],
     });
     expect(state.canResetNewRound.value).toBe(true);
+    expect(state.newRoundBlockReason.value).toBe("");
     state.clearPolling();
+  });
+
+  // FR-015 挡新轮的原因分层沿用树干 scopeLockReason 口径（useDiscoveryState 821-829）：
+  // 有排队/运行在说「进行中」，只剩暂停才说「已暂停」，不新写第三套文案。
+  it("names the locking reason with the trunk scopeLockReason wording", () => {
+    const running = useDiscoveryParallelFlow({ profileId: "profile-fr015-reason" });
+    running.restore({
+      id: "flow-fr015-running",
+      profile_id: "profile-fr015-reason",
+      selection: "all",
+      status: "running",
+      tracks: [{
+        id: "b", flow_id: "flow-fr015-running", platform: "boss" as const,
+        status: "paused", stage: "ai", screen_run_id: "screen-paused",
+      }],
+    });
+    expect(running.canStartNewRound.value).toBe(false);
+    expect(running.newRoundBlockReason.value).toBe("任务进行中，平台已锁定");
+    running.clearPolling();
+
+    const queued = useDiscoveryParallelFlow({ profileId: "profile-fr015-reason" });
+    queued.restore({
+      id: "flow-fr015-queued",
+      profile_id: "profile-fr015-reason",
+      selection: "all",
+      status: "queued",
+      tracks: [{
+        id: "b", flow_id: "flow-fr015-queued", platform: "boss" as const,
+        status: "queued", stage: "pending",
+      }],
+    });
+    expect(queued.newRoundBlockReason.value).toBe("任务进行中，平台已锁定");
+    queued.clearPolling();
+
+    const finished = useDiscoveryParallelFlow({ profileId: "profile-fr015-reason" });
+    finished.restore({
+      id: "flow-fr015-finished",
+      profile_id: "profile-fr015-reason",
+      selection: "all",
+      status: "succeeded",
+      tracks: [{
+        id: "b", flow_id: "flow-fr015-finished", platform: "boss" as const,
+        status: "succeeded", stage: "complete", result_run_id: "r-finished",
+      }],
+    });
+    expect(finished.canStartNewRound.value).toBe(true);
+    expect(finished.canResetNewRound.value).toBe(true);
+    expect(finished.newRoundBlockReason.value).toBe("");
+    finished.clearPolling();
   });
 
   // 真实死胡同：一条轨道已出结果、另一条被重启打断，外壳如实报告「已中断」。
@@ -98,7 +153,8 @@ describe("useDiscoveryParallelFlow", () => {
     });
 
     expect(state.hasActiveTrack.value).toBe(true);
-    expect(state.canStartNewRound.value).toBe(false);
+    // 状态词表：已中断没有活体 worker，「开始新一轮」出口必须放行（提交闸门同一份清单）。
+    expect(state.canStartNewRound.value).toBe(true);
     expect(state.canResetNewRound.value).toBe(true);
     state.clearPolling();
   });

@@ -325,6 +325,13 @@ class B096V2StructuralGuardTests(unittest.TestCase):
         "webui/src/composables/__tests__/useDiscoveryExecution.spec.ts",
         "webui/src/composables/__tests__/useDiscoveryState.spec.ts",
         "webui/src/composables/__tests__/useIslandNotices.spec.ts",
+        # 2026-10-01 状态层收口批（FR-015 + 状态词表 A/B 谓词拆分），逐条登记：
+        # - useDiscoveryWorkflow.ts：词表禁止「名字叫 LIVE 却装着 paused/interrupted
+        #   的清单」，会话快照清单改名并归位问题 B，内容与行为不变。
+        # - useScreenRoundFlow.spec.ts：验收用例「中断续跑目标是重新开始 AI 筛选
+        #   而非继续」（ai_screen_api.py:350-351 的分层覆写）。
+        "webui/src/composables/useDiscoveryWorkflow.ts",
+        "webui/src/composables/__tests__/useScreenRoundFlow.spec.ts",
     }
 
     E2E_FOLLOWUP_ALLOWED_PATHS = frozenset({
@@ -487,3 +494,16 @@ class B096V2StructuralGuardTests(unittest.TestCase):
     def test_discovery_view_respects_line_red_line(self):
         lines = self.DISCOVERY_VIEW_PATH.read_text(encoding="utf-8").splitlines()
         self.assertLessEqual(len(lines), 1200)
+
+    def test_v2_new_modules_exist_and_are_not_empty(self):
+        # T046「新模块存在」：V2 引入的三个新模块必须落仓且非空——
+        # 并行筛选映射（树枝唯一一份）、Flow 呈现投影（页面可达性唯一来源）、
+        # v8 迁移（flows/flow_tracks 的 schema 归属）。
+        for relative in (
+            "webui/src/parallelFilterMapping.ts",
+            "webui/src/composables/useDiscoveryFlowPresentation.ts",
+            "webui/store_migrations_v8.py",
+        ):
+            path = self.ROOT / relative
+            self.assertTrue(path.is_file(), f"missing V2 module: {relative}")
+            self.assertGreater(path.stat().st_size, 0, f"empty V2 module: {relative}")

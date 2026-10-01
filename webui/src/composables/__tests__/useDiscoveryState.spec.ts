@@ -620,6 +620,57 @@ describe("useDiscoveryState.scopeLockReason（禁用原因如实说明）", () =
 // 「有活任务」与「没有落点」同时成立，上传简历入口守卫把用户带进开新一轮路径。
 // 落点跟随的是 Flow 投影到 state 的阶段集合（flowReachableSteps），不是被 historyMode
 // 收窄后的 enabledSteps。
+describe("useDiscoveryState 状态词表 A/B 谓词纯度（SPEC 046 v2「状态词表」）", () => {
+  // 词表唯一定义：活体任务只认排队中/运行中；已暂停、已中断属于「本轮未结束」，
+  // 两个问题各有一个谓词回答，任何一侧不得把另一侧的成员并进来。
+  it("① A 判活不含暂停与中断：pausedRunId 与 paused 快照都不算活体", () => {
+    const state = useDiscoveryState({ profileId: "vocab-a-paused" }, () => {});
+    state.pausedRunId.value = "screen-paused";
+    state.screenSnapshot.value = { status: "paused", progress: {}, logs: [] };
+    expect(hasLiveTaskState(state)).toBe(false);
+    // 同一事实必须被 B 谓词接住：本轮未结束。
+    expect(hasUnfinishedRound(state)).toBe(true);
+  });
+
+  it("② A 判活不含中断轮：Flow 投影非活体的活动线（已中断/已暂停）不算活体", () => {
+    const state = useDiscoveryState({ profileId: "vocab-a-interrupted" }, () => {});
+    state.setFlowActive(true);
+    state.setFlowLiveWorker(false);
+    expect(hasLiveTaskState(state)).toBe(false);
+    expect(hasUnfinishedRound(state)).toBe(true);
+  });
+
+  it("③ B 本轮未结束包含排队/运行/暂停/中断四种，终态才解除", () => {
+    for (const status of ["queued", "running", "paused", "interrupted"]) {
+      const state = useDiscoveryState({ profileId: "vocab-b-members" }, () => {});
+      state.setFlowActive(true);
+      state.setFlowLiveWorker(status === "queued" || status === "running");
+      expect(hasUnfinishedRound(state)).toBe(true);
+      expect(hasLiveTaskState(state)).toBe(status === "queued" || status === "running");
+    }
+    const closed = useDiscoveryState({ profileId: "vocab-b-closed" }, () => {});
+    closed.setFlowActive(false);
+    closed.setFlowLiveWorker(false);
+    expect(hasUnfinishedRound(closed)).toBe(false);
+  });
+
+  it("④ 快照排队/运行仍算活体；paused 快照属 B 不属 A；failed/cancelled 等终态两侧都不算", () => {
+    const state = useDiscoveryState({ profileId: "vocab-a-snapshots" }, () => {});
+    state.scrapeSnapshot.value = { status: "running", progress: {}, logs: [] };
+    expect(hasLiveTaskState(state)).toBe(true);
+    expect(hasUnfinishedRound(state)).toBe(true);
+    state.scrapeSnapshot.value = { status: "paused", progress: {}, logs: [] };
+    state.screenSnapshot.value = null;
+    state.recrawlSnapshot.value = null;
+    expect(hasLiveTaskState(state)).toBe(false);
+    expect(hasUnfinishedRound(state)).toBe(true);
+    state.scrapeSnapshot.value = { status: "cancelled", progress: {}, logs: [] };
+    state.screenSnapshot.value = { status: "failed", progress: {}, logs: [] };
+    expect(hasLiveTaskState(state)).toBe(false);
+    expect(hasUnfinishedRound(state)).toBe(false);
+  });
+});
+
 describe("useDiscoveryState 判活与落点同源（SPEC 046 第五轮）", () => {
   // useDiscoveryState 在函数体内声明全部 ref（:91 起），每个实例各自独立：
   // 判活用到的事实（流程活动线、任务快照、暂停轮次）没有跨实例通道，

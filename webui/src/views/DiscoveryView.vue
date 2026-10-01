@@ -399,7 +399,6 @@ const flowCoordinator = useDiscoveryFlowCoordinator({
   notify,
   requestDraftPlatform,
   openOneClick,
-  hasLiveTaskState,
   resetWorkflow: tasks.resetWorkflow,
   abandonRound: abandonRoundTask,
   maybeAutoStartNewRound: tasks.maybeAutoStartNewRound,
@@ -499,9 +498,10 @@ watch(activeStep, (step) => {
   // 035：历史轮浏览、从历史「回到最新」过渡期间，以及未结束任务存在时
   //（含刷新恢复把 activeStep 恢复为 results 的路径）一律不得置位。
   // 041：已抓取未筛选轮只是先看一眼结果，流程未结束，刷新后仍回到该现场。
-  // 046：这里问的是问题 A「此刻有没有活体 worker」——已中断/已暂停的轮次没有活体在跑，
-  // 用户走进 04 就是在看本轮结果，必须置位，否则 loadLatestResult 的未完成闸门会把
-  // 结果永远挡在门外（historyMode / returningFromHistory 是 ref，必须取 .value）。
+  // 046 v2 状态词表：这里只准问问题 A「此刻有没有活体 worker」（hasLiveTaskState
+  // 已拆纯：只认排队/运行，不含暂停与中断）。拿问题 B「本轮未结束」来挡置位，
+  // 中断轮的「已看过」就永不置位、loadLatestResult 的闸门把结果永远挡在门外
+  //（historyMode / returningFromHistory 是 ref，必须取 .value）。
   if (step === "results" && !historyMode.value && !returningFromHistory.value && !hasLiveTaskState()
       && !isScrapedOnly.value) {
     markResultsPageSeen();
@@ -631,7 +631,7 @@ watch(restoredTaskHint, (value) => {
             <Download v-else :size="17" aria-hidden="true" />
             {{ exportBusy ? "导出中…" : "导出 CSV" }}
           </button>
-             <button class="button secondary" type="button" data-testid="start-new-round" :disabled="Boolean(roundFlow.busyAction) || !parallelFlow.canResetNewRound.value || parallelFlow.stale.value" :title="roundFlow.busyAction === 'new-round' ? '重置中…' : '开始新一轮'" :aria-label="roundFlow.busyAction === 'new-round' ? '重置中…' : '开始新一轮'" @click="roundFlow.confirmNewRound()">
+             <button class="button secondary" type="button" data-testid="start-new-round" :disabled="Boolean(roundFlow.busyAction) || !parallelFlow.canResetNewRound.value || parallelFlow.stale.value" :title="roundFlow.busyAction === 'new-round' ? '重置中…' : parallelFlow.canResetNewRound.value || parallelFlow.stale.value ? '开始新一轮' : parallelFlow.newRoundBlockReason.value" :aria-label="roundFlow.busyAction === 'new-round' ? '重置中…' : '开始新一轮'" @click="roundFlow.confirmNewRound()">
             <LoaderCircle v-if="roundFlow.busyAction === 'new-round'" class="spin" :size="17" aria-hidden="true" />
             <RotateCcw v-else :size="17" aria-hidden="true" />
             {{ roundFlow.busyAction === 'new-round' ? "重置中…" : "开始新一轮" }}

@@ -70,9 +70,21 @@ export interface ParallelFlowState {
 }
 
 const ACTIVE_FLOW_STATUSES = new Set(["queued", "running", "paused", "interrupted"]);
-const RESETTABLE_ACTIVE_FLOW_STATUSES = new Set(["paused", "interrupted"]);
 // 活体 worker 的词汇只有一份，落在树干阶段卡口径（排队中 / 运行中）。
 const LIVE_WORKER_FLOW_STATUSES = new Set<string>(ACTIVE_TRACK_STATUSES);
+// SPEC 046 FR-015 + v2「状态词表」：开新一轮闸门只锁「还能推进」的三种状态——
+// 排队中 / 运行中 / 已暂停；已中断没有活体 worker，唯一出路就是开新一轮，必须放行。
+const NEW_ROUND_LOCKING_FLOW_STATUSES = new Set(["queued", "running", "paused"]);
+
+/** 本轮是否仍然锁住「开始新一轮」：外壳或任一轨道处于排队/运行/暂停。 */
+function flowLocksNewRound(flow: ParallelFlowState | null | undefined): boolean {
+  return Boolean(
+    flow && (
+      NEW_ROUND_LOCKING_FLOW_STATUSES.has(String(flow.status || ""))
+      || flow.tracks.some((track) => NEW_ROUND_LOCKING_FLOW_STATUSES.has(String(track.status || "")))
+    ),
+  );
+}
 
 /**
  * A Flow owns the round while either its envelope or one of its Tracks is
@@ -249,22 +261,30 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
   // 前者锁范围与提交，后者才决定实时画面与结果接回。
   const hasLiveWorker = computed(() => flowHasLiveWorker(flow.value));
 
-  const canStartNewRound = computed(() => !stale.value && !hasActiveTrack.value);
+  // FR-015：任一平台运行或暂停时不得开始新一轮；「已中断」不在锁定清单里——
+  // 词表明确它没有活体 worker，唯一出路是开新一轮，这一条不许回退。
+  const newRoundLocked = computed(() => flowLocksNewRound(flow.value));
+  const canStartNewRound = computed(() => !stale.value && !newRoundLocked.value);
+  // 挡住时的原因分层沿用树干 scopeLockReason 口径（useDiscoveryState.ts 821-829）：
+  // 还有排队/运行在说「进行中」，只剩暂停才说「已暂停」，不新写一套文案。
+  const newRoundBlockReason = computed(() => {
+    if (!newRoundLocked.value) return "";
+    const statuses = [
+      String(flow.value?.status || ""),
+      ...(flow.value?.tracks || []).map((track) => String(track.status || "")),
+    ];
+    return statuses.some((status) => status === "queued" || status === "running")
+      ? "任务进行中，平台已锁定"
+      : "任务已暂停，平台已锁定";
+  });
 
-  // A paused/restart-interrupted Flow has no active worker that must remain
-  // on the page; reset can send its durable run ids through the cancellation
-  // contract and close the stale Track.  Queued/running envelopes remain
-  // disabled in the UI, while the reset path still verifies them server-side.
+  // 已中断的 Flow 没有必须留在页面上的活体 worker：reset 走取消契约把 durable
+  // run ids 送掉、关掉旧 Track，再开新一轮。已暂停则按 FR-015 锁住——worker 还在
+  // 内存里等处理，出路是就地继续或「结束并保存 / 放弃本轮」收口，收口成终态后本闸
+  // 自然解锁。排队/运行同样锁住，reset 路径在服务端还会再验一次。
   const canResetNewRound = computed(() => {
     if (stale.value || !flow.value) return !stale.value;
-    const statuses = [
-      flow.value.status,
-      ...flow.value.tracks.map((track) => track.status),
-    ].map((status) => String(status || "")).filter(Boolean);
-    return !statuses.some((status) => (
-      ACTIVE_FLOW_STATUSES.has(status)
-      && !RESETTABLE_ACTIVE_FLOW_STATUSES.has(status)
-    ));
+    return !newRoundLocked.value;
   });
 
   function clearFlowStatus(): void {
@@ -742,6 +762,7 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     hasLiveWorker,
     canStartNewRound,
     canResetNewRound,
+    newRoundBlockReason,
     clearFlowError,
     setPlatformFilters,
     setUnifiedFilters,

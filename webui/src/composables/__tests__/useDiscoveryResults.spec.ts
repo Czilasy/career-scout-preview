@@ -1,5 +1,5 @@
 import { computed, ref } from "vue";
-import { hasLiveTaskState, useDiscoveryState } from "../useDiscoveryState";
+import { hasLiveTaskState, hasUnfinishedRound, useDiscoveryState } from "../useDiscoveryState";
 import { useDiscoveryResults } from "../useDiscoveryResults";
 import type { ResultsNeeds, RoundFlowLike } from "../discoveryDeps";
 import { apiRequest } from "../../api";
@@ -1074,5 +1074,29 @@ describe("useDiscoveryResults.returnToLatest 与树干判活同源（SPEC 046 �
     expect(state.activeStep.value).toBe("screen");
     expect(state.enabledSteps.value).toContain("screen");
     expect(latestResultCalls()).toBe(0);
+  });
+});
+
+describe("useDiscoveryResults 判活谓词纯度（SPEC 046 v2「状态词表」）", () => {
+  // 结果层此前在树干判活之外 OR 上 interruptedRunId——把中断当成有人在干活，
+  // 中断轮的「已看过结果页」因此永不置位、结果加载被闸门挡死（04 显示 0/0/0/0）。
+  // 词表：中断没有活体 worker，不属于问题 A；「本轮未结束」由 B 谓词回答。
+  it("A 判活不再 OR interruptedRunId：中断不算活体，「本轮未结束」由 B 谓词回答", () => {
+    apiRequestMock.mockReset();
+    const state = useDiscoveryState({ profileId: "vocab-results-live" }, () => {});
+    const results = useDiscoveryResults(state, makeDeps());
+
+    state.interruptedRunId.value = "screen-interrupted";
+    expect(results.hasLiveTaskState()).toBe(false);
+
+    state.interruptedRunId.value = "";
+    state.pausedRunId.value = "screen-paused";
+    expect(results.hasLiveTaskState()).toBe(false);
+    expect(hasUnfinishedRound(state)).toBe(true);
+
+    state.pausedRunId.value = "";
+    state.setFlowLiveWorker(true);
+    expect(results.hasLiveTaskState()).toBe(true);
+    state.setFlowLiveWorker(false);
   });
 });

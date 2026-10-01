@@ -180,13 +180,14 @@ function setPipelineResult(result: PipelineResult, opts?: { preservePresentation
 
 
 // 判活（问题 A「此刻有没有活体 worker」）只有一份口径，落在树干
-// useDiscoveryState.hasLiveTaskState：它认 Flow 的活体轨道（页面已投影时），也认暂停与
-// 运行中的任务快照。结果层不再自带一套状态白名单，否则「全部」在跑、领先平台已出结果时
-// 这里会判成「没有活任务」，首屏对齐清掉本轮现场。
-// 这里只补树干未覆盖的一个事实：本轮任务被中断、等待用户接回。
-// 注意：「这一轮还没结束」（落点 / 回到最新）不是这里问的问题，用 liveTaskStep(state)。
+// useDiscoveryState.hasLiveTaskState：Flow 侧认投影好的活体轨道（排队中/运行中），
+// 任务快照只认 running/queued。结果层不再自带状态白名单，也不在这条 OR 上补别的
+// 事实——此前 OR interruptedRunId 把中断当成有人在干活，中断轮的「已看过结果页」
+// 永不置位、结果加载被闸门挡死（04 显示 0/0/0/0 而接口里数据完好）。
+// 「这一轮还没结束」（含已中断、已暂停）是问题 B，用 hasUnfinishedRound /
+// liveTaskStep(state) 回答，不许再借道判活。
 function hasLiveTaskState(): boolean {
-  return hasLiveTaskStateInTrunk(state) || Boolean(interruptedRunId.value);
+  return hasLiveTaskStateInTrunk(state);
 }
 
 

@@ -71,7 +71,10 @@ export interface ScreenRoundFlowDeps {
     notify: (message: string, tone?: Notice["tone"]) => void;
   };
 }
-const TERMINAL_POLL_STATUSES = new Set([
+// 轮询停止清单：worker 不再在跑就停——含 paused/interrupted（此刻无活体），
+// 但它们不是终态：「本轮未结束」（问题 B）仍由 hasUnfinishedRound 回答，
+// 名字必须与内容一致（此前叫 TERMINAL 却装着暂停/中断）。
+const POLL_STOP_STATUSES = new Set([
   "paused", "failed", "cancelled", "interrupted", "completed", "completed_with_pending",
 ]);
 
@@ -204,8 +207,17 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       hasScreenRun: hasScreenRun.value,
       hasUncertain: Number(deps.refs.uncertainCount.value) > 0,
     });
+    // 续跑覆写按后端事实分层（ai_screen_api.py:350-351）：paused 就地继续；
+    // 服务重启打断的 interrupted（resumable 为真）由既有「开始 AI 筛选」入口
+    //（startAiScreen，服务端自动继承断点）重新开始——那是 kind:"start"，不是继续。
+    // 只要还有非中断的可续跑目标就保留「继续」，全为中断才改口「重新开始」。
     if (anyResumableTarget.value && ["none", "start", "recrawl"].includes(action.kind)) {
-      return { kind: "continue", label: "继续 AI 筛选" };
+      const hasNonInterruptedTarget = Object.values(roundContexts.value).some((ctx) => Boolean(
+        ctx && ctx.resumable && ctx.status && ctx.status !== "interrupted",
+      ));
+      return hasNonInterruptedTarget
+        ? { kind: "continue", label: "继续 AI 筛选" }
+        : { kind: "start", label: "重新开始 AI 筛选" };
     }
     return action;
   });
@@ -370,7 +382,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
           paused = true;
           break;
         }
-        if (TERMINAL_POLL_STATUSES.has(String(data.status))) {
+        if (POLL_STOP_STATUSES.has(String(data.status))) {
           deps.refs.pausingScreen.value = false;
           deps.refs.screenSnapshot.value = data;
           terminalOther = true;
@@ -402,7 +414,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       // 再读一次权威状态：已收口才释放；读不到则保留占用，刷新后可继续对账。
       const latest = await readTaskState(runId, deps.refs.profileId?.value);
       const latestStatus = String(latest?.status || "");
-      if (latest && TERMINAL_POLL_STATUSES.has(latestStatus)) {
+      if (latest && POLL_STOP_STATUSES.has(latestStatus)) {
         deps.refs.screenSnapshot.value = latest;
         deps.refs.pausingScreen.value = false;
         deps.refs.screenBusy.value = false;
@@ -584,7 +596,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
           taskStateUrl(runId, deps.refs.profileId?.value),
         );
         deps.refs.recrawlSnapshot.value = data;
-        if (TERMINAL_POLL_STATUSES.has(String(data.status))) {
+        if (POLL_STOP_STATUSES.has(String(data.status))) {
           terminalStatus = String(data.status);
           terminalSnapshot = data;
           break;
@@ -609,7 +621,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     } catch (error) {
       const latest = await readTaskState(runId, deps.refs.profileId?.value);
       const latestStatus = String(latest?.status || "");
-      if (latest && TERMINAL_POLL_STATUSES.has(latestStatus)) {
+      if (latest && POLL_STOP_STATUSES.has(latestStatus)) {
         deps.refs.recrawlSnapshot.value = latest;
         deps.refs.recrawlBusy.value = false;
         if (latestStatus === "paused") {
@@ -682,7 +694,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     } catch (error) {
       const latest = await readTaskState(runId, deps.refs.profileId?.value);
       const latestStatus = String(latest?.status || "");
-      if (latest && TERMINAL_POLL_STATUSES.has(latestStatus)) {
+      if (latest && POLL_STOP_STATUSES.has(latestStatus)) {
         deps.refs.recrawlSnapshot.value = latest;
         deps.refs.recrawlBusy.value = false;
         if (latestStatus === "cancelled") {

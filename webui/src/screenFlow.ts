@@ -3,7 +3,9 @@ import type { Platform, RoundContext } from "./types";
 export type ScreenPrimaryAction =
   | { kind: "pause"; label: "暂停筛选" }
   | { kind: "continue"; label: "继续 AI 筛选" }
-  | { kind: "start"; label: "开始 AI 筛选" }
+  // SPEC 046 v2：kind:"start" 有两个说法——新轮开始与「服务重启打断后重新开始」。
+  // 后者由后端同一入口继承断点（ai_screen_api.py:350-351），不是就地继续。
+  | { kind: "start"; label: "开始 AI 筛选" | "重新开始 AI 筛选" }
   | { kind: "recrawl"; label: "全部重抓" }
   | { kind: "pause-recrawl"; label: "暂停重抓" }
   | { kind: "continue-recrawl"; label: "继续重抓" }

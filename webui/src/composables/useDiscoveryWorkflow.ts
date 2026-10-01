@@ -23,7 +23,9 @@ import type { StepId } from "./useDiscoveryState";
 import type { WorkflowNeeds } from "./discoveryDeps";
 import { setThemePlatform } from "./useTheme";
 
-const LIVE_SAVED_TASK_STATUSES = new Set(["running", "queued", "paused", "pausing", "interrupted"]);
+// 会话快照的「本轮未结束」清单（问题 B）：排队/运行/暂停/中断都还没收口。
+// 名字与内容一致：这里不是活体清单，暂停与中断按词表属于未结束。
+const UNFINISHED_SAVED_TASK_STATUSES = new Set(["running", "queued", "paused", "pausing", "interrupted"]);
 const TERMINAL_SAVED_TASK_STATUSES = new Set([
   "done", "completed", "completed_with_pending", "partial", "succeeded", "scraped_only",
 ]);
@@ -45,7 +47,7 @@ function isCompletedWorkflowSnapshot(saved: Record<string, any>): boolean {
   const statuses = [saved.scrapeSnapshot?.status, saved.screenSnapshot?.status, saved.recrawlSnapshot?.status]
     .map((status) => String(status || ""))
     .filter(Boolean);
-  if (statuses.some((status) => LIVE_SAVED_TASK_STATUSES.has(status))) return false;
+  if (statuses.some((status) => UNFINISHED_SAVED_TASK_STATUSES.has(status))) return false;
   return statuses.every((status) => TERMINAL_SAVED_TASK_STATUSES.has(status));
 }
 

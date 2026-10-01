@@ -809,12 +809,16 @@ describe("Discovery recovery paths", () => {
   }
 
   /** 用户被中断那一轮的会话现场：停在 03、没进过 04、也没有结果。 */
-  function seedInterruptedRoundScene(profileId: string): void {
+  function seedInterruptedRoundScene(
+    profileId: string,
+    options: { interruptedRunId?: string } = {},
+  ): void {
     sessionStorage.setItem(`career-scout-workflow:${profileId}`, JSON.stringify({
       version: 2, unfinished: true, activeStep: "screen", analysisReady: true,
       keywords: [], selectedKeywords: [], cityText: "", filterValues: { boss: {}, zhilian: {} },
       profileSummary: "", profileFacts: {},
-      scrapeTaskId: "", screenTaskId: "", pausedRunId: "", interruptedRunId: "", recrawlTaskId: "",
+      scrapeTaskId: "", screenTaskId: "", pausedRunId: "",
+      interruptedRunId: options.interruptedRunId || "", recrawlTaskId: "",
       scrapeCompleted: true,
       scrapeSnapshot: { status: "completed", progress: { message: "上次抓取已完成" }, logs: [] },
       screenSnapshot: { status: "interrupted", progress: {}, logs: [] },
@@ -910,7 +914,9 @@ describe("Discovery recovery paths", () => {
     vi.unstubAllGlobals();
   });
 
-  it("已中断仍锁住本轮范围与新一轮提交（判活放开不放过头）", async () => {
+  // SPEC 046 v2 状态词表：「已中断」没有活体 worker，唯一出路是开新一轮——
+  // 范围与实时现场仍按「本轮未结束」锁住，但开新轮出口必须放行（FR-015 只锁运行/暂停）。
+  it("已中断轮范围仍锁，但开新一轮出口放行（词表：中断不是活体）", async () => {
     const profileId = "profile-interrupted-round";
     seedInterruptedRoundScene(profileId);
     stubInterruptedRoundFetch("interrupted");
@@ -922,14 +928,37 @@ describe("Discovery recovery paths", () => {
     const vm = recoveryViewModel(wrapper);
     expect(vm.scopeLocked).toBe(true);
     expect(vm.pipelineBusy).toBe(true);
-    expect(vm.parallelFlow.canStartNewRound.value).toBe(false);
+    expect(vm.parallelFlow.canStartNewRound.value).toBe(true);
 
     await enterResultsStep(wrapper);
 
-    // 结果已接进现场，本轮范围与提交守卫不因此放松。
+    // 结果已接进现场，本轮范围守卫不因此放松；开新轮出口保持放行。
     expect(vm.scopeLocked).toBe(true);
     expect(vm.pipelineBusy).toBe(true);
-    expect(vm.parallelFlow.canStartNewRound.value).toBe(false);
+    expect(vm.parallelFlow.canStartNewRound.value).toBe(true);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  // 「已看过结果页」的置位只认问题 A（此刻有活体 worker）。历史上结果层把
+  // interruptedRunId OR 进判活，中断轮的「已看过」永不置位、195 行闸门把结果
+  // 永远挡在门外（04 显示 0/0/0/0 而接口里数据完好）。
+  it("legacy 中断断点在场时进 04 仍能置位「已看过结果页」", async () => {
+    const profileId = "profile-interrupted-round";
+    seedInterruptedRoundScene(profileId, { interruptedRunId: "screen-unjudged-lane" });
+    stubInterruptedRoundFetch("interrupted");
+
+    const wrapper = mount(DiscoveryView, { props: { profileId } });
+    await flushPromises();
+    await flushPromises();
+
+    const vm = recoveryViewModel(wrapper);
+    expect(vm.hasLiveTaskState()).toBe(false);
+
+    await enterResultsStep(wrapper);
+
+    expect(vm.activeStep).toBe("results");
+    expect(vm.resultsPageSeen).toBe(true);
     wrapper.unmount();
     vi.unstubAllGlobals();
   });

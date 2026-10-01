@@ -272,6 +272,29 @@ describe("useScreenRoundFlow", () => {
     expect(flow.continueTargetList.value).toEqual(["boss"]);
   });
 
+  // SPEC 046 v2：续跑覆写按后端事实分层（ai_screen_api.py:350-351）——
+  // paused 就地继续；服务重启打断的 interrupted（resumable 为真）走「重新开始 AI 筛选」，
+  // 由既有「开始 AI 筛选」入口（POST startAiScreen，服务端自动继承断点）发起，不再谎称「继续」。
+  it("046 状态词表: a restart-interrupted resumable target exits via「重新开始 AI 筛选」(start)", async () => {
+    const { refs, api } = makeDeps();
+    const flow = useScreenRoundFlow({ refs, api });
+    flow.registerRoundContext("boss", roundContext({ status: "interrupted", resumable: true }));
+    expect(flow.screenAction.value).toEqual({ kind: "start", label: "重新开始 AI 筛选" });
+    // 点它 = 发起重新开始（走 startAiScreen 既有入口），不是 continue。
+    await flow.startScreen();
+    expect(api.startAiScreen).toHaveBeenCalledTimes(1);
+    expect(api.continueAiScreen).not.toHaveBeenCalled();
+  });
+
+  it("046 状态词表: a still-paused target among interrupted ones keeps「继续 AI 筛选」", () => {
+    const { refs, api } = makeDeps();
+    const flow = useScreenRoundFlow({ refs, api });
+    flow.registerRoundContext("zhilian", roundContext({ platform: "zhilian", screen_run_id: "screen-z", status: "paused", resumable: true }));
+    flow.registerRoundContext("boss", roundContext({ status: "interrupted", resumable: true }));
+    // 当前轮快照落在 boss（已中断）→ 派生 none；覆写读到 zhilian 仍有暂停目标 → 就地继续。
+    expect(flow.screenAction.value).toEqual({ kind: "continue", label: "继续 AI 筛选" });
+  });
+
   it("035: confirmNewRound jumps back to the task view when an older platform is still resumable", async () => {
     const { refs, api } = makeDeps();
     const flow = useScreenRoundFlow({ refs, api });

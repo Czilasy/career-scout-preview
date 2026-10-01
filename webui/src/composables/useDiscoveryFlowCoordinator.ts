@@ -2,6 +2,7 @@ import { computed, onBeforeUnmount, ref, watch, type Ref } from "vue";
 import type { ConditionSnapshotV2, Notice, Platform, TaskSnapshot as ApiTaskSnapshot } from "../types";
 import { errorMessage, userFacingMessage } from "../api";
 import { platformLabel, ACTIVE_TRACK_STATUSES } from "../discovery";
+import { hasUnfinishedRound } from "./useDiscoveryState";
 import type { DiscoveryState, StepId } from "./useDiscoveryState";
 import { setThemePlatform } from "./useTheme";
 import {
@@ -66,7 +67,6 @@ export interface DiscoveryFlowCoordinatorOptions {
   notify: (message: string, tone?: Notice["tone"]) => void;
   requestDraftPlatform: (platform: Exclude<ParallelSelection, "all">) => unknown;
   openOneClick: () => unknown;
-  hasLiveTaskState: () => boolean;
   resetWorkflow: () => Promise<boolean>;
   abandonRound: () => Promise<boolean>;
   maybeAutoStartNewRound: () => Promise<boolean>;
@@ -646,7 +646,9 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
     }).finally(() => {
       if (!isCurrent(profileRestoreIntent)) return;
       options.restoreSaved02State();
-      if (profileFlowRecoveryStatus === "empty" && options.hasLiveTaskState()) parallelMode.value = false;
+      // SPEC 046 状态词表：画像下没有 Flow 时，本轮若仍未结束（含已暂停）由
+      // legacy 单平台现场接管，不得留在并行模式——这里问的是问题 B，不是判活。
+      if (profileFlowRecoveryStatus === "empty" && hasUnfinishedRound(state)) parallelMode.value = false;
       profileRestoreInProgress = null;
       if (profileFlowRecoveryStatus === "empty"
         && !state.scrapeBusy.value && !state.screenBusy.value && !state.recrawlBusy.value) {

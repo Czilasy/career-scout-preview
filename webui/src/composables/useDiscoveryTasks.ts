@@ -40,7 +40,7 @@ import {
   UploadCloud,
   X,
 } from "@lucide/vue";
-import { hasLiveTaskState, MODE_DEFAULT_PAGES } from "./useDiscoveryState";
+import { hasUnfinishedRound, MODE_DEFAULT_PAGES } from "./useDiscoveryState";
 import type { MergedLatestResult, TaskSnapshot } from "./useDiscoveryState";
 import { setThemePlatform } from "./useTheme";
 import { useDiscoverySceneState } from "./useDiscoverySceneState";
@@ -990,8 +990,9 @@ async function maybeAutoStartNewRound(): Promise<boolean> {
   if (!isCurrentRecovery()) return false;
   // 未完成流程（本地有未完成快照）→ 恢复现场（B068 行为保留，不改）
   if (unfinishedWorkflowRestored.value) return false;
-  // 035：未结束任务真实存在时，刷新/启动优先恢复现场，不自动开始新一轮、不取消任务。
-  if (hasLiveTaskState(state)) return false;
+  // 035 + SPEC 046 状态词表：这里问的是问题 B「这一轮还没结束」（含已暂停），
+  // 未结束轮刷新/启动优先恢复现场，不自动开始新一轮、不取消任务（FR-015：暂停锁新轮）。
+  if (hasUnfinishedRound(state)) return false;
   // Spec041 返工（真实验收失败项一）：已完成（已进 04 页 / 结束保存）不再
   // "刷新即自动开新一轮"——那会把刚恢复的当前轮结果与现场清成 01 空上传页。
   // 完成态优先原地接回；会话存档缺失时从后端最新轮补齐；确实取不到结果

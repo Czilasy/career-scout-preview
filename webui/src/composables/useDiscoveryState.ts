@@ -1707,9 +1707,10 @@ export type DiscoveryState = ReturnType<typeof useDiscoveryState>;
 /**
  * 判活（问题 A「此刻有没有活体 worker 在跑」）：决定迟到响应能不能覆盖现场、
  * 04 能不能认「已进结果页」并把本轮结果接进来。
- * Flow 侧只认活体轨道（排队中 / 运行中）：已中断、已暂停的流程活动线不再单独算活，
- * 否则一条被服务重启打断的流程会把 04 的结果接回永久关在门外。
- * 「这一轮还没结束」是另一个问题（问题 B），一律用 hasUnfinishedRound，不要用这个。
+ * 词表 A 侧唯一定义：只有「排队中 / 运行中」算活体——Flow 侧只认活体轨道投影，
+ * 任务快照只认 running/queued。已暂停、已中断都没有活体在跑，属于问题 B
+ * 「这一轮还没结束」，一律用 hasUnfinishedRound 回答；把它们并回判活，
+ * 中断/暂停轮就会被当成「有人在干活」，04 的结果接回与「已看过」置位永开关死。
  */
 export function hasLiveTaskState(state: DiscoveryState): boolean {
   // 页面还没投影活体事实（flowLiveWorker === null：单平台传统链路、未经协调器投影的
@@ -1717,8 +1718,7 @@ export function hasLiveTaskState(state: DiscoveryState): boolean {
   // 保守口径：宁可当作有活，也不能凭空判成「本轮已结束」。
   const liveWorker = state.flowLiveWorker.value;
   if (liveWorker === null ? state.flowActive.value : liveWorker) return true;
-  if (state.pausedRunId.value) return true;
-  const liveStatuses = new Set(["running", "queued", "paused"]);
+  const liveStatuses = new Set(["running", "queued"]);
   for (const snap of [
     state.screenSnapshot.value,
     state.scrapeSnapshot.value,
@@ -1730,14 +1730,22 @@ export function hasLiveTaskState(state: DiscoveryState): boolean {
 }
 
 /**
- * 问题 B「这一轮还没结束」：流程活动线（含已中断、已暂停的轮）或真有活体任务 / 待恢复轮次。
+ * 问题 B「这一轮还没结束」：流程活动线（含已中断、已暂停的轮）、真有活体任务，
+ * 或本轮留着暂停/进行中快照等待处理与接回。
  *
  * 它决定的是「用户要不要被带回这一轮的真实进度页」——落点 liveTaskStep、
  * 灵动岛「回到最新」问这个。已中断的轮同样没结束：落点不能为空、不能造不可达步骤，
  * 否则上传入口守卫会把用户带进「开新一轮」，把刚中断的这一轮冲掉（SPEC 046 第五轮修过的两个缺陷）。
+ * 词表 B 侧成员（paused）在 A 侧被剔除后由这里自持，两份谓词不得再互相借道。
  */
 export function hasUnfinishedRound(state: DiscoveryState): boolean {
-  return state.flowActive.value || hasLiveTaskState(state);
+  if (state.flowActive.value || hasLiveTaskState(state)) return true;
+  if (state.pausedRunId.value) return true;
+  return [
+    state.screenSnapshot.value,
+    state.scrapeSnapshot.value,
+    state.recrawlSnapshot.value,
+  ].some((snapshot) => snapshotRoundUnfinished(snapshot));
 }
 
 /** 035：跨域共享派生的最小判定面（接受任意携带 status 的快照形状）。 */
@@ -1752,24 +1760,25 @@ export interface LiveTaskProbe {
   interruptedRunId?: string;
 }
 
-const LIVE_TASK_STATUSES = new Set(["running", "queued", "paused"]);
+// 落点侧（问题 B 的一部分）的快照清单：排队/运行/暂停都还有未收口的现场。
+// 名字必须与内容一致——这是「本轮未结束」的清单，不是活体清单（暂停不在 A 侧）。
+const UNFINISHED_ROUND_SNAPSHOT_STATUSES = new Set(["running", "queued", "paused"]);
 
-function snapshotLive(snapshot?: { status?: string | null } | null): boolean {
-  return Boolean(snapshot && LIVE_TASK_STATUSES.has(String(snapshot.status || "")));
+function snapshotRoundUnfinished(snapshot?: { status?: string | null } | null): boolean {
+  return Boolean(snapshot && UNFINISHED_ROUND_SNAPSHOT_STATUSES.has(String(snapshot.status || "")));
 }
 
 /**
  * 未结束任务的「真实进度页」只读派生：
- * 抓取活（运行/排队/暂停）→ "search"（02，抓取任务的真实进度页）；
- * 筛选/重抓活（含 pausedRunId）→ "screen"（03）；失败/中断快照只保留错误展示。
- * 抓取+筛选同时活时以抓取为准（一键链路筛选接续时抓取快照已终态，自然落 03）。
+ * 抓取段未收口（运行/排队/暂停）→ "search"（02，抓取任务的真实进度页）；
+ * 筛选/重抓段未收口（含 pausedRunId）→ "screen"（03）；失败/中断快照只保留错误展示。
  */
 export function deriveLiveTaskStep(probe: LiveTaskProbe): StepId | "" {
-  if (probe.scrapeBusy || snapshotLive(probe.scrapeSnapshot)) return "search";
+  if (probe.scrapeBusy || snapshotRoundUnfinished(probe.scrapeSnapshot)) return "search";
   if (
     probe.screenBusy || probe.recrawlBusy
-    || snapshotLive(probe.screenSnapshot)
-    || snapshotLive(probe.recrawlSnapshot)
+    || snapshotRoundUnfinished(probe.screenSnapshot)
+    || snapshotRoundUnfinished(probe.recrawlSnapshot)
     || probe.pausedRunId
   ) return "screen";
   return "";
