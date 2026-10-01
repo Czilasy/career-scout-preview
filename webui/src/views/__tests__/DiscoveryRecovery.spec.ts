@@ -915,7 +915,8 @@ describe("Discovery recovery paths", () => {
   });
 
   // SPEC 046 v2 状态词表：「已中断」没有活体 worker，唯一出路是开新一轮——
-  // 范围与实时现场仍按「本轮未结束」锁住，但开新轮出口必须放行（FR-015 只锁运行/暂停）。
+  // 本轮范围仍按「本轮未结束」锁住，但「能不能开新一轮」只由那一份清单回答：
+  // 中断不在清单里，所以 02 主启动按钮与提交守卫（pipelineBusy）都放行。
   it("已中断轮范围仍锁，但开新一轮出口放行（词表：中断不是活体）", async () => {
     const profileId = "profile-interrupted-round";
     seedInterruptedRoundScene(profileId);
@@ -927,23 +928,25 @@ describe("Discovery recovery paths", () => {
 
     const vm = recoveryViewModel(wrapper);
     expect(vm.scopeLocked).toBe(true);
-    expect(vm.pipelineBusy).toBe(true);
+    expect(vm.pipelineBusy).toBe(false);
     expect(vm.parallelFlow.canStartNewRound.value).toBe(true);
 
     await enterResultsStep(wrapper);
 
     // 结果已接进现场，本轮范围守卫不因此放松；开新轮出口保持放行。
     expect(vm.scopeLocked).toBe(true);
-    expect(vm.pipelineBusy).toBe(true);
+    expect(vm.pipelineBusy).toBe(false);
     expect(vm.parallelFlow.canStartNewRound.value).toBe(true);
     wrapper.unmount();
     vi.unstubAllGlobals();
   });
 
   // 「已看过结果页」的置位只认问题 A（此刻有活体 worker）。历史上结果层把
-  // interruptedRunId OR 进判活，中断轮的「已看过」永不置位、195 行闸门把结果
-  // 永远挡在门外（04 显示 0/0/0/0 而接口里数据完好）。
-  it("legacy 中断断点在场时进 04 仍能置位「已看过结果页」", async () => {
+  // interruptedRunId OR 进判活，中断轮的「已看过」因此永不置位、199 行那道闸门把
+  // 结果永远挡在门外（04 显示 0/0/0/0 而接口里数据完好）。
+  // 收口第一单补全验收：闸门拆掉后必须真的把本轮结果读进来——resultLoaded 置位、
+  // 四个桶按本轮事实给出具体数字，"已看过"单独置位不算通过。
+  it("legacy 中断断点在场时进 04 仍加载本轮结果并给出四个桶", async () => {
     const profileId = "profile-interrupted-round";
     seedInterruptedRoundScene(profileId, { interruptedRunId: "screen-unjudged-lane" });
     stubInterruptedRoundFetch("interrupted");
@@ -959,6 +962,8 @@ describe("Discovery recovery paths", () => {
 
     expect(vm.activeStep).toBe("results");
     expect(vm.resultsPageSeen).toBe(true);
+    expect(vm.resultLoaded).toBe(true);
+    expect(wrapper.findAll(".vtab-count").map((count) => count.text())).toEqual(["11", "23", "377", "642"]);
     wrapper.unmount();
     vi.unstubAllGlobals();
   });

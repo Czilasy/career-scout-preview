@@ -41,7 +41,7 @@ describe("useDiscoveryParallelFlow", () => {
     expect((calls[0].options?.json as Record<string, unknown>).selection).toBe("all");
     expect(state.tracks.value.boss?.status).toBe("running");
     expect(state.tracks.value.zhilian?.status).toBe("paused");
-    expect(state.hasActiveTrack.value).toBe(true);
+    expect(state.hasUnfinishedRound.value).toBe(true);
     expect(state.canResetNewRound.value).toBe(false);
     state.clearPolling();
   });
@@ -61,7 +61,7 @@ describe("useDiscoveryParallelFlow", () => {
         status: "paused", stage: "ai", screen_run_id: "screen-paused",
       }],
     });
-    expect(state.hasActiveTrack.value).toBe(true);
+    expect(state.hasUnfinishedRound.value).toBe(true);
     expect(state.canStartNewRound.value).toBe(false);
     expect(state.canResetNewRound.value).toBe(false);
     expect(state.newRoundBlockReason.value).toBe("任务已暂停，平台已锁定");
@@ -152,7 +152,7 @@ describe("useDiscoveryParallelFlow", () => {
       ],
     });
 
-    expect(state.hasActiveTrack.value).toBe(true);
+    expect(state.hasUnfinishedRound.value).toBe(true);
     // 状态词表：已中断没有活体 worker，「开始新一轮」出口必须放行（提交闸门同一份清单）。
     expect(state.canStartNewRound.value).toBe(true);
     expect(state.canResetNewRound.value).toBe(true);
@@ -179,7 +179,7 @@ describe("useDiscoveryParallelFlow", () => {
       ],
     });
 
-    expect(state.hasActiveTrack.value).toBe(true);
+    expect(state.hasUnfinishedRound.value).toBe(true);
     expect(state.canResetNewRound.value).toBe(false);
     state.clearPolling();
   });
@@ -455,7 +455,7 @@ describe("useDiscoveryParallelFlow", () => {
         tracks: [],
       });
 
-      expect(state.hasActiveTrack.value).toBe(true);
+      expect(state.hasUnfinishedRound.value).toBe(true);
       expect(state.canStartNewRound.value).toBe(false);
       expect(state.canResetNewRound.value).toBe(false);
       await expect(state.start("all")).rejects.toThrow("运行或暂停");
@@ -464,7 +464,7 @@ describe("useDiscoveryParallelFlow", () => {
   );
 
   // SPEC 046 判活口径：只有「排队中 / 运行中」的轨道算此刻有活体 worker（hasLiveWorker），
-  // 已暂停与已中断属于「这一轮还没结束」（hasActiveTrack），但没有活体——04 能否接回本轮
+  // 已暂停与已中断属于「这一轮还没结束」（hasUnfinishedRound），但没有活体——04 能否接回本轮
   // 结果、迟到响应能否覆盖实时现场只按前者判。两个谓词必须分派，不得合并。
   it("separates live worker (queued/running) from an unfinished round (paused/interrupted)", () => {
     const cases: Array<[string, boolean]> = [
@@ -489,7 +489,7 @@ describe("useDiscoveryParallelFlow", () => {
       });
       expect(state.hasLiveWorker.value).toBe(liveWorker);
       // 未结束（锁范围、锁提交、定落点）覆盖排队/运行/暂停/中断四种外壳。
-      expect(state.hasActiveTrack.value).toBe(["queued", "running", "paused", "interrupted"].includes(status));
+      expect(state.hasUnfinishedRound.value).toBe(["queued", "running", "paused", "interrupted"].includes(status));
       state.clearPolling();
     }
   });

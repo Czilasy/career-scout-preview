@@ -35,7 +35,7 @@ import {
   singleSelectNextValue,
 } from "../discovery";
 import { setThemePlatform } from "../composables/useTheme";
-import { liveTaskStep } from "./useDiscoveryState";
+import { unfinishedRoundStep } from "./useDiscoveryState";
 import {
   useResumeAnalysisFlow,
   type ResumeAnalysisTaskState,
@@ -343,7 +343,7 @@ function analyzeResume() {
   }
   // 035：未结束任务存在时，上传简历不取消旧任务、不开新一轮，直接跳回任务视图。
   // 跳回落点按任务类型分派（抓取活 → 02；筛选/重抓活 → 03；流程在跑时跟随投影）。
-  const liveStep = liveTaskStep(state);
+  const liveStep = unfinishedRoundStep(state);
   if (liveStep) {
     // 提示必须跟着真实落点走：navigateStep 在看历史轮或被人工停留拦住时会原地不动
     //（历史轮那条还会另发「历史轮次不可改写」），此时说「已回到任务进度」就是谎报。

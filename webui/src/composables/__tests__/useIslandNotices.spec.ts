@@ -428,6 +428,8 @@ describe("useIslandNotices — 暂停族行标题与事实一致", () => {
     const state = useDiscoveryState({ profileId: "notice-closed-round" }, () => {});
     state.flowActive.value = false;
     state.flowLiveWorker.value = false;
+    // 「轮次已收尾」的前提是这轮归 Flow 管：归属在场时 B 只看 flows + flow_tracks。
+    state.setFlowReachableSteps(new Set(["search", "screen", "results"]), "notice-flow-closed");
     const status = ref<CapsuleStatusPayload | null>(
       makeStatus({ state: "running", platform: "boss", progress: { phase: "screening", done: 5 } }),
     );

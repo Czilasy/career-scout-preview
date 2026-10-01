@@ -11,7 +11,7 @@ import {
   roundConditionsRestored,
   type ScreenPrimaryAction,
 } from "../screenFlow";
-import { deriveLiveTaskStep } from "./useDiscoveryState";
+import { deriveUnfinishedRoundStep } from "./useDiscoveryState";
 import type { Notice, Platform, RoundContext, TaskSnapshot } from "../types";
 
 export interface ScreenRoundFlowDeps {
@@ -742,7 +742,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     // 035（真机问题②，FR-011）：未结束任务存在（含抓取运行中/暂停/中断）时，
     // 一律跳回该任务的真实进度页（抓取→02、筛选/重抓→03），不 reset、不取消、不弹窗。
     // 守卫先于 resumable 计算——历史模式 04 页入口同样被此覆盖。
-    const liveStep = deriveLiveTaskStep({
+    const liveStep = deriveUnfinishedRoundStep({
       scrapeBusy: deps.refs.scrapeBusy.value,
       scrapeSnapshot: deps.refs.scrapeSnapshot.value,
       screenBusy: deps.refs.screenBusy.value,
@@ -750,7 +750,6 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       recrawlBusy: deps.refs.recrawlBusy.value,
       recrawlSnapshot: deps.refs.recrawlSnapshot.value,
       pausedRunId: deps.refs.pausedRunId.value,
-      interruptedRunId: deps.refs.interruptedRunId.value,
     });
     if (liveStep && !flowOwned) {
       // 历史模式下先完整退出历史（还原平台、清理历史展示），再落到任务进度页。

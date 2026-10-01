@@ -7,7 +7,7 @@ import type { DiscoveryState, StepId } from "./useDiscoveryState";
 import { setThemePlatform } from "./useTheme";
 import {
   isParallelFlowStartStaleError,
-  isActiveParallelFlow,
+  hasUnfinishedParallelRound,
   registerDiscoveryParallelRecovery,
   type ParallelFlowState,
   type ParallelSelection,
@@ -19,7 +19,7 @@ import type { useDiscoverySceneState } from "./useDiscoverySceneState";
 
 /** A Flow is active when either its envelope or one of its Tracks is active. */
 export function hasActiveDiscoveryFlow(flow: ParallelFlowState | null | undefined): boolean {
-  return isActiveParallelFlow(flow);
+  return hasUnfinishedParallelRound(flow);
 }
 
 type ParallelFlowController = ReturnType<typeof useDiscoveryParallelFlow>;
@@ -104,7 +104,7 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
       }
       // A late recovery response must not reintroduce a completed
       // single-platform Flow after the user explicitly chose 全部.
-      if (value && flow.flow.value?.selection !== "all" && !flow.hasActiveTrack.value) {
+      if (value && flow.flow.value?.selection !== "all" && !flow.hasUnfinishedRound.value) {
         flow.restore(null);
       }
     },
@@ -115,7 +115,7 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
     userModeIntent += 1;
     invalidate();
     flow.clearFlowError();
-    if (selection === "all" && flow.flow.value?.selection !== "all" && !flow.hasActiveTrack.value) {
+    if (selection === "all" && flow.flow.value?.selection !== "all" && !flow.hasUnfinishedRound.value) {
       flow.restore(null);
     }
     parallelMode.value = selection === "all";
@@ -283,11 +283,16 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
       restoreNavigationPending = false;
     }
   }, { flush: "post", immediate: true });
-  watch(flow.hasActiveTrack, (active) => state.setFlowActive(active), { immediate: true });
-  // 「本轮未结束」（hasActiveTrack：含已中断、已暂停）与「此刻有活体 worker」
+  watch(flow.hasUnfinishedRound, (active) => state.setFlowActive(active), { immediate: true });
+  // 「本轮未结束」（hasUnfinishedRound：含已中断、已暂停）与「此刻有活体 worker」
   // （hasLiveWorker：轨道排队中/运行中）是两件事，必须各自投影：前者锁范围、定落点，
   // 后者才决定 04 能否接回本轮结果、迟到响应能否覆盖实时现场。
   watch(flow.hasLiveWorker, (live) => state.setFlowLiveWorker(live), { immediate: true });
+  // SPEC 046 FR-015：「能不能开新一轮」是第三个问题，成员与上面两份都不同（排队/运行/
+  // 暂停锁、已中断放行），整棵树只有 useDiscoveryParallelFlow 那一份清单回答它。树干的
+  // pipelineBusy 与 02 主启动按钮读这一份投影，不再由「本轮未结束」代答——那会让服务
+  // 重启打断的轮次把主按钮永久锁死（收口第一单强阻断）。
+  watch(flow.newRoundLocked, (locked) => state.setFlowLocksNewRound(locked), { immediate: true });
   watch(
     [parallelMode, () => flow.flow.value?.selection, flowPresentation.unlockedSteps, flowPresentation.hydrated],
     ([allPlatforms, selection, projected, hydrated]) => {
@@ -411,7 +416,7 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
   // ---------------------------------------------------------------------------
   const roundConditionLockSummary = computed(() => {
     const current = flow.flow.value;
-    if (!parallelMode.value || current?.selection !== "all" || !flow.hasActiveTrack.value) return "";
+    if (!parallelMode.value || current?.selection !== "all" || !flow.hasUnfinishedRound.value) return "";
     const frozen = current.tracks.some((track) => {
       const snapshot = track.confirmed_filters_snapshot;
       return Boolean(snapshot && typeof snapshot === "object" && Object.keys(snapshot).length);
@@ -422,13 +427,13 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
   // ---------------------------------------------------------------------------
   // SPEC 046 D-08：04 页在整轮未完成时开放是分轨合流的设计要求（先出结果的平台
   // 立刻可查），缺陷只是没说清。判定不另起一套：本轮是否未结束取状态词表的唯一
-  // 谓词（hasActiveTrack），还在追赶的轨道取树干的活动态词表（排队中 / 进行中）；
+  // 谓词（hasUnfinishedRound），还在追赶的轨道取树干的活动态词表（排队中 / 进行中）；
   // 已中断 / 失败的轨道由既有的失败通知负责，这里不重复许诺它会完成。历史轮浏览的是
   // 已归档的那一份结果，本轮追赶的说法在这儿一并关掉，页面不再自己加一层 !historyMode。
   // ---------------------------------------------------------------------------
   const flowRoundPartialNotice = computed(() => {
     const current = flow.flow.value;
-    if (!parallelMode.value || current?.selection !== "all" || !flow.hasActiveTrack.value) return "";
+    if (!parallelMode.value || current?.selection !== "all" || !flow.hasUnfinishedRound.value) return "";
     if (state.historyMode.value) return "";
     const trackName = (track: ParallelTrackState) => platformLabel(track.platform);
     const delivered = current.tracks.filter((track) => String(track.result_run_id || "").trim());

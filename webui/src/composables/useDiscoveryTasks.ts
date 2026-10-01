@@ -40,7 +40,7 @@ import {
   UploadCloud,
   X,
 } from "@lucide/vue";
-import { hasUnfinishedRound, MODE_DEFAULT_PAGES } from "./useDiscoveryState";
+import { hasLiveTaskState, hasUnfinishedRound, MODE_DEFAULT_PAGES } from "./useDiscoveryState";
 import type { MergedLatestResult, TaskSnapshot } from "./useDiscoveryState";
 import { setThemePlatform } from "./useTheme";
 import { useDiscoverySceneState } from "./useDiscoverySceneState";
@@ -64,7 +64,7 @@ function hasCleanupFailure(data: CleanupActionResponse): boolean {
 // completed_with_pending/partial 仍有待确认岗位，scraped_only 也只是抓取完成。
 const FULLY_COMPLETED_TASK_STATUSES = new Set(["done", "completed", "succeeded"]);
 export function useDiscoveryTasks(state: DiscoveryState, deps: TasksNeeds) {
-  const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, activeTaskRestored, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, executionSelection, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, historyStore, interruptedRunId, isScrapedOnly, taskCompletedToast, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileId, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsBootstrapPending, resultsPageSeen, resumeAnalysis, resumeAnalysisLandOnReturn, resumeAnalysisPhase, resumeAnalysisReset, schemaLoader, scopePreview, scopePreviewBusy, scrapeActionBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform, unfinishedWorkflowRestored, workflowEpoch } = state;
+  const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, activeTaskRestored, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, executionSelection, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, historyStore, interruptedRunId, isScrapedOnly, taskCompletedToast, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineBusy, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileId, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsBootstrapPending, resultsPageSeen, resumeAnalysis, resumeAnalysisLandOnReturn, resumeAnalysisPhase, resumeAnalysisReset, schemaLoader, scopePreview, scopePreviewBusy, scrapeActionBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform, unfinishedWorkflowRestored, workflowEpoch } = state;
   const navigateStep = (step: string, options?: Parameters<DiscoveryState["navigateStep"]>[1]) => state.navigateStep(step, options);
   const { platformState } = state;
   const sceneStore = useDiscoverySceneState();
@@ -1001,9 +1001,12 @@ async function maybeAutoStartNewRound(): Promise<boolean> {
   if (!isCurrentRecovery()) return false;
   // 未完成流程（本地有未完成快照）→ 恢复现场（B068 行为保留，不改）
   if (unfinishedWorkflowRestored.value) return false;
-  // 035 + SPEC 046 状态词表：这里问的是问题 B「这一轮还没结束」（含已暂停），
-  // 未结束轮刷新/启动优先恢复现场，不自动开始新一轮、不取消任务（FR-015：暂停锁新轮）。
-  if (hasUnfinishedRound(state)) return false;
+  // 035 + SPEC 046 状态词表：这里问的是「这一轮还有活口吗」——此刻有活体任务（A 谓词，
+  // 含进行中的任务快照）或开新轮闸门被那一份唯一清单锁着（排队 / 运行 / 已暂停）。
+  // 不许改成问题 B「这一轮还没结束」代答：B 含已中断，而中断轮的唯一出路正是开新一轮，
+  // 用 B 会把中断轮永久挡在自动探测之外（FR-015 / 收口第一单强阻断）。
+  // 两个输入都是树干既有的唯一谓词，这里只做合取，不再抄第三份状态清单。
+  if (hasLiveTaskState(state) || pipelineBusy.value) return false;
   // Spec041 返工（真实验收失败项一）：已完成（已进 04 页 / 结束保存）不再
   // "刷新即自动开新一轮"——那会把刚恢复的当前轮结果与现场清成 01 空上传页。
   // 完成态优先原地接回；会话存档缺失时从后端最新轮补齐；确实取不到结果

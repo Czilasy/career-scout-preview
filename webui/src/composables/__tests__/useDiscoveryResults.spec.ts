@@ -700,6 +700,7 @@ describe("useDiscoveryResults latest platform identity", () => {
     });
     const state = useDiscoveryState({ profileId: "flow-live-draft" }, () => {});
     state.setFlowActive(true);
+    state.setFlowLiveWorker(true);
     // Flow 运行期间 02/03 画面由 Flow 投影持有；结果层只剩上一轮的旧快照。
     // 判活必须只认树干那一份口径（含 flowActive），否则这里会被本轮结果顶掉。
     const seededScrape = { status: "completed", progress: { message: "上一轮抓取画面" }, logs: [], total: 3 };
@@ -1043,7 +1044,9 @@ describe("useDiscoveryResults.returnToLatest 与树干判活同源（SPEC 046 �
     state.pipelineResultRunId.value = "history-run";
     state.historyRound.value = { runId: "history-run", platform: "boss", status: "done", jobCount: 1 };
     state.platformBeforeHistory.value = "boss";
+    // 流程还在跑：活体投影与活动线在同一 tick 里一起到位（协调器口径）。
     state.setFlowActive(true);
+    state.setFlowLiveWorker(true);
     return { state, results };
   }
 

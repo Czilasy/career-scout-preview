@@ -3,7 +3,7 @@ import { watch } from "vue";
 import type { IslandNavTarget } from "../types";
 import {
   capsuleNavigationTarget,
-  deriveLiveTaskStep,
+  deriveUnfinishedRoundStep,
   type CapsuleNavigationTarget,
   type DiscoveryState,
   type StepId,
@@ -42,7 +42,7 @@ export function useDiscoveryIslandBridge(state: DiscoveryState): void {
   function liveProbe() {
     return {
       stuckAt: state.roundStatusPayload.value?.stuckAt || "none",
-      liveStep: deriveLiveTaskStep({
+      liveStep: deriveUnfinishedRoundStep({
         scrapeBusy: state.scrapeBusy.value,
         scrapeSnapshot: state.scrapeSnapshot.value,
         screenBusy: state.screenBusy.value,
@@ -50,7 +50,6 @@ export function useDiscoveryIslandBridge(state: DiscoveryState): void {
         recrawlBusy: state.recrawlBusy.value,
         recrawlSnapshot: state.recrawlSnapshot.value,
         pausedRunId: state.pausedRunId.value,
-        interruptedRunId: state.interruptedRunId.value,
       }),
     };
   }

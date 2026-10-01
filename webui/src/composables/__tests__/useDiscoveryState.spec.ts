@@ -1,12 +1,13 @@
-// 035 T002：liveTaskStep 只读派生——未结束任务的「真实进度页」统一判定面。
+// 035 T002：unfinishedRoundStep 只读派生——未结束任务的「真实进度页」统一判定面。
 // 抓取活 → "search"（02）；筛选/重抓活 → "screen"（03）；无活任务 → ""。
 // US2（入口守卫跳回落点）与 US3（回最新落点/按钮一致性）共用。
 import { reactive, ref } from "vue";
 import {
-  deriveLiveTaskStep,
+  deriveUnfinishedRoundStep,
+  flowProblemFallbackMessage,
   hasLiveTaskState,
   hasUnfinishedRound,
-  liveTaskStep,
+  unfinishedRoundStep,
   resultCountsFromPipeline,
   useDiscoveryState,
 } from "../useDiscoveryState";
@@ -17,17 +18,17 @@ function makeState(overrides: Partial<DiscoveryState> = {}): DiscoveryState {
   return Object.assign(state, overrides);
 }
 
-describe("useDiscoveryState.liveTaskStep（035 真实进度页派生）", () => {
+describe("useDiscoveryState.unfinishedRoundStep（035 真实进度页派生）", () => {
   it("① 仅抓取活（scrapeBusy）→ search（02）", () => {
     const state = makeState({ scrapeBusy: ref(true) });
-    expect(liveTaskStep(state)).toBe("search");
+    expect(unfinishedRoundStep(state)).toBe("search");
   });
 
   it("① 仅抓取活（scrapeSnapshot 进行态）→ search（02）", () => {
     const state = makeState({
       scrapeSnapshot: ref({ status: "running", progress: {}, logs: [] }),
     });
-    expect(liveTaskStep(state)).toBe("search");
+    expect(unfinishedRoundStep(state)).toBe("search");
   });
 
   it("① 抓取排队/暂停 → search（02），错误/中断快照不再算活任务", () => {
@@ -35,35 +36,35 @@ describe("useDiscoveryState.liveTaskStep（035 真实进度页派生）", () => 
       const state = makeState({
         scrapeSnapshot: ref({ status, progress: {}, logs: [] }),
       });
-      expect(liveTaskStep(state)).toBe("search");
+      expect(unfinishedRoundStep(state)).toBe("search");
     }
 
     for (const status of ["failed", "interrupted"]) {
       const state = makeState({
         scrapeSnapshot: ref({ status, progress: {}, logs: [] }),
       });
-      expect(liveTaskStep(state)).toBe("");
+      expect(unfinishedRoundStep(state)).toBe("");
       expect(state.pipelineBusy.value).toBe(false);
       expect(hasLiveTaskState(state)).toBe(false);
     }
   });
 
   it("② 仅筛选活（screenBusy / screenSnapshot 运行态）→ screen（03）", () => {
-    expect(liveTaskStep(makeState({ screenBusy: ref(true) }))).toBe("screen");
-    expect(liveTaskStep(makeState({
+    expect(unfinishedRoundStep(makeState({ screenBusy: ref(true) }))).toBe("screen");
+    expect(unfinishedRoundStep(makeState({
       screenSnapshot: ref({ status: "running", progress: {}, logs: [] }),
     }))).toBe("screen");
   });
 
   it("② 重抓活（recrawlBusy / recrawlSnapshot 进行态）→ screen（03）", () => {
-    expect(liveTaskStep(makeState({ recrawlBusy: ref(true) }))).toBe("screen");
-    expect(liveTaskStep(makeState({
+    expect(unfinishedRoundStep(makeState({ recrawlBusy: ref(true) }))).toBe("screen");
+    expect(unfinishedRoundStep(makeState({
       recrawlSnapshot: ref({ status: "running", progress: {}, logs: [] }),
     }))).toBe("screen");
   });
 
   it("② pausedRunId 存在（筛选侧未结束）→ screen（03）", () => {
-    expect(liveTaskStep(makeState({ pausedRunId: ref("run-1") }))).toBe("screen");
+    expect(unfinishedRoundStep(makeState({ pausedRunId: ref("run-1") }))).toBe("screen");
   });
 
   it("③ 抓取+筛选同时活 → 以真实进度为准：抓取仍活 → search；抓取已终态+筛选活 → screen", () => {
@@ -71,13 +72,13 @@ describe("useDiscoveryState.liveTaskStep（035 真实进度页派生）", () => 
       scrapeSnapshot: ref({ status: "running", progress: {}, logs: [] }),
       screenBusy: ref(true),
     });
-    expect(liveTaskStep(bothLive)).toBe("search");
+    expect(unfinishedRoundStep(bothLive)).toBe("search");
 
     const scrapeDoneScreenLive = makeState({
       scrapeSnapshot: ref({ status: "completed", progress: {}, logs: [] }),
       screenBusy: ref(true),
     });
-    expect(liveTaskStep(scrapeDoneScreenLive)).toBe("screen");
+    expect(unfinishedRoundStep(scrapeDoneScreenLive)).toBe("screen");
   });
 
   it("④ 无活任务（全部终态/空）→ 空串，不产生跳回落点", () => {
@@ -85,16 +86,16 @@ describe("useDiscoveryState.liveTaskStep（035 真实进度页派生）", () => 
       scrapeSnapshot: ref({ status: "completed", progress: {}, logs: [] }),
       screenSnapshot: ref({ status: "completed", progress: {}, logs: [] }),
     });
-    expect(liveTaskStep(state)).toBe("");
-    expect(liveTaskStep(makeState())).toBe("");
+    expect(unfinishedRoundStep(state)).toBe("");
+    expect(unfinishedRoundStep(makeState())).toBe("");
   });
 
-  it("deriveLiveTaskStep：跨域最小判定面（useScreenRoundFlow refs 形状可直接传入）", () => {
-    expect(deriveLiveTaskStep({ scrapeBusy: true })).toBe("search");
-    expect(deriveLiveTaskStep({ scrapeSnapshot: { status: "paused" } })).toBe("search");
-    expect(deriveLiveTaskStep({ screenSnapshot: { status: "paused" } })).toBe("screen");
-    expect(deriveLiveTaskStep({ recrawlSnapshot: { status: "running" } })).toBe("screen");
-    expect(deriveLiveTaskStep({})).toBe("");
+  it("deriveUnfinishedRoundStep：跨域最小判定面（useScreenRoundFlow refs 形状可直接传入）", () => {
+    expect(deriveUnfinishedRoundStep({ scrapeBusy: true })).toBe("search");
+    expect(deriveUnfinishedRoundStep({ scrapeSnapshot: { status: "paused" } })).toBe("search");
+    expect(deriveUnfinishedRoundStep({ screenSnapshot: { status: "paused" } })).toBe("screen");
+    expect(deriveUnfinishedRoundStep({ recrawlSnapshot: { status: "running" } })).toBe("screen");
+    expect(deriveUnfinishedRoundStep({})).toBe("");
   });
 });
 
@@ -341,9 +342,12 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
   // 任务快照的 interrupted 说的是「那段任务没跑完」，不是「这一轮还没结束」；后者只由
   // Flow 投影回答（树干唯一谓词 hasUnfinishedRound，读协调器投影的 flowActive 与活体/暂停事实）。
   describe("已收尾轮次残留的中断快照不再冒充轮次告警（046 D-09）", () => {
-    // 现场①：轮次已终态（Flow 投影收尾、无活体、无暂停断点）+ 残留 interrupted 快照。
+    // 现场①：轮次已终态（Flow 归属在场、Flow 投影收尾、无活体、无暂停断点）+ 残留 interrupted 快照。
     it("轮次已收尾 + 残留中断快照 → 岛不再产出中断告警，错误现场仍在快照里", () => {
       const state = useDiscoveryState({ profileId: "test" }, () => {});
+      // 「有 Flow 行」由既有的归属谓词回答（hasFlowOwnership ← 协调器投影的可达集合）：
+      // 这一轮确实归 Flow 管，轨道终态就是本轮已收尾，残留快照不得再冒充轮次告警。
+      state.setFlowReachableSteps(new Set(["search", "screen", "results"]), "flow-closed-round");
       state.flowActive.value = false;
       state.flowLiveWorker.value = false;
       state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
@@ -356,6 +360,7 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
 
     it("轮次已收尾 + 抓取侧残留中断快照 → 同样不上岛报警", () => {
       const state = useDiscoveryState({ profileId: "test" }, () => {});
+      state.setFlowReachableSteps(new Set(["search", "screen", "results"]), "flow-closed-scrape");
       state.flowActive.value = false;
       state.flowLiveWorker.value = false;
       state.scrapeSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
@@ -566,9 +571,12 @@ describe("useDiscoveryState 统一导航守卫", () => {
     const state = useDiscoveryState({ profileId: "navigation-flow-active" }, () => {});
     const navigation = state as typeof state & {
       setFlowActive: (active: boolean) => void;
+      setFlowLocksNewRound: (locked: boolean) => void;
     };
 
+    // 轨道在跑：两份投影同时到位——本轮未结束（锁范围）与开新轮闸门锁（那一份唯一清单）。
     navigation.setFlowActive(true);
+    navigation.setFlowLocksNewRound(true);
 
     expect(state.oneClickDisabled.value).toBe(true);
     expect(state.scopeLocked.value).toBe(true);
@@ -742,6 +750,168 @@ describe("useDiscoveryState 状态词表 A/B 谓词纯度（SPEC 046 v2「状态
   });
 });
 
+// SPEC 046 收口第一单（状态与闸门口径）：「能不能开新一轮」在整棵树里只允许有
+// 一份清单，它落在 useDiscoveryParallelFlow（排队中/运行中/已暂停锁、已中断放行）；
+// 树干侧的 pipelineBusy 与主启动按钮只读那份清单投影进来的一个布尔，绝不再把
+// 「本轮未结束」（flowActive，含已中断）当成「开不了新一轮」。
+describe("useDiscoveryState 开新轮闸门只读那一份清单（046 FR-015）", () => {
+  function makeFlowScene(profileId: string, facts: {
+    unfinishedRound: boolean;
+    liveWorker: boolean;
+    locksNewRound: boolean;
+  }): DiscoveryState {
+    const state = useDiscoveryState({ profileId }, () => {});
+    state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.screenSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.recrawlSnapshot.value = null;
+    state.setFlowActive(facts.unfinishedRound);
+    state.setFlowLiveWorker(facts.liveWorker);
+    state.setFlowLocksNewRound(facts.locksNewRound);
+    return state;
+  }
+
+  it("① 已中断轮：本轮范围仍锁死，但开新轮闸门放行——02 主启动按钮可点", () => {
+    const state = makeFlowScene("newround-interrupted", {
+      unfinishedRound: true, liveWorker: false, locksNewRound: false,
+    });
+    expect(state.scopeLocked.value).toBe(true);
+    expect(state.pipelineBusy.value).toBe(false);
+    expect(state.oneClickDisabled.value).toBe(false);
+  });
+
+  it("② 已暂停轮：主启动按钮锁住，锁定原因说已暂停", () => {
+    const state = makeFlowScene("newround-paused", {
+      unfinishedRound: true, liveWorker: false, locksNewRound: true,
+    });
+    expect(state.pipelineBusy.value).toBe(true);
+    expect(state.oneClickDisabled.value).toBe(true);
+    expect(state.scopeLockReason.value).toBe("任务已暂停，平台已锁定");
+  });
+
+  it("③ 运行中的轮：主启动按钮锁住，锁定原因说任务进行中", () => {
+    const state = makeFlowScene("newround-running", {
+      unfinishedRound: true, liveWorker: true, locksNewRound: true,
+    });
+    expect(state.pipelineBusy.value).toBe(true);
+    expect(state.oneClickDisabled.value).toBe(true);
+    expect(state.scopeLockReason.value).toBe("任务进行中，平台已锁定");
+  });
+
+  it("④ 树干不留第二份清单：活动线单独在场不再顺带锁住开新轮闸门", () => {
+    // 活动线（B）不是开新轮闸门（那份清单）的成员来源：未经该清单投影的调用方
+    // 只能得出「闸门没锁」，不许再从 B 猜一份成员不同的清单。
+    const state = useDiscoveryState({ profileId: "newround-no-second-list" }, () => {});
+    state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
+    state.setFlowActive(true);
+    expect(state.pipelineBusy.value).toBe(false);
+    expect(state.scopeLocked.value).toBe(true);
+  });
+
+  // 状态词表硬要求：「有没有活体任务」与「这一轮完没完结」各有一份谓词，任何一侧
+  // 不得向另一侧借道。投影缺席（flowLiveWorker 仍为 null）时没有「此刻无活体」这条
+  // 否定证据，也没有「有活体」这条肯定证据——只认快照自己的 running/queued。
+  it("⑤ A 谓词不在投影缺席时向 B 借道：活动线在场、快照全终态 → 没有活体", () => {
+    const state = useDiscoveryState({ profileId: "vocab-a-no-borrow" }, () => {});
+    state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
+    state.recrawlSnapshot.value = null;
+    state.setFlowActive(true);
+    expect(hasLiveTaskState(state)).toBe(false);
+    // 同一份事实由 B 接住：本轮未结束（含中断轮）。
+    expect(hasUnfinishedRound(state)).toBe(true);
+  });
+
+  it("⑥ A 谓词在投影缺席时仍认快照自己的排队/运行", () => {
+    const state = useDiscoveryState({ profileId: "vocab-a-snapshot-only" }, () => {});
+    state.screenSnapshot.value = { status: "queued", progress: {}, logs: [] };
+    expect(hasLiveTaskState(state)).toBe(true);
+  });
+
+  // 上一单把「轮次已收尾」的中断告警按 B 分层，但 B 在没有 flows 行的 pre-046 旧轮次上
+  // 恒为 false——真被服务重启打断的 legacy 轮因此再也没人提示。B 必须自持 legacy 一支：
+  // 没有 Flow 归属时，该轮自己的 run/task 中断事实就是「本轮未结束」。
+  it("⑦ 没有 Flow 归属的旧轮次带中断快照 → B 仍说本轮未结束", () => {
+    const state = useDiscoveryState({ profileId: "legacy-b-interrupted-snapshot" }, () => {});
+    state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
+    expect(state.flowOwnership.value).toBe(false);
+    expect(hasUnfinishedRound(state)).toBe(true);
+  });
+
+  it("⑧ 没有 Flow 归属的旧轮次只剩中断断点 → B 同样说本轮未结束", () => {
+    const state = useDiscoveryState({ profileId: "legacy-b-interrupted-run" }, () => {});
+    state.interruptedRunId.value = "screen-legacy-interrupted";
+    expect(state.flowOwnership.value).toBe(false);
+    expect(hasUnfinishedRound(state)).toBe(true);
+  });
+
+  it("⑨ 有 Flow 归属且轨道终态 → 残留中断快照不算本轮未结束（守住 D-09 不回退）", () => {
+    const state = useDiscoveryState({ profileId: "legacy-b-flow-closed" }, () => {});
+    state.setFlowReachableSteps(new Set(["search", "screen", "results"]), "flow-closed-b");
+    state.setFlowActive(false);
+    state.setFlowLiveWorker(false);
+    state.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
+    state.interruptedRunId.value = "screen-legacy-interrupted";
+    expect(state.flowOwnership.value).toBe(true);
+    expect(hasUnfinishedRound(state)).toBe(false);
+  });
+
+  it("⑩ 没有 Flow 归属的旧中断轮 → 岛照旧给「已中断，请开始新一轮」", () => {
+    const state = useDiscoveryState({ profileId: "legacy-b-island" }, () => {});
+    state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
+    const capsule = state.roundStatusPayload.value?.capsule;
+    expect(capsule?.state).toBe("attention");
+    if (capsule?.state === "attention" && capsule.attention.kind === "paused") {
+      expect(capsule.attention.pausedFact).toBe("interrupted");
+      expect(capsule.attention.message).toContain("已中断");
+      expect(capsule.attention.message).toContain("开始新一轮");
+      expect(capsule.attention.message).not.toContain("处理后继续");
+    }
+  });
+
+  // legacy 一支只回答「这一轮到底完没完结」（告警与轮次归属），不凭空造一个进度页：
+  // 没有 Flow 归属、也没有活体/暂停现场的旧轮，落点必须为空——否则「开始新一轮」这条
+  // 唯一出路会被入口守卫钉死在旧轮上（状态词表硬要求：出口不得以"有活体任务"为唯一判据）。
+  it("⑫ 没有 Flow 归属的旧中断轮 → 不给落点，开始新一轮的出路不被钉死", () => {
+    const state = useDiscoveryState({ profileId: "legacy-b-landing" }, () => {});
+    state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.screenSnapshot.value = { status: "interrupted", progress: {}, logs: [] };
+    expect(hasUnfinishedRound(state)).toBe(true);
+    expect(unfinishedRoundStep(state)).toBe("");
+    // 同一份现场里若有活体或暂停断点，落点照旧来自既有任务事实，不依赖本轮新增的一支。
+    state.screenSnapshot.value = { status: "paused", progress: {}, logs: [] };
+    expect(unfinishedRoundStep(state)).toBe("screen");
+  });
+
+  // 状态词表：「继续」只对用户主动暂停成立，中断没有活体 worker、界面上没有继续入口。
+  // 轨道问题的兜底文案必须按这条事实分层取词，不许中断与暂停共用一句「请处理后继续」。
+  it("⑪ 轨道问题兜底按事实分层：中断与终态说请开始新一轮，暂停才说请处理后继续", () => {
+    expect(flowProblemFallbackMessage("interrupted")).toBe("AI 筛选未完成，请开始新一轮");
+    expect(flowProblemFallbackMessage("cancelled")).toBe("AI 筛选未完成，请开始新一轮");
+    expect(flowProblemFallbackMessage("failed")).toBe("AI 筛选未完成，请开始新一轮");
+    expect(flowProblemFallbackMessage("paused")).toBe("AI 筛选未完成，请处理后继续");
+    expect(flowProblemFallbackMessage("done")).toBe("AI 筛选未完成，请开始新一轮");
+
+    const state = useDiscoveryState({ profileId: "flow-problem-fallback" }, () => {});
+    state.pipelineResult.value = {
+      jobs: [], dropped: [],
+      flow_id: "flow-incomplete",
+      flow_tracks: [
+        { platform: "boss", status: "done", stage: "complete", result_run_id: "run-b" },
+        { platform: "zhilian", status: "cancelled", stage: "ai", unfinished_ai_screening: true },
+      ],
+    } as never;
+    const capsule = state.roundStatusPayload.value?.capsule;
+    expect(capsule?.state).toBe("attention");
+    if (capsule?.state === "attention" && capsule.attention.kind === "error") {
+      expect(capsule.attention.message).toContain("开始新一轮");
+      expect(capsule.attention.message).not.toContain("处理后继续");
+    }
+  });
+});
+
 describe("useDiscoveryState 判活与落点同源（SPEC 046 第五轮）", () => {
   // useDiscoveryState 在函数体内声明全部 ref（:91 起），每个实例各自独立：
   // 判活用到的事实（流程活动线、任务快照、暂停轮次）没有跨实例通道，
@@ -750,14 +920,18 @@ describe("useDiscoveryState 判活与落点同源（SPEC 046 第五轮）", () =
     const state = useDiscoveryState({ profileId }, () => {});
     state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
     state.screenSnapshot.value = { status: "failed", progress: {}, logs: [] };
+    // 生产里这两份投影来自协调器的同一个 tick：本轮未结束（flowActive）与此刻有活体
+    // （flowLiveWorker）。A 谓词不再在投影缺席时向 B 借道，所以现场必须把两份都摆齐。
     state.setFlowActive(true);
+    state.setFlowLiveWorker(true);
+    state.setFlowLocksNewRound(true);
     return state;
   }
 
-  it("① 只因流程活动线而活：树干判到活时落点不得为空，且落点在可达清单里", () => {
+  it("① 只因 Flow 投影而活：树干判到活时落点不得为空，且落点在可达清单里", () => {
     const state = makeFlowOnlyState("same-source-landing");
     expect(hasLiveTaskState(state)).toBe(true);
-    const step = liveTaskStep(state);
+    const step = unfinishedRoundStep(state);
     expect(step).not.toBe("");
     expect(state.enabledSteps.value).toContain(step);
   });
@@ -765,32 +939,34 @@ describe("useDiscoveryState 判活与落点同源（SPEC 046 第五轮）", () =
   it("② 落点跟随流程投影的进行中阶段，取最深的一支（screen 优先于 search）", () => {
     const state = makeFlowOnlyState("same-source-projection");
     // 投影还没到达：流程活动线的最小开放面只有 02，落点不凭空造 03。
-    expect(liveTaskStep(state)).toBe("search");
+    expect(unfinishedRoundStep(state)).toBe("search");
     state.setFlowReachableSteps(new Set(["search", "screen"]));
     expect(state.enabledSteps.value).toEqual(["upload", "search", "screen"]);
     // 真实现场：并行流程抓取已完成、AI 筛选正在跑。02 页只渲染抓取列表，
     // 落 02 就看不到 03 正在跑的筛选进度，落点必须是最深的那一支。
-    expect(liveTaskStep(state)).toBe("screen");
+    expect(unfinishedRoundStep(state)).toBe("screen");
     // 投影只开到 02（抓取仍在跑）时仍然落 02。
     state.setFlowReachableSteps(new Set(["search"]));
-    expect(liveTaskStep(state)).toBe("search");
+    expect(unfinishedRoundStep(state)).toBe("search");
   });
 
   it("③ 树干判到没有活任务 → 仍然不给落点，不凭空造一个", () => {
     const state = makeFlowOnlyState("same-source-idle");
     state.setFlowActive(false);
+    state.setFlowLiveWorker(false);
+    state.setFlowLocksNewRound(false);
     expect(hasLiveTaskState(state)).toBe(false);
-    expect(liveTaskStep(state)).toBe("");
+    expect(unfinishedRoundStep(state)).toBe("");
   });
 
   it("④ 真实进度优先：流程活动线之上筛选确实在跑，落点仍是筛选进度页", () => {
     const state = makeFlowOnlyState("same-source-legacy");
     state.setFlowReachableSteps(new Set(["search", "screen"]));
     state.screenSnapshot.value = { status: "running", progress: {}, logs: [] };
-    expect(liveTaskStep(state)).toBe("screen");
+    expect(unfinishedRoundStep(state)).toBe("screen");
     state.screenSnapshot.value = { status: "completed", progress: {}, logs: [] };
     state.scrapeSnapshot.value = { status: "queued", progress: {}, logs: [] };
-    expect(liveTaskStep(state)).toBe("search");
+    expect(unfinishedRoundStep(state)).toBe("search");
   });
 
   it("⑤ 正在看历史轮（enabledSteps 被收窄成 04）：落点仍跟随投影，不造不可达步骤", () => {
@@ -801,31 +977,37 @@ describe("useDiscoveryState 判活与落点同源（SPEC 046 第五轮）", () =
     // 拿它当判定面会把"有活任务就不去请求最新结果"的守卫判反。
     expect(state.enabledSteps.value).toEqual(["results"]);
     expect(hasLiveTaskState(state)).toBe(true);
-    expect(liveTaskStep(state)).toBe("screen");
+    expect(unfinishedRoundStep(state)).toBe("screen");
   });
 
   it("⑥ 投影里没有任何进行中阶段 → 不给落点，结果页不当进度页", () => {
     const state = makeFlowOnlyState("same-source-results-only");
     state.setFlowReachableSteps(new Set(["results"]));
     expect(state.enabledSteps.value).toContain("results");
-    expect(liveTaskStep(state)).toBe("");
+    expect(unfinishedRoundStep(state)).toBe("");
   });
 
-  // SPEC 046 收尾守卫：判活（问题 A「此刻有没有活体 worker」）与未结束（问题 B
-  // 「这一轮还没结束」）分派。轨道排队中/运行中 → 页面把 hasLiveWorker 投影成活体 →
-  // 判活为真（04 因此不接本轮结果，见 DiscoveryRecovery「仍有活体轨道时 04 不接本轮结果」）；
-  // 已中断 → 没活体但也没结束 → 判活为假、落点照旧跟随投影、范围与提交仍然锁死。
-  it.each([true, false])("⑦ 活体与未结束分派（页面投影活体轨道=%s）", (liveWorker) => {
-    const state = makeFlowOnlyState(`same-source-dispatch-${liveWorker}`);
+  // SPEC 046 收尾守卫 + 收口第一单：判活（问题 A）、本轮未结束（问题 B）与「能不能开
+  // 新一轮」是三份各自的事实。轨道排队中/运行中 → 页面投影成活体 → 判活为真（04 因此
+  // 不接本轮结果，见 DiscoveryRecovery「仍有活体轨道时 04 不接本轮结果」）；已暂停 →
+  // 没活体、本轮未结束、开新轮闸门锁住；已中断 → 没活体、本轮未结束，但开新轮闸门放行。
+  it.each([
+    { scene: "running", liveWorker: true, locksNewRound: true, newRoundBusy: true },
+    { scene: "paused", liveWorker: false, locksNewRound: true, newRoundBusy: true },
+    { scene: "interrupted", liveWorker: false, locksNewRound: false, newRoundBusy: false },
+  ])("⑦ 活体 / 未结束 / 开新轮闸门三份投影分派（$scene）", (scene) => {
+    const state = makeFlowOnlyState(`same-source-dispatch-${scene.scene}`);
     state.setFlowReachableSteps(new Set(["search", "screen"]));
-    state.setFlowLiveWorker(liveWorker);
-    expect(hasLiveTaskState(state)).toBe(liveWorker);
-    // 两者都属于「这一轮还没结束」：范围与提交守卫不因判活放开而放松。
+    state.setFlowLiveWorker(scene.liveWorker);
+    state.setFlowLocksNewRound(scene.locksNewRound);
+    expect(hasLiveTaskState(state)).toBe(scene.liveWorker);
+    // 三种现场都属于「这一轮还没结束」：本轮范围守卫不因判活或闸门放开而放松。
     expect(hasUnfinishedRound(state)).toBe(true);
     expect(state.scopeLocked.value).toBe(true);
-    expect(state.pipelineBusy.value).toBe(true);
+    // 「能不能开新一轮」只由那一份清单回答：运行/暂停锁，中断放行。
+    expect(state.pipelineBusy.value).toBe(scene.newRoundBusy);
     // 落点问的是未结束，不是活体：已中断的轮也必须有一个可达的真实进度页。
-    expect(liveTaskStep(state)).toBe("screen");
+    expect(unfinishedRoundStep(state)).toBe("screen");
   });
 });
 

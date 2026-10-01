@@ -54,7 +54,7 @@ import {
 } from "../discovery";
 import { setThemePlatform } from "../composables/useTheme";
 import type { MergedLatestResult, FlowTaskLine } from "./useDiscoveryState";
-import { hasLiveTaskState as hasLiveTaskStateInTrunk, liveTaskStep, type StepId } from "./useDiscoveryState";
+import { hasLiveTaskState as hasLiveTaskStateInTrunk, unfinishedRoundStep, type StepId } from "./useDiscoveryState";
 import { useDiscoverySceneState } from "./useDiscoverySceneState";
 import type { SceneIdentity } from "../types";
 
@@ -74,7 +74,7 @@ export function useDiscoveryResults(
   fetchFlowResults?: CurrentFlowResultsFetcher,
   currentFlowSelection?: CurrentFlowSelection,
 ) {
-  const { activeCategory, activeStep, analysisReady, archiveHistoryLatest, currentRoundStatus, draftPlatform, exportBusy, feedbackBusyIds, groups, hideHistory, historyBackToLatest, historyMode, historyOpen, historyRound, interruptedRunId, isScrapedOnly, jdBusyIds, lifecycleDialogJob, lifecycleDialogOpen, locationDraft, pausedRunId, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, profileFacts, profileId, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, rejectedIds, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resultsBootstrapPending, returningFromHistory, resumeAnalysisLandOnReturn, resumeAnalysisPhase, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, screenTaskId, showHistory, unfinishedWorkflowRestored, workflowEpoch } = state;
+  const { activeCategory, activeStep, analysisReady, archiveHistoryLatest, currentRoundStatus, draftPlatform, exportBusy, feedbackBusyIds, groups, hideHistory, historyBackToLatest, historyMode, historyOpen, historyRound, isScrapedOnly, jdBusyIds, lifecycleDialogJob, lifecycleDialogOpen, locationDraft, pausedRunId, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, profileFacts, profileId, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, rejectedIds, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resultsBootstrapPending, returningFromHistory, resumeAnalysisLandOnReturn, resumeAnalysisPhase, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, screenTaskId, showHistory, unfinishedWorkflowRestored, workflowEpoch } = state;
   const navigateStep = (step: string, options?: Parameters<DiscoveryState["navigateStep"]>[1]) => state.navigateStep(step, options);
   const sceneStore = useDiscoverySceneState();
 
@@ -185,7 +185,7 @@ function setPipelineResult(result: PipelineResult, opts?: { preservePresentation
 // 事实——此前 OR interruptedRunId 把中断当成有人在干活，中断轮的「已看过结果页」
 // 永不置位、结果加载被闸门挡死（04 显示 0/0/0/0 而接口里数据完好）。
 // 「这一轮还没结束」（含已中断、已暂停）是问题 B，用 hasUnfinishedRound /
-// liveTaskStep(state) 回答，不许再借道判活。
+// unfinishedRoundStep(state) 回答，不许再借道判活。
 function hasLiveTaskState(): boolean {
   return hasLiveTaskStateInTrunk(state);
 }
@@ -194,9 +194,12 @@ function hasLiveTaskState(): boolean {
 async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean; preservePresentation?: boolean }) {
   // B068：刷新接回未完成轮次时，04 尚未出现，旧结果不能覆盖 02/03 的当前状态。
   if (unfinishedWorkflowRestored.value && !resultsPageSeen.value) return;
-  // 暂停/中断任务未结束，不得把暂停时保存的安全网快照当作结果加载，
-  // 否则 resultLoaded 被误置 true、04 结果页对用户开放造成「任务还在跑」误解。
-  if (interruptedRunId.value || pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
+  // 暂停中的任务未结束，不得把暂停时保存的安全网快照当作结果加载，否则 resultLoaded
+  // 被误置 true、04 结果页对用户开放造成「任务还在跑」误解。中断不在这里：状态词表说它
+  // 没有活体 worker、本轮的唯一出路是开新一轮，而那一轮的既有结果必须能在 04 查到
+  // （046 收口第一单：这道闸门此前还 OR 着 interruptedRunId，老存档冷启动就把 04 永久
+  // 挡成 0/0/0/0；那份断点事实现由 hasUnfinishedRound 的 legacy 一支回答「要不要告警」）。
+  if (pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
   const requestEpoch = workflowEpoch.value;
   const flowRequestEpoch = ++flowResultRequestEpoch;
   const requestedFlowId = readCurrentFlowId();
@@ -453,7 +456,8 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
       notice_sent?: boolean;
     }>(`/api/latest-pipeline-result${query}`);
     if (requestEpoch !== workflowEpoch.value) return null;
-    if (interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return null;
+    // 同上：中断不是活体，不再用 interruptedRunId 把 legacy 存档的本轮结果挡在门外。
+    if (scrapeBusy.value || screenBusy.value || recrawlBusy.value) return null;
     if (!data?.has_result || !data.result) return null;
     if (hasLiveTaskState() && scrapeTaskId.value && data.scrape_task_id
       && data.scrape_task_id !== scrapeTaskId.value) return null;
@@ -789,7 +793,7 @@ async function returnToLatest(): Promise<StepId | null> {
     // 先拿到最新结果，再清理历史展示。请求期间继续保留历史轮次，避免
     // pipelineResult 被置空后渲染出一个数字全为 0 的临时 04 页面。
     // 035：未结束任务存在时不请求结果，直接回到任务真实进度页。
-    const liveStep = liveTaskStep(state);
+    const liveStep = unfinishedRoundStep(state);
     const intent = currentHistoryIntent();
     const fetched = liveStep ? null : await fetchMergedLatestResult();
     // 等结果期间用户又点了一轮历史（或又发起一次回最新）：放弃本次，

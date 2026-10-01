@@ -435,11 +435,6 @@ const {
   maybeAutoStartNewRound,
 } = flowCoordinator;
 const modeWarnings = useModeWarnings(executionSelection, scopePreview);
-// 平台切换真的被禁掉时才给提示，并且按真实锁定依据说原因：
-// 流程早已终态、什么都没在跑的时候，不得再提示「任务进行中」。
-const platformSwitchLockHint = computed(() => (
-  scopeLocked.value && !parallelFlow.hasActiveTrack.value ? scopeLockReason.value : ""
-));
 const searchPackages = useSearchPackages({ keywords, selectedKeywords, customKeyword, cityText, customCity, profileSummary, profileFacts, conditionSnapshot, analysisReady }, { persistDraft: () => { state.saveSearchDraftFor(draftPlatform.value); if (conditionSnapshot.value) parallelFlow.restoreConditionSnapshot(conditionSnapshot.value); }, prepareSnapshot: () => { conditionSnapshot.value = parallelFlow.createConditionSnapshot(); }, restoreDraft: () => state.saveSearchDraftFor(draftPlatform.value), restoreConditions: (snapshot) => { if (snapshot) parallelFlow.restoreConditionSnapshot(snapshot); else parallelFlow.resetConditionState(); }, restoreStep: () => state.navigateStep("upload", { source: "system" }), enterSearchStep: () => { skipAvailabilityPrecheckForPackageRestore(); enterSearchStep(); }, notify }, { profileId: () => props.profileId, roundKey: () => sceneIdentity.value.runEpoch, analysisKey: () => state.resumeAnalysisPhase.value, fileKey: () => selectedFile.value ? `${selectedFile.value.name}:${selectedFile.value.size}:${selectedFile.value.lastModified}` : "" });
 
 // 结果已可渲染的判定在 useDiscoveryState（hasRenderableResult），页面只绑定。
@@ -467,7 +462,7 @@ const roundFlow = reactive(useScreenRoundFlow({
     finishedPartial,
     resultsPageSeen,
     navigateStep: (step) => state.navigateStep(step, { source: "system" }), historyRound,
-    flowActive: computed(() => parallelFlow.hasActiveTrack.value),
+    flowActive: computed(() => parallelFlow.hasUnfinishedRound.value),
     currentRoundStatus,
     resultPlatformFilter,
     uncertainCount: computed(() => groups.value.uncertain.length),
@@ -583,7 +578,7 @@ watch(restoredTaskHint, (value) => {
         :aria-selected="platform === 'all' ? parallelMode : !parallelMode && viewPlatform === platform"
         :class="['platform-segment-btn', { active: platform === 'all' ? parallelMode : !parallelMode && viewPlatform === platform }]"
         :data-testid="`platform-segment-${platform}`"
-        :disabled="scopeLocked && !parallelFlow.hasActiveTrack.value"
+        :disabled="scopeLocked && !parallelFlow.hasUnfinishedRound.value"
         :title="scopeLockReason || undefined"
         @click="selectParallelMode(platform)"
       >{{ platform === 'all' ? '全部' : platformLabel(platform) }}</button>
@@ -704,7 +699,7 @@ watch(restoredTaskHint, (value) => {
           <!-- Spec 044 B100：只在用户点击时保存，任何编辑都不触发保存。 -->
           <template #actions><SavedSearchPackageSaveActions v-bind="searchPackages.saveProps.value" v-on="searchPackages.saveEvents" /></template>
           <template #summary>
-            <span v-if="scopeLocked" class="lock-chip" role="status">{{ scrapeBusy || recrawlBusy ? '抓取中 · 范围已锁定' : screenBusy ? '筛选中 · 范围已锁定' : '范围已锁定' }}</span>
+            <span v-if="scopeLocked" class="lock-chip" role="status">{{ scrapeBusy || recrawlBusy ? '抓取中 · 范围已锁定' : screenBusy ? '筛选中 · 范围已锁定' : scopeLockReason }}</span>
             <span class="selection-summary">{{ searchSummary }}</span>
           </template>
           <div class="search-columns">

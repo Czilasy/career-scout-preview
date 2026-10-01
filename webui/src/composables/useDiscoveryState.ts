@@ -132,6 +132,18 @@ function pausedFamilyIslandMessage(fact: PausedFamilyFact): string {
     : `${PAUSED_FAMILY_LABELS[fact]}，请处理后继续`;
 }
 
+/**
+ * 轨道问题兜底文案（后端没带 message/reason/error 时）——出口同样按状态词表分层：
+ * 「已暂停」是用户主动停的、处理后能接着跑；「已中断」与一切终态都没有活体 worker，
+ * 界面上也没有轨道级「继续」入口，唯一出路是开新一轮。两者共用一句兜底就是
+ * 许诺做不到的动作（SPEC 046 收口第一单，与 pausedFamilyIslandMessage 同一口径）。
+ */
+export function flowProblemFallbackMessage(status: unknown): string {
+  return pausedFamilyStatusOf({ status }) === "paused"
+    ? "AI 筛选未完成，请处理后继续"
+    : "AI 筛选未完成，请开始新一轮";
+}
+
 export function useDiscoveryState(props: DiscoveryProps, emit: DiscoveryEmit) {
 
 
@@ -273,7 +285,7 @@ const flowReachWatermarkOwner = ref("");
 const flowNavigationOwned = ref(false);
 const navigationManualHold = ref(false);
 // B096：并行 Flow 的活动 Track 是页面级占用事实，不属于任一平台草稿。
-// 由页面把 parallelFlow.hasActiveTrack 投影进来，所有新任务/范围守卫共用。
+// 由协调器把 parallelFlow.hasUnfinishedRound 投影进来，所有轮次范围守卫共用。
 const flowActive = ref(false);
 // SPEC 046 判活口径：flowActive 说的是「这一轮还没结束」（锁范围、锁提交、决定落点），
 // 不等于「此刻有活体 worker 在跑」。已中断/已暂停的轮次前者为真、后者为假。
@@ -281,6 +293,12 @@ const flowActive = ref(false);
 // null = 页面还没投影过活体事实（未经协调器投影的调用方，例如单平台传统链路的单元测试）：
 // 这时没有「此刻无活体」这条否定证据，只能保守退回活动线。
 const flowLiveWorker = ref<boolean | null>(null);
+// 「能不能开新一轮」那份唯一清单（useDiscoveryParallelFlow.NEW_ROUND_LOCKING_FLOW_STATUSES）
+// 的投影：由协调器把 parallelFlow.newRoundLocked 投进来。它不等于 flowActive——
+// 已中断的轮本轮未结束（flowActive 为真）但闸门放行（这里为假），把两者并成一个
+// 就是 02 主启动按钮在服务重启后永久死灰的根因（046 FR-015 / 状态词表）。
+// false = 那一份清单没锁住新一轮；未经协调器投影的调用方没有 Flow，本来就不由这一项锁。
+const flowLocksNewRound = ref(false);
 
 
 const analysisReady = ref(false);
@@ -782,13 +800,15 @@ const profileInputEl = ref<HTMLTextAreaElement | null>(null);
 
 const profileConfirmed = ref(false);
 
-// 任意 pipeline 任务占用中（运行/暂停/待恢复）都禁止再启动新任务。
-
+// 「能不能开新一轮」整棵树只允许一份清单：useDiscoveryParallelFlow 的
+// NEW_ROUND_LOCKING_FLOW_STATUSES（排队中 / 运行中 / 已暂停锁，已中断放行）。树干这边
+// 只读那份清单投影进来的 flowLocksNewRound，绝不再用「本轮未结束」（flowActive，含已中断）
+// 代答——那会把服务重启打断的轮次永久锁死在 02 主启动按钮上（046 FR-015 / 状态词表）。
 // 任意 pipeline 任务占用中（运行/暂停）都禁止再启动新任务；失败/中断只保留
 // 用户可见错误快照，不再把新任务入口锁死。
 const pipelineBusy = computed(() => Boolean(
   scrapeBusy.value || screenBusy.value || recrawlBusy.value
-  || flowActive.value
+  || flowLocksNewRound.value
   || pausedRunId.value
   || [scrapeSnapshot.value?.status, screenSnapshot.value?.status, recrawlSnapshot.value?.status]
     .some((s) => s && String(s) === "paused"),
@@ -818,12 +838,17 @@ const scopeLocked = computed(() => Boolean(
 // 锁定原因必须与事实一致：scopeLocked 还包含「已在第 3/4 步」「正在看历史轮」，
 // 这些时候没有任何任务在跑，一律提示「任务进行中」就是谎报。锁定范围不变，
 // 只把原因按真实情况分层说清楚。
+// Flow 侧的分层同样按状态词表取词：投影说有活体（排队中/运行中）才是「进行中」；
+// 那份唯一的开新轮清单锁着而没有活体，只剩「已暂停」一种可能（排队/运行/暂停之外不锁）。
+// 活动线单独在场（既没活体投影又不在闸门里）说明调用方未经协调器投影，保守说「进行中」。
 const scopeLockReason = computed(() => {
   if (!scopeLocked.value) return "";
-  if (scrapeBusy.value || screenBusy.value || recrawlBusy.value || flowActive.value) {
+  if (scrapeBusy.value || screenBusy.value || recrawlBusy.value || flowLiveWorker.value) {
     return "任务进行中，平台已锁定";
   }
   if (pausedRunId.value) return "任务已暂停，平台已锁定";
+  if (flowLocksNewRound.value) return "任务已暂停，平台已锁定";
+  if (flowActive.value) return "任务进行中，平台已锁定";
   if (historyMode.value) return "正在查看历史轮次，平台已锁定";
   return "本轮搜索范围已确认，返回第 2 步前平台已锁定";
 });
@@ -888,7 +913,7 @@ const enabledSteps = computed<StepId[]>(() => {
   }
   // 没有 Flow 归属的旧形态（单平台 legacy 路径）：沿用本轮抓取/结果现场与活体探针。
   const reachable = new Set<StepId>(legacyEnabledSteps.value);
-  const liveStep = deriveLiveTaskStep({
+  const liveStep = deriveUnfinishedRoundStep({
     scrapeBusy: scrapeBusy.value,
     scrapeSnapshot: scrapeSnapshot.value,
     screenBusy: screenBusy.value,
@@ -896,7 +921,6 @@ const enabledSteps = computed<StepId[]>(() => {
     recrawlBusy: recrawlBusy.value,
     recrawlSnapshot: recrawlSnapshot.value,
     pausedRunId: pausedRunId.value,
-    interruptedRunId: interruptedRunId.value,
   });
   if (liveStep) reachable.add(liveStep);
   return STEP_ORDER.filter((step) => reachable.has(step));
@@ -927,6 +951,11 @@ function setNavigationManualHold(hold: boolean): void {
 
 function setFlowActive(active: boolean): void {
   flowActive.value = active;
+}
+
+/** 那一份开新轮清单的投影入口（由协调器与 flowActive / flowLiveWorker 同批投进来）。 */
+function setFlowLocksNewRound(locked: boolean): void {
+  flowLocksNewRound.value = locked;
 }
 
 function setFlowLiveWorker(active: boolean): void {
@@ -1210,6 +1239,7 @@ function resetForProfileSwitch(this: NavigationOwner | undefined): void {
   resetNavigation.call(this);
   flowActive.value = false;
   flowLiveWorker.value = false;
+  flowLocksNewRound.value = false;
   analysisReady.value = false;
   selectedFile.value = null;
   aiConsent.value = false;
@@ -1293,7 +1323,9 @@ const resultsBootstrapPending = ref(false);
 const trunkRoundFacts = {
   flowActive,
   flowLiveWorker,
+  flowOwnership: hasFlowOwnership,
   pausedRunId,
+  interruptedRunId,
   scrapeSnapshot,
   screenSnapshot,
   recrawlSnapshot,
@@ -1332,9 +1364,11 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
     || [scrapeSnapshot.value, screenSnapshot.value, recrawlSnapshot.value].some((snapshot) =>
       snapshot && ["running", "queued"].includes(String(snapshot.status || "")));
   if (flowResult?.flow_id && flowFailure && !flowHasActiveSibling && !legacyTaskLive) {
+    // 兜底也必须按事实分层：这一支专门处理「本轮有轨道问题、已经没有活体在跑」，
+    // 轨道自己说什么状态就用哪种出口，不再一律许诺「处理后继续」（046 状态词表）。
     const message = String(
       flowFailure.message || flowFailure.reason || flowFailure.error
-      || "AI 筛选未完成，请处理后继续",
+      || flowProblemFallbackMessage(flowFailure.status),
     );
     return {
       platform, phase: "scraping" as const, judged: 0, scope: platform,
@@ -1579,7 +1613,10 @@ return {
   navigationManualHold,
   flowActive,
   flowLiveWorker,
+  flowLocksNewRound,
+  flowOwnership: hasFlowOwnership,
   setFlowReachableSteps,
+  setFlowLocksNewRound,
   setNavigationManualHold,
   setFlowActive,
   setFlowLiveWorker,
@@ -1729,15 +1766,18 @@ export type DiscoveryState = ReturnType<typeof useDiscoveryState>;
 
 /**
  * 状态词表的输入面（SPEC 046「状态所有权」）：判活（A）与本轮未结束（B）这两个
- * 谓词只读这几份既有事实——Flow 投影（flowActive / flowLiveWorker 由协调器从
- * flows + flow_tracks 读时派生后投影进来）、任务快照状态与暂停断点。
- * 把它命名出来不是为了新增第四份状态：任何调用方传齐这几份即可复用同一份判定，
+ * 谓词只读这几份既有事实——Flow 投影（flowActive / flowLiveWorker / flowLocksNewRound
+ * 由协调器从 flows + flow_tracks 读时派生后投影进来）、Flow 归属（既有归属谓词
+ * hasFlowOwnership，不是新增的第四份状态）、任务快照状态、暂停断点与中断断点。
+ * 把它命名出来不是为了新增状态：任何调用方传齐这几份即可复用同一份判定，
  * DiscoveryState 结构上就满足它。
  */
 export interface TrunkRoundFacts {
   flowActive: { value: boolean };
   flowLiveWorker: { value: boolean | null };
+  flowOwnership: { value: boolean };
   pausedRunId: { value: string };
+  interruptedRunId: { value: string };
   scrapeSnapshot: { value: { status?: string | null } | null };
   screenSnapshot: { value: { status?: string | null } | null };
   recrawlSnapshot: { value: { status?: string | null } | null };
@@ -1750,13 +1790,15 @@ export interface TrunkRoundFacts {
  * 任务快照只认 running/queued。已暂停、已中断都没有活体在跑，属于问题 B
  * 「这一轮还没结束」，一律用 hasUnfinishedRound 回答；把它们并回判活，
  * 中断/暂停轮就会被当成「有人在干活」，04 的结果接回与「已看过」置位永开关死。
+ *
+ * 投影缺席（flowLiveWorker === null）时不向 B 借道：没有活体证据就是没有活体。
+ * 协调器在同一个 tick 里双投影两份事实（useDiscoveryFlowCoordinator 的 hasUnfinishedRound /
+ * hasLiveWorker 两支 watch），生产里 null 只出现在 Flow 本身不在场的 legacy 链路，
+ * 那里 flowActive 也恒为假——借道只会让不经协调器的调用方把中断轮重判成「有活」，
+ * 于是 04 的结果接回被永久关死（046 v2「状态词表」：两个谓词不得互相借道）。
  */
 export function hasLiveTaskState(state: TrunkRoundFacts): boolean {
-  // 页面还没投影活体事实（flowLiveWorker === null：单平台传统链路、未经协调器投影的
-  // 调用方与单元现场）时退回活动线——那不是新语义，是没有活体事实可依据时唯一的
-  // 保守口径：宁可当作有活，也不能凭空判成「本轮已结束」。
-  const liveWorker = state.flowLiveWorker.value;
-  if (liveWorker === null ? state.flowActive.value : liveWorker) return true;
+  if (state.flowLiveWorker.value) return true;
   const liveStatuses = new Set(["running", "queued"]);
   for (const snap of [
     state.screenSnapshot.value,
@@ -1768,27 +1810,48 @@ export function hasLiveTaskState(state: TrunkRoundFacts): boolean {
   return false;
 }
 
-/**
- * 问题 B「这一轮还没结束」：流程活动线（含已中断、已暂停的轮）、真有活体任务，
- * 或本轮留着暂停/进行中快照等待处理与接回。
- *
- * 它决定的是「用户要不要被带回这一轮的真实进度页」——落点 liveTaskStep、
- * 灵动岛「回到最新」问这个。已中断的轮同样没结束：落点不能为空、不能造不可达步骤，
- * 否则上传入口守卫会把用户带进「开新一轮」，把刚中断的这一轮冲掉（SPEC 046 第五轮修过的两个缺陷）。
- * 词表 B 侧成员（paused）在 A 侧被剔除后由这里自持，两份谓词不得再互相借道。
- */
-export function hasUnfinishedRound(state: TrunkRoundFacts): boolean {
-  if (state.flowActive.value || hasLiveTaskState(state)) return true;
-  if (state.pausedRunId.value) return true;
+/** 该轮自己的中断事实：任务/运行侧留着服务重启的中断快照或中断断点。 */
+function roundInterruptedFacts(state: TrunkRoundFacts): boolean {
+  if (state.interruptedRunId.value) return true;
   return [
     state.screenSnapshot.value,
     state.scrapeSnapshot.value,
     state.recrawlSnapshot.value,
-  ].some((snapshot) => snapshotRoundUnfinished(snapshot));
+  ].some((snapshot) => snapshot && String(snapshot.status) === "interrupted");
 }
 
-/** 035：跨域共享派生的最小判定面（接受任意携带 status 的快照形状）。 */
-export interface LiveTaskProbe {
+/**
+ * 问题 B「这一轮还没结束」：流程活动线（含已中断、已暂停的轮）、真有活体任务，
+ * 或本轮留着暂停/进行中快照等待处理与接回。
+ *
+ * 它决定的是「用户要不要被带回这一轮的真实进度页」——落点 unfinishedRoundStep、
+ * 灵动岛「回到最新」问这个。已中断的轮同样没结束：落点不能为空、不能造不可达步骤，
+ * 否则上传入口守卫会把用户带进「开新一轮」，把刚中断的这一轮冲掉（SPEC 046 第五轮修过的两个缺陷）。
+ * 词表 B 侧成员（paused）在 A 侧被剔除后由这里自持，两份谓词不得再互相借道。
+ *
+ * legacy 一支（046 收口第一单）：pre-046 的旧轮次没有 flows / flow_tracks 行，Flow 那两份
+ * 投影永远读不到，B 若只认 Flow 就会把真被服务重启打断的旧轮判成「已收尾」、连中断告警
+ * 都不再产出（上一单的 D-09 分层留下的缺口）。归属判据用既有的那一份 hasFlowOwnership，
+ * 不新造状态：归属在场时轮次事实只由 flows + flow_tracks 回答，这一支整块关闭；
+ * 归属确实不在场时，该轮自己的中断事实就是「本轮未结束」。
+ */
+export function hasUnfinishedRound(state: TrunkRoundFacts): boolean {
+  if (state.flowActive.value || hasLiveTaskState(state)) return true;
+  if (state.pausedRunId.value) return true;
+  if ([
+    state.screenSnapshot.value,
+    state.scrapeSnapshot.value,
+    state.recrawlSnapshot.value,
+  ].some((snapshot) => snapshotRoundUnfinished(snapshot))) return true;
+  return !state.flowOwnership.value && roundInterruptedFacts(state);
+}
+
+/**
+ * 035：跨域共享派生的最小判定面（接受任意携带 status 的快照形状）。
+ * 名字必须与内容一致：这一支问的是问题 B「本轮未结束还要不要把人带回进度页」，
+ * 不是问题 A「此刻有没有活体」——清单里有 paused，因此不叫 Live（046 收口第一单改名）。
+ */
+export interface UnfinishedRoundStepProbe {
   scrapeBusy?: boolean;
   scrapeSnapshot?: { status?: string | null } | null;
   screenBusy?: boolean;
@@ -1796,7 +1859,6 @@ export interface LiveTaskProbe {
   recrawlBusy?: boolean;
   recrawlSnapshot?: { status?: string | null } | null;
   pausedRunId?: string;
-  interruptedRunId?: string;
 }
 
 // 落点侧（问题 B 的一部分）的快照清单：排队/运行/暂停都还有未收口的现场。
@@ -1812,7 +1874,7 @@ function snapshotRoundUnfinished(snapshot?: { status?: string | null } | null): 
  * 抓取段未收口（运行/排队/暂停）→ "search"（02，抓取任务的真实进度页）；
  * 筛选/重抓段未收口（含 pausedRunId）→ "screen"（03）；失败/中断快照只保留错误展示。
  */
-export function deriveLiveTaskStep(probe: LiveTaskProbe): StepId | "" {
+export function deriveUnfinishedRoundStep(probe: UnfinishedRoundStepProbe): StepId | "" {
   if (probe.scrapeBusy || snapshotRoundUnfinished(probe.scrapeSnapshot)) return "search";
   if (
     probe.screenBusy || probe.recrawlBusy
@@ -1823,13 +1885,13 @@ export function deriveLiveTaskStep(probe: LiveTaskProbe): StepId | "" {
   return "";
 }
 
-/** 进行中阶段可作落点的清单，按页面先后排；取落点时从最深的一支开始。
+/** 本轮未结束时可作落点的清单，按页面先后排；取落点时从最深的一支开始。
  *  01 是发起页、04 是结果页，都不是进度页，因此不进这张表。 */
-const LIVE_LANDING_STEPS: StepId[] = ["screen", "search"];
+const UNFINISHED_ROUND_LANDING_STEPS: StepId[] = ["screen", "search"];
 
-/** 035：liveTaskStep(state)——持有 state 的域（search/results 等）直接取用。 */
-export function liveTaskStep(state: DiscoveryState): StepId | "" {
-  const legacyStep = deriveLiveTaskStep({
+/** 035：unfinishedRoundStep(state)——持有 state 的域（search/results 等）直接取用。 */
+export function unfinishedRoundStep(state: DiscoveryState): StepId | "" {
+  const legacyStep = deriveUnfinishedRoundStep({
     scrapeBusy: state.scrapeBusy.value,
     scrapeSnapshot: state.scrapeSnapshot.value,
     screenBusy: state.screenBusy.value,
@@ -1837,7 +1899,6 @@ export function liveTaskStep(state: DiscoveryState): StepId | "" {
     recrawlBusy: state.recrawlBusy.value,
     recrawlSnapshot: state.recrawlSnapshot.value,
     pausedRunId: state.pausedRunId.value,
-    interruptedRunId: state.interruptedRunId.value,
   });
   if (legacyStep) return legacyStep;
   // 落点问的是问题 B「这一轮还没结束」，不是问题 A「此刻有活体 worker」：
@@ -1845,6 +1906,10 @@ export function liveTaskStep(state: DiscoveryState): StepId | "" {
   // 不能造不可达步骤（SPEC 046 第五轮的两个缺陷）。判活（04 接回结果、迟到响应）
   // 才用 hasLiveTaskState，两者不要混用。
   if (!hasUnfinishedRound(state)) return "";
+  // legacy 一支（本轮的中断事实、没有 Flow 归属）只回答「要不要告警」，不回答「有没有
+  // 进度页要回」：那种现场既没有活体也没有暂停断点，凭空给一个落点会把入口守卫判成
+  // 「还有任务在跑」，把「开始新一轮」这条唯一出路钉死（状态词表的硬要求）。
+  if (!state.flowOwnership.value) return "";
   // 树干说有活（只由流程活动线成立）而本地进度探针给不出落点时，落点跟随 Flow
   // 投影到 state 的阶段集合，取其中**最深**的进行中阶段（screen 优先于 search）：
   // 并行流程「抓取已完成、筛选正在跑」必须落 03，落 02 只看得到抓取列表。
@@ -1856,7 +1921,7 @@ export function liveTaskStep(state: DiscoveryState): StepId | "" {
   const candidates = projected && projected.size
     ? projected
     : new Set<StepId>(["search"]);
-  return LIVE_LANDING_STEPS.find((step) => candidates.has(step)) || "";
+  return UNFINISHED_ROUND_LANDING_STEPS.find((step) => candidates.has(step)) || "";
 }
 
 // 031 B8：emit/props 形状固定为类型，替代原未类型化的 emit 参数

@@ -1833,9 +1833,9 @@ describe("DiscoveryView", () => {
     await flushPromises();
 
     const exposedFlow = (wrapper.vm as unknown as {
-      parallelFlow?: { hasActiveTrack?: { value?: boolean }; canStartNewRound?: { value?: boolean } };
+      parallelFlow?: { hasUnfinishedRound?: { value?: boolean }; canStartNewRound?: { value?: boolean } };
     }).parallelFlow;
-    expect(exposedFlow?.hasActiveTrack?.value).toBe(true);
+    expect(exposedFlow?.hasUnfinishedRound?.value).toBe(true);
     expect(exposedFlow?.canStartNewRound?.value).toBe(false);
     expect(wrapper.get('[data-testid="start-one-click"]').attributes("disabled")).toBeDefined();
     wrapper.unmount();
@@ -1860,10 +1860,47 @@ describe("DiscoveryView", () => {
     await flushPromises();
 
     const exposed = (wrapper.vm as unknown as {
-      parallelFlow?: { hasActiveTrack?: { value?: boolean }; canResetNewRound?: { value?: boolean } };
+      parallelFlow?: { hasUnfinishedRound?: { value?: boolean }; canResetNewRound?: { value?: boolean } };
     });
-    expect(exposed.parallelFlow?.hasActiveTrack?.value).toBe(true);
+    expect(exposed.parallelFlow?.hasUnfinishedRound?.value).toBe(true);
     expect(exposed.parallelFlow?.canResetNewRound?.value).toBe(true);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  // SPEC 046 收口第一单：「能不能开新一轮」整棵树只允许一份清单（排队中/运行中/已暂停锁，
+  // 已中断放行），02 页主启动按钮读它的投影，不再被「本轮未结束」顺带锁死；锁住时原因必须
+  // 落在既有的锁定提示位（本轮范围卡片的锁芯片），不许只藏在按钮 title 里等用户去悬停。
+  it.each([
+    { name: "interrupted", status: "interrupted", locked: false, reason: "" },
+    { name: "paused", status: "paused", locked: true, reason: "任务已暂停" },
+    { name: "running", status: "running", locked: true, reason: "任务进行中" },
+  ])("02 主启动按钮按那一份清单分派：$status", async (scene) => {
+    const profileId = `profile-newround-${scene.name}`;
+    const flowId = `newround-${scene.name}-flow`;
+    const fetchMock = oneClickBase({
+      "/api/flows/current": () => response({ ok: true, flow: {
+        id: flowId,
+        profile_id: profileId,
+        selection: "all",
+        status: scene.status,
+        tracks: [
+          { id: "b", flow_id: flowId, platform: "boss", status: scene.status, stage: "ai", scrape_run_id: "scrape-b", screen_run_id: "screen-b", result_run_id: null },
+          { id: "z", flow_id: flowId, platform: "zhilian", status: "done", stage: "complete", scrape_run_id: "scrape-z", screen_run_id: "screen-z", result_run_id: "result-z" },
+        ],
+      } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId } });
+    await flushPromises();
+
+    const startButton = wrapper.get('[data-testid="start-one-click"]');
+    if (scene.locked) expect(startButton.attributes("disabled")).toBeDefined();
+    else expect(startButton.attributes("disabled")).toBeUndefined();
+    const chip = wrapper.find(".lock-chip");
+    expect(chip.exists()).toBe(true);
+    if (scene.reason) expect(chip.text()).toContain(scene.reason);
     wrapper.unmount();
     vi.unstubAllGlobals();
   });

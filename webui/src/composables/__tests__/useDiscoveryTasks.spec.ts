@@ -514,7 +514,10 @@ describe("useDiscoveryTasks.maybeAutoStartNewRound（035 未结束任务保护�
   });
 
   it("T003b: 未结束任务存在（pausedRunId）→ 恢复现场，不 reset、不取消", async () => {
-    const state = makeState({ pausedRunId: ref("run-1") });
+    // 暂停断点写回真实那一份 ref：开新轮闸门（pipelineBusy）读的就是树干里的 pausedRunId，
+    // 用 overrides 换一个 ref 会让守卫读到另一份现场（046 收口第一单把闸门交回那一份清单）。
+    const state = makeState();
+    state.pausedRunId.value = "run-1";
     const deps = makeDeps();
     const tasks = useDiscoveryTasks(state, deps);
 
@@ -527,7 +530,10 @@ describe("useDiscoveryTasks.maybeAutoStartNewRound（035 未结束任务保护�
 
   it("B096: 活动 Flow Track → 自动开新轮守卫保留当前现场", async () => {
     const state = makeState({ resultsPageSeen: ref(true) });
+    // 活动轨道在场：协调器同批把三份事实都投影进来（本轮未结束、此刻有活体、开新轮闸门锁）。
     state.flowActive.value = true;
+    state.flowLiveWorker.value = true;
+    state.flowLocksNewRound.value = true;
     state.activeStep.value = "results";
     const deps = makeDeps();
     const tasks = useDiscoveryTasks(state, deps);
@@ -728,9 +734,12 @@ describe("useDiscoveryTasks.pollTask 错误态不阻塞新任务", () => {
     const state = makeState({
       screenTaskId: ref("screen-old"),
       screenBusy: ref(true),
-      flowActive: ref(false),
-      flowLiveWorker: ref(false),
     });
+    state.setFlowActive(false);
+    state.setFlowLiveWorker(false);
+    // 轮次归 Flow 管（有 flows + flow_tracks 行、投影说已收尾）：B 的 legacy 一支整块关闭，
+    // 残留的中断只是任务事实，不再冒充「上一轮被中断」（046 D-09 + 收口第一单）。
+    state.setFlowReachableSteps(new Set(["search", "screen", "results"]), "flow-closed-round");
     apiRequestMock.mockResolvedValue({
       status: "interrupted",
       progress: { message: "上次 AI 筛选因服务重启被中断" },
@@ -1135,6 +1144,9 @@ describe("useDiscoverySearch.analyzeResume（035 入口守卫落点）", () => {
     state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
     state.screenSnapshot.value = { status: "completed", progress: {}, logs: [] };
     state.setFlowActive(true);
+    // 并行流程真在跑时，协调器在同一个 tick 里把活体事实一并投影进来
+    // （046 收口第一单：A 谓词不再在投影缺席时向 B 借道）。
+    state.setFlowLiveWorker(true);
     const deps = makeSearchDeps();
     const search = useDiscoverySearch(state, deps);
 

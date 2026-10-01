@@ -69,7 +69,7 @@ export interface ParallelFlowState {
   [key: string]: unknown;
 }
 
-const ACTIVE_FLOW_STATUSES = new Set(["queued", "running", "paused", "interrupted"]);
+const UNFINISHED_ROUND_FLOW_STATUSES = new Set(["queued", "running", "paused", "interrupted"]);
 // 活体 worker 的词汇只有一份，落在树干阶段卡口径（排队中 / 运行中）。
 const LIVE_WORKER_FLOW_STATUSES = new Set<string>(ACTIVE_TRACK_STATUSES);
 // SPEC 046 FR-015 + v2「状态词表」：开新一轮闸门只锁「还能推进」的三种状态——
@@ -94,11 +94,11 @@ function flowLocksNewRound(flow: ParallelFlowState | null | undefined): boolean 
  * 这是「本轮还没结束」的谓词（锁范围、锁提交新任务），不是「现在有活体任务在跑」；
  * 判活一律用 flowHasLiveWorker。
  */
-export function isActiveParallelFlow(flow: ParallelFlowState | null | undefined): boolean {
+export function hasUnfinishedParallelRound(flow: ParallelFlowState | null | undefined): boolean {
   return Boolean(
     flow && (
-      ACTIVE_FLOW_STATUSES.has(String(flow.status || ""))
-      || flow.tracks.some((track) => ACTIVE_FLOW_STATUSES.has(String(track.status || "")))
+      UNFINISHED_ROUND_FLOW_STATUSES.has(String(flow.status || ""))
+      || flow.tracks.some((track) => UNFINISHED_ROUND_FLOW_STATUSES.has(String(track.status || "")))
     ),
   );
 }
@@ -108,7 +108,7 @@ export function isActiveParallelFlow(flow: ParallelFlowState | null | undefined)
  *
  * 「已中断」「已暂停」说的是同一件事的另一半——这一轮还没结束（继续锁住本轮范围、
  * 不给改平台、不给提交新任务），但没有任何活体任务在跑。判活（是否允许占用 02/03
- * 实时画面、是否拒绝把本轮结果交给 04）必须用这个谓词，不能用 isActiveParallelFlow，
+ * 实时画面、是否拒绝把本轮结果交给 04）必须用这个谓词，不能用 hasUnfinishedParallelRound，
  * 否则一条被服务重启打断的流程会把结果页永久关在门外。
  */
 export function flowHasLiveWorker(flow: ParallelFlowState | null | undefined): boolean {
@@ -256,8 +256,8 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     );
   }
 
-  const hasActiveTrack = computed(() => isActiveParallelFlow(flow.value));
-  // 本轮未结束（hasActiveTrack）与此刻有活体 worker（hasLiveWorker）是两件事：
+  const hasUnfinishedRound = computed(() => hasUnfinishedParallelRound(flow.value));
+  // 本轮未结束（hasUnfinishedRound）与此刻有活体 worker（hasLiveWorker）是两件事：
   // 前者锁范围与提交，后者才决定实时画面与结果接回。
   const hasLiveWorker = computed(() => flowHasLiveWorker(flow.value));
 
@@ -474,7 +474,7 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
         }
         return flow.value;
       }
-      if (!hasActiveTrack.value) clearPolling();
+      if (!hasUnfinishedRound.value) clearPolling();
       clearFlowStatus();
       return flow.value;
     } catch (reason: unknown) {
@@ -728,10 +728,10 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
           }
         }
       }
-      const hasActiveTrackRow = Boolean(next?.tracks.some((track) =>
-        ACTIVE_FLOW_STATUSES.has(String(track.status || "")),
+      const hasUnfinishedTrackRow = Boolean(next?.tracks.some((track) =>
+        UNFINISHED_ROUND_FLOW_STATUSES.has(String(track.status || "")),
       ));
-      if (isActiveParallelFlow(next) && (!next?.tracks.length || hasActiveTrackRow)) {
+      if (hasUnfinishedParallelRound(next) && (!next?.tracks.length || hasUnfinishedTrackRow)) {
         startPolling();
       }
       clearFlowStatus();
@@ -758,8 +758,9 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     platformSchemas,
     platformValues,
     unifiedValues,
-    hasActiveTrack,
+    hasUnfinishedRound,
     hasLiveWorker,
+    newRoundLocked,
     canStartNewRound,
     canResetNewRound,
     newRoundBlockReason,

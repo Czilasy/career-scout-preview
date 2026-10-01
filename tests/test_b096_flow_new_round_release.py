@@ -24,7 +24,12 @@ TOLERATED_CANCEL_ERRORS = {
     "already_finished", "run_not_found", "task_not_active", "not_paused",
     "browser_cleanup_failed",
 }
-# isActiveParallelFlow / canResetNewRound 的活动状态口径。
+# 服务端事实的两档名单，两份都不镜像「能不能开新一轮」的闸门：
+# ACTIVE_FLOW_STATUSES = 状态词表的「本轮未结束」（前端谓词 hasUnfinishedParallelRound 的成员）；
+# RESETTABLE_FLOW_STATUSES = 没有活体 worker、只能就地收口或重开的两档粗分类（暂停 / 中断），
+# 本用例的现场落在里面的「已中断」。前端开新轮闸门只由 useDiscoveryParallelFlow 的
+# NEW_ROUND_LOCKING_FLOW_STATUSES（排队 / 运行 / 已暂停锁，已中断放行）一份清单回答，
+# 这里不再抄第三份成员清单，只锁服务端取消契约与状态回执。
 ACTIVE_FLOW_STATUSES = {"queued", "running", "paused", "interrupted"}
 RESETTABLE_FLOW_STATUSES = {"paused", "interrupted"}
 
