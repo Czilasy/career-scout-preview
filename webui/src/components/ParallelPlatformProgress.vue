@@ -2,6 +2,10 @@
 import ScreenRoundActions from "./ScreenRoundActions.vue";
 import TaskProgress from "./TaskProgress.vue";
 import type { FlowProgressItem } from "../composables/useDiscoveryFlowPresentation";
+import {
+  TRACK_ACTION_OPERATIONS,
+  type TrackActionKind,
+} from "../composables/useDiscoveryParallelFlow";
 import type { Platform } from "../types";
 
 // 轨道行 = 一平台一行的复用现场：进度卡与动作条都是既有组件，动作条就放进这张卡里。
@@ -17,17 +21,9 @@ const props = defineProps<{
 const emit = defineEmits(["action", "finish"]);
 
 // 上传的是「哪条线的哪一个动作」，不解释这个动作该不该出现。
-const ACTION_KINDS = [
-  "pause",
-  "continue",
-  "start",
-  "recrawl",
-  "pause-recrawl",
-  "continue-recrawl",
-  "pause-scrape",
-  "continue-scrape",
-  "cancel",
-] as const;
+// 可绑的 kind 只有轨道落点表那一份：表里有了结方式的才绑，表外的（重抓、开始 AI 筛选）
+// 这条线根本做不到，绑了就是一颗点了没反应的假按钮（046 D-03）。
+const ACTION_KINDS = Object.keys(TRACK_ACTION_OPERATIONS) as TrackActionKind[];
 
 function actionHandlers(item: FlowProgressItem): Record<string, () => void> {
   const handlers: Record<string, () => void> = {};

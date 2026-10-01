@@ -326,6 +326,50 @@ describe("B096 V2 unified filter mapping", () => {
     }, { ...schemas, boss: broken })).toThrowError(/平台筛选条件已变化/);
   });
 
+  // SC-006 + contracts/condition-snapshot.md 第 6 节：映射失败必须「标明平台」，
+  // 而这条消息会直接显示给用户（useDiscoveryFlowCoordinator 的 handleUnifiedFilterChange
+  // 原样把它写进 parallelMappingError），所以平台与字段都得是用户读得到的名字：
+  // 平台显示名走 discovery.ts 的唯一投影，中文字段名走 UNIFIED_FIELD_LABELS，
+  // 树干不写平台名，也不把内部字段码吐到界面上。
+  it("names the platform and the Chinese field label when the frozen table has no entry", () => {
+    let message = "";
+    try {
+      resolveMappedValues("zhilian", {
+        salary: [], experience: ["没有这个档位"], degree: [], industry: [], scale: [], recruiter_activity: [],
+      }, schemas);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("平台筛选条件已变化");
+    expect(message).toContain("智联");
+    expect(message).toContain("经验要求");
+    expect(message).toContain("没有这个档位");
+    // 内部字段码与平台码不得出现在给用户的那句话里。
+    expect(message).not.toContain("experience");
+    expect(message).not.toContain("zhilian");
+  });
+
+  it("names the same platform and Chinese field label when a schema option disappeared", () => {
+    const broken = schema("boss");
+    (broken.fields.find((field) => field.key === "experience") as unknown as {
+      options: Array<{ label: string; value: string }>;
+    }).options = broken.fields.find((field) => field.key === "experience")!.options
+      .filter((option) => option.label !== "1-3年");
+    let message = "";
+    try {
+      resolveMappedValues("boss", {
+        salary: [], experience: ["1-3年"], degree: [], industry: [], scale: [], recruiter_activity: [],
+      }, { ...schemas, boss: broken });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("平台筛选条件已变化");
+    expect(message).toContain("BOSS");
+    expect(message).toContain("经验要求");
+    expect(message).not.toContain("experience");
+    expect(message).not.toContain("（boss");
+  });
+
   it("validates platform layers independently and preserves overrides and exclusive values", () => {
     const snapshot = validateConditionSnapshot({
       snapshotVersion: 2,

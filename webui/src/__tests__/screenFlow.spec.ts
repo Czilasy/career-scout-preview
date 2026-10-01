@@ -9,6 +9,12 @@ import {
   normalizeRoundContext,
   roundConditionsRestored,
 } from "../screenFlow";
+import {
+  TRACK_ACTION_OPERATIONS,
+  type TrackActionKind,
+} from "../composables/useDiscoveryParallelFlow";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import type { RoundContext } from "../types";
 
 describe("screenFlow", () => {
@@ -197,7 +203,8 @@ describe("screenFlow", () => {
     expect(deriveTrackActionBar({ stage: "screen", status: "succeeded", runId: "screen-a" }).action.kind).toBe("none");
   });
 
-  it("continueTargets returns both platforms on all filter", () => {    const contexts: RoundContext[] = [
+  it("continueTargets returns both platforms on all filter", () => {
+    const contexts: RoundContext[] = [
       { platform: "boss", keywords: [], cities: [], screening_fields: {}, profile_summary: "", profile_facts: {}, scrape_task_id: "a", screen_run_id: "1", status: "paused", resumable: true },
       { platform: "zhilian", keywords: [], cities: [], screening_fields: {}, profile_summary: "", profile_facts: {}, scrape_task_id: "b", screen_run_id: "2", status: "paused", resumable: true },
       { platform: "boss", keywords: [], cities: [], screening_fields: {}, profile_summary: "", profile_facts: {}, scrape_task_id: "c", screen_run_id: "3", status: "succeeded", resumable: false },
@@ -227,5 +234,65 @@ describe("screenFlow", () => {
       status: "paused", resumable: true, has_frozen_filters: true,
     })).toBe(true);
     expect(roundConditionsRestored(null)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 046 D-03 的机器检查：轨道行只许渲染「这条线真做得到」的动作。
+// operateTrack 的实际映射（pause / resume / stop）是唯一的落点来源；
+// 渲染出一个映射里没有的 kind 就等于给用户一颗点了没反应的假按钮。
+// 正向断言与负向断言配对：不许用「删掉动作」把这条检查变绿。
+// ---------------------------------------------------------------------------
+const TRACK_ROW_STATUSES = [
+  "", "queued", "pending", "running", "pausing", "paused", "interrupted",
+  "failed", "stopped", "cancelled", "succeeded", "done", "partial",
+  "completed_with_pending", "unavailable", "scraped_only",
+];
+
+function renderedTrackActionKinds(): string[] {
+  const kinds = new Set<string>();
+  for (const stage of ["scrape", "screen"] as const) {
+    for (const status of TRACK_ROW_STATUSES) {
+      const bar = deriveTrackActionBar({ stage, status, runId: `run-${stage}` });
+      if (bar.action.kind !== "none") kinds.add(bar.action.kind);
+      // 收尾两条也要有落点：结束并保存与终止是这条线唯一的收口出口。
+      if (bar.showFinishSave) kinds.add("finish-save");
+      if (bar.showCancel) kinds.add("cancel");
+    }
+  }
+  return [...kinds].sort();
+}
+
+describe("轨道行动作 kind 与后端操作一一对应", () => {
+  it("正向：轨道行仍然给得出暂停、继续与终止这几类动作（删功能不许蒙过这条检查）", () => {
+    expect(renderedTrackActionKinds()).toEqual([
+      "cancel", "continue", "continue-scrape", "finish-save", "pause", "pause-scrape",
+    ]);
+  });
+
+  it("负向：轨道行渲染出的每个动作 kind 都能在 operateTrack 的映射里找到非空落点", () => {
+    // 「结束并保存」走既有的 run 级收尾路径（页面把 finish-save 转给 finishPausedTask），
+    // 不在轨道操作映射里，因此单独放行这一个。
+    const unmapped = renderedTrackActionKinds().filter((kind) => (
+      kind !== "finish-save" && !TRACK_ACTION_OPERATIONS[kind as TrackActionKind]
+    ));
+    expect(unmapped).toEqual([]);
+  });
+
+  it("轨道映射只有暂停、继续、停止三种后端操作，不再留空转的 kind", () => {
+    expect(Object.values(TRACK_ACTION_OPERATIONS).sort()).toEqual([
+      "pause", "pause", "resume", "resume", "stop",
+    ]);
+  });
+
+  it("轨道行组件不再自带死掉的 kind 处理器", () => {
+    const component = readFileSync(path.join(__dirname, "../components/ParallelPlatformProgress.vue"), "utf8");
+    // 正：动作仍原样往上传，且上传的 kind 集合就是轨道映射那一份。
+    expect(component).toMatch(/emit\("action", item\.platform, kind\)/);
+    expect(component).toMatch(/TRACK_ACTION_OPERATIONS/);
+    // 负：轨道没有重抓与「开始 AI 筛选」这两个出口，就不该为它们绑处理器。
+    for (const dead of ["\"start\"", "\"recrawl\"", "\"pause-recrawl\"", "\"continue-recrawl\""]) {
+      expect(component).not.toContain(dead);
+    }
   });
 });

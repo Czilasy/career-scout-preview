@@ -176,3 +176,57 @@ describe("ScreenRoundActions 按钮矩阵", () => {
     expect(wrapper.get('[data-testid="start-ai-screen"]').text()).toContain("开始 AI 筛选");
   });
 });
+
+// ---------------------------------------------------------------------------
+// 046 D-03 / FR-015：「结束并保存结果」与「放弃本轮」是用户在这条线上唯一的收口出路。
+// 现场只读（disabled 说的是这一片现场不可再操作，例如本轮已锁定、状态读不到）没有任何
+// 条文授权把这两条一起锁掉：锁掉之后用户只能刷新页面。这里把边界钉回主操作一条。
+// 负向断言（收尾仍可点）与正向断言（真的在飞时照旧锁住）配对，防止拿忙态锁当借口删掉。
+// ---------------------------------------------------------------------------
+describe("ScreenRoundActions 现场只读时的收尾出口", () => {
+  function readOnlyRound() {
+    return mount(ScreenRoundActions, {
+      props: {
+        action: action("pause"),
+        disabled: true,
+        showFinishSave: true,
+        showCancel: true,
+        cancelLabel: "放弃本轮",
+      },
+    });
+  }
+
+  it("主操作被禁用且没有任何操作在飞时，结束并保存与放弃本轮仍可点", async () => {
+    const wrapper = readOnlyRound();
+
+    expect(wrapper.get('[data-testid="pause-ai-screen"]').attributes("disabled")).toBeDefined();
+    const finish = wrapper.get('[data-testid="finish-save-results"]');
+    const cancel = wrapper.get('[data-testid="cancel-scrape"]');
+    expect(finish.attributes("disabled")).toBeUndefined();
+    expect(cancel.attributes("disabled")).toBeUndefined();
+
+    await finish.trigger("click");
+    await cancel.trigger("click");
+    expect(wrapper.emitted("finish-save")).toHaveLength(1);
+    expect(wrapper.emitted("cancel")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it.each([
+    { label: "主动作在飞", props: { busy: true, busyAction: "pause" } },
+    { label: "结束保存在飞", props: { finishBusy: true } },
+    { label: "终止在飞", props: { cancelBusy: true } },
+  ])("$label时收尾两条按忙态锁住", ({ props }) => {
+    const wrapper = mount(ScreenRoundActions, {
+      props: {
+        action: action("pause"),
+        showFinishSave: true,
+        showCancel: true,
+        ...props,
+      },
+    });
+    expect(wrapper.get('[data-testid="finish-save-results"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="cancel-scrape"]').attributes("disabled")).toBeDefined();
+    wrapper.unmount();
+  });
+});

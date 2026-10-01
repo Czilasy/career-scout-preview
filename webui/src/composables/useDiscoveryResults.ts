@@ -51,6 +51,7 @@ import {
   partitionPipelineResult,
   projectResumeSuggestionToSchema,
   shouldConfirmNationalScope,
+  TRACK_PROBLEM_STATUSES,
 } from "../discovery";
 import { setThemePlatform } from "../composables/useTheme";
 import type { MergedLatestResult, FlowTaskLine } from "./useDiscoveryState";
@@ -287,7 +288,8 @@ async function applyFetchedLatestResult(
   const flowTracks = Array.isArray((merged as PipelineResult & { flow_tracks?: unknown[] }).flow_tracks)
     ? (merged as PipelineResult & { flow_tracks?: Array<Record<string, unknown>> }).flow_tracks || []
     : [];
-  const isFailedTrack = (track: Record<string, unknown>): boolean => ["failed", "unavailable", "interrupted"].includes(String(track.status || "")) || track.unfinished_ai_screening === true;
+  // 问题态清单的唯一一份在树干 discovery.ts（状态所有权），这里只引用不重抄。
+  const isFailedTrack = (track: Record<string, unknown>): boolean => TRACK_PROBLEM_STATUSES.includes(String(track.status || "")) || track.unfinished_ai_screening === true;
   const failedFlowTrack = flowTracks.find((track) => isFailedTrack(track) && !["scrape", "search", "pending"].includes(String(track.stage || "")))
     || flowTracks.find(isFailedTrack);
   const failedStage = String(failedFlowTrack?.stage || "");

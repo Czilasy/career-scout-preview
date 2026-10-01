@@ -16,6 +16,8 @@ import {
   roundScopeLabel,
   shouldConfirmNationalScope,
   stageStatusLabel,
+  TRACK_PROBLEM_STATUSES,
+  TRACK_STOPPED_STATUSES,
   type PipelineResult,
 } from "../discovery";
 import type {
@@ -534,5 +536,70 @@ describe("platformLabel（平台显示名唯一权威）", () => {
   ])("%s 不再自带平台名三元表达式", (relativePath) => {
     const source = readFileSync(path.join(__dirname, relativePath), "utf8");
     expect(source).not.toMatch(/\?\s*["'](BOSS|智联)["']\s*:\s*["'](BOSS|智联)["']/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SPEC 046 `## 状态所有权`：状态清单的唯一来源在树干这一处。
+// 问题态清单（轨道停了且需要用户处理）此前在五处内联抄写，加一种状态要改五个文件，
+// 少改一处就会出现「03 页说是失败、灵动岛说还在跑」。这里把清单钉回一份，
+// 并把「不许再留内联副本」做成机器检查。
+// ---------------------------------------------------------------------------
+describe("轨道问题态清单只有一份（046 状态所有权）", () => {
+  const CONSUMERS = [
+    "../composables/useDiscoveryFlowCoordinator.ts",
+    "../composables/useDiscoveryState.ts",
+    "../composables/useDiscoveryResults.ts",
+    "../composables/useDiscoveryFlowPresentation.ts",
+  ];
+
+  it("discovery.ts 登记问题态清单，暂停族超集由它派生", () => {
+    expect(TRACK_PROBLEM_STATUSES).toEqual(["failed", "interrupted", "unavailable"]);
+    // 用户主动暂停不是「出问题」，但整条线同样不再活动：超集只许派生，不许另抄。
+    expect(TRACK_STOPPED_STATUSES).toEqual(["failed", "interrupted", "unavailable", "paused"]);
+  });
+
+  it.each(CONSUMERS)("%s 只引用树干那一份清单，不再自带内联副本", (relativePath) => {
+    const source = readFileSync(path.join(__dirname, relativePath), "utf8");
+    expect(source).toMatch(/TRACK_PROBLEM_STATUSES|TRACK_STOPPED_STATUSES/);
+    // 任何顺序的内联三件套都算抄了一份。
+    for (const permutation of [
+      /"failed",\s*"unavailable",\s*"interrupted"/,
+      /"failed",\s*"interrupted",\s*"unavailable"/,
+      /"unavailable",\s*"failed",\s*"interrupted"/,
+    ]) {
+      expect(source).not.toMatch(permutation);
+    }
+    expect(source).toMatch(/from "\.\.\/discovery"/);
+  });
+
+  it("呈现层不再自己声明问题态集合", () => {
+    const source = readFileSync(
+      path.join(__dirname, "../composables/useDiscoveryFlowPresentation.ts"), "utf8",
+    );
+    expect(source).not.toMatch(/const TRACK_FAILURE_STATUSES\s*=\s*new Set\(\[/);
+    expect(source).toMatch(/TRACK_STOPPED_STATUSES\.includes/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 项目规则：没有实际调用方就不写「预留」字段。Flow 轨道行项目曾经带过两个只被测试
+// 夹具喂值的字段（头部徽章文案与「是否承载线状态」），真正的渲染口径在 TaskProgress
+// 自己那一份。删掉字段后，这两件事仍然要能从看得见的输出上验出来。
+// ---------------------------------------------------------------------------
+describe("Flow 轨道行项目不携带没有消费方的预留字段", () => {
+  it("呈现层接口不再声明 carriesLineState 与 statusLabel", () => {
+    const source = readFileSync(
+      path.join(__dirname, "../composables/useDiscoveryFlowPresentation.ts"), "utf8",
+    );
+    const interfaceBody = source.slice(
+      source.indexOf("export interface FlowProgressItem"),
+      source.indexOf("export interface FlowPresentationTrack"),
+    );
+    expect(interfaceBody).not.toMatch(/\bcarriesLineState\??\s*:/);
+    expect(interfaceBody).not.toMatch(/\bstatusLabel\s*:/);
+    // 正向：卡自己那一句话状态仍然交给既有唯一词表（TaskProgress 自算）。
+    expect(readFileSync(path.join(__dirname, "../components/TaskProgress.vue"), "utf8"))
+      .toMatch(/stageStatusLabel/);
   });
 });

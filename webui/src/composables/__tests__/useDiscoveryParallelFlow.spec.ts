@@ -1,4 +1,8 @@
-import { useDiscoveryParallelFlow } from "../useDiscoveryParallelFlow";
+import {
+  useDiscoveryParallelFlow,
+  TRACK_ACTION_OPERATIONS,
+  type TrackActionKind,
+} from "../useDiscoveryParallelFlow";
 import { ApiError } from "../../api";
 import { MAPPER_VERSION, resolveMappedValues } from "../../parallelFilterMapping";
 import type { ConditionSnapshotV2 } from "../../types";
@@ -1153,5 +1157,64 @@ describe("useDiscoveryParallelFlow", () => {
     expect(state.platformValues.zhilian).not.toHaveProperty("company_nature", ["nature-legacy"]);
     expect(state.platformValues.zhilian).not.toHaveProperty("zhilian_mba_tuning");
     expect(state.platformValues.zhilian).not.toHaveProperty("platform_only_industry");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 046 D-03：轨道行上的动作必须真的做得到事。operateTrack 的映射表（kind → 后端操作）
+// 是唯一的落点来源：表里有的 kind 一定要打到对应端点，表里没有的 kind 不许悄悄发请求，
+// 也不许在界面上留一颗点了没反应的按钮（轨道行只渲染这张表覆盖的 kind）。
+// ---------------------------------------------------------------------------
+describe("useDiscoveryParallelFlow 轨道动作 kind 的实际落点", () => {
+  const KIND_TO_OPERATION: Record<string, string> = {
+    pause: "pause",
+    "pause-scrape": "pause",
+    continue: "resume",
+    "continue-scrape": "resume",
+    cancel: "stop",
+  };
+
+  function flowWithRecordedRequests() {
+    const urls: string[] = [];
+    const request = async <T>(url: string, options?: Record<string, unknown>): Promise<T> => {
+      urls.push(String(url));
+      return {
+        flow: {
+          id: "flow-kinds", profile_id: "profile-kinds", selection: "all", status: "running", tracks: [],
+        },
+        options,
+      } as T;
+    };
+    const flow = useDiscoveryParallelFlow({
+      profileId: "profile-kinds", request, pollIntervalMs: 1000000,
+    });
+    flow.restore({
+      id: "flow-kinds",
+      profile_id: "profile-kinds",
+      selection: "all",
+      status: "running",
+      tracks: [{
+        id: "b", flow_id: "flow-kinds", platform: "boss" as const, status: "running", stage: "scrape",
+      }],
+    });
+    return { flow, urls };
+  }
+
+  it("登记的每个轨道动作 kind 都打到它对应的那一个后端操作", async () => {
+    expect(Object.keys(TRACK_ACTION_OPERATIONS).sort()).toEqual(Object.keys(KIND_TO_OPERATION).sort());
+    for (const kind of Object.keys(KIND_TO_OPERATION)) {
+      const { flow, urls } = flowWithRecordedRequests();
+      await flow.operateTrack("boss", kind as TrackActionKind);
+      expect(urls.at(-1)).toBe(`/api/flows/flow-kinds/tracks/boss/${KIND_TO_OPERATION[kind]}`);
+      flow.clearPolling();
+    }
+  });
+
+  it("映射表之外的 kind 既不发请求，也不冒充做成了什么", async () => {
+    const { flow, urls } = flowWithRecordedRequests();
+    expect(await flow.operateTrack("boss", "start" as TrackActionKind)).toBeNull();
+    expect(await flow.operateTrack("boss", "recrawl" as TrackActionKind)).toBeNull();
+    expect(urls).toEqual([]);
+    flow.clearPolling();
   });
 });

@@ -13,6 +13,7 @@ import {
   partitionPipelineResult,
   projectResumeSuggestionToSchema,
   shouldConfirmNationalScope,
+  TRACK_PROBLEM_STATUSES,
 } from "../discovery";
 import type {
   AdvancedSettingsState,
@@ -142,6 +143,30 @@ export function flowProblemFallbackMessage(status: unknown): string {
   return pausedFamilyStatusOf({ status }) === "paused"
     ? "AI 筛选未完成，请处理后继续"
     : "AI 筛选未完成，请开始新一轮";
+}
+
+/**
+ * 条件标签投影（树干唯一一份）：把「字段 → 平台稳定码」翻成用户读的「组名: 标签」。
+ * 草稿汇总（本文件的 screenSummaryChips）与本轮冻结快照的汇总
+ *（useDiscoveryFlowCoordinator 的 D-07 汇总）都走这一个函数——同一份条件在两处
+ * 说两句话，就是 D-07 的病灶。未知值不显示数字编号，直接省略该胶囊内容（B011）。
+ */
+export function projectConditionChips(
+  groups: Array<{ key: string; label: string; options: Array<[string, string]> }>,
+  values: Record<string, string[]> | null | undefined,
+): { label: string; value: string }[] {
+  const chips: { label: string; value: string }[] = [];
+  const drafts = values || {};
+  groups.forEach((group) => {
+    const selected = drafts[group.key] || [];
+    if (!selected.length) return;
+    const labels = selected
+      .map((code) => group.options.find(([, optCode]) => optCode === code)?.[0])
+      .filter((label): label is string => Boolean(label));
+    if (!labels.length) return;
+    chips.push({ label: group.label, value: labels.join(" / ") });
+  });
+  return chips;
 }
 
 export function useDiscoveryState(props: DiscoveryProps, emit: DiscoveryEmit) {
@@ -1096,23 +1121,13 @@ const searchSummary = computed(() => {
 });
 
 
-const screenSummaryChips = computed(() => {
-  const chips: { label: string; value: string }[] = [];
-  // v-show 下 03 页始终渲染，平台草稿与筛选草稿可能处在过渡态：
-  // 缺当前平台草稿时按空处理，不让派生计算把渲染打断。
-  const drafts = filterValues.value[draftPlatform.value] || {};
-  filterGroups.value.forEach((group) => {
-    const values = drafts[group.key] || [];
-    if (!values.length) return;
-    // B011：未知值不显示数字编号，直接省略该胶囊内容。
-    const labels = values
-      .map((code) => group.options.find(([, optCode]) => optCode === code)?.[0])
-      .filter((label): label is string => Boolean(label));
-    if (!labels.length) return;
-    chips.push({ label: group.label, value: labels.join(" / ") });
-  });
-  return chips;
-});
+// 条件标签投影（树干唯一一份）见模块作用域的 projectConditionChips：草稿汇总与
+// 本轮冻结快照的汇总都走它。v-show 下 03 页始终渲染，平台草稿与筛选草稿可能处在
+// 过渡态：缺当前平台草稿时按空处理，不让派生计算把渲染打断。
+const screenSummaryChips = computed(() => projectConditionChips(
+  filterGroups.value,
+  filterValues.value[draftPlatform.value] || {},
+));
 
 // 结果是否已经到「可以直接渲染」的程度：一条结果可能早于外围的完成标记落地
 // （恢复持久化页面、替换 Flow 投影时都会出现）。空态/加载中的横幅不得盖住已经
@@ -1136,7 +1151,7 @@ const hasRenderableResult = computed(() => {
     (Array.isArray(track.jobs) && track.jobs.length > 0)
     || (Array.isArray(track.dropped) && track.dropped.length > 0)
     || Boolean(track.result_run_id)
-    || ["failed", "unavailable", "interrupted"].includes(String(track.status || ""))
+    || TRACK_PROBLEM_STATUSES.includes(String(track.status || ""))
     || Boolean(String(track.message || track.reason || track.error || "").trim())
   ));
   return Boolean(jobs.length || dropped.length || hasCount || hasTrackProjection);
@@ -1356,7 +1371,7 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
   const flowHasActiveSibling = flowTracks.some((track) =>
     ["running", "queued", "paused", "interrupted"].includes(String(track.status || "")));
   const flowFailure = flowTracks.find((track) => (
-    ["failed", "unavailable", "interrupted"].includes(String(track.status || ""))
+    TRACK_PROBLEM_STATUSES.includes(String(track.status || ""))
     || String(track.error_code || "") === "flow_result_incomplete"
     || track.unfinished_ai_screening === true
   ));

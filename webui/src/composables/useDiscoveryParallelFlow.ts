@@ -121,6 +121,25 @@ export function flowHasLiveWorker(flow: ParallelFlowState | null | undefined): b
 }
 
 /**
+ * 轨道行动作的唯一落点表（046 D-03）：界面上能出现在轨道行里的动作 kind，
+ * 必须在这张表里有非空落点；表里没有的 kind 轨道行就不许渲染（见 screenFlow 的
+ * deriveTrackActionBar 与 ParallelPlatformProgress 的接线），否则就是一颗假按钮。
+ * 轨道没有「开始 AI 筛选」和重抓这两个出口——那两条属于整轮入口与重抓面板。
+ *
+ * 树干不认识任何平台，也不新造端点：kind 只落到后端既有的三种轨道操作上，
+ * 「终止本轨」就是这条线的 stop。
+ */
+export type TrackActionKind = "pause" | "pause-scrape" | "continue" | "continue-scrape" | "cancel";
+
+export const TRACK_ACTION_OPERATIONS: Readonly<Record<TrackActionKind, "pause" | "resume" | "stop">> = {
+  pause: "pause",
+  "pause-scrape": "pause",
+  continue: "resume",
+  "continue-scrape": "resume",
+  cancel: "stop",
+};
+
+/**
  * The server may have created a Flow after the user has already switched
  * profiles.  That Flow is real durable state, but it must never be presented
  * as the newly selected profile's active Flow.  Keep the created payload on a
@@ -532,12 +551,22 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     return promise;
   }
 
-  function startPolling() {
+  /**
+   * 装轮询定时器。`immediateRead` 用于区分「装轮询时手上有没有权威现场」：
+   * - 缺省 true：调用方只有本地状态（例如显式 startPolling），先补一次读，
+   *   避免把本地猜测当成现场挂两秒。
+   * - false：调用方刚拿到后端那一份（restore 收到的载荷就是上一次权威读的结果，
+   *   服务端写完才回），再补一次同一条 /api/flows/current 是重复请求，
+   *   响应回来还会把刚摆好的现场又换一遍。
+   */
+  function startPolling(immediateRead = true) {
     clearPolling();
     polling.value = true;
-    void refresh().catch((reason: unknown) => {
-      if (!error.value) error.value = errorMessage(reason, "流程状态读取失败");
-    });
+    if (immediateRead) {
+      void refresh().catch((reason: unknown) => {
+        if (!error.value) error.value = errorMessage(reason, "流程状态读取失败");
+      });
+    }
     pollTimer = setInterval(() => {
       void refresh().catch((reason: unknown) => {
         if (!error.value) error.value = errorMessage(reason, "流程状态读取失败");
@@ -687,17 +716,13 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
   }
 
   /**
-   * 轨道行上传来的动作出口：既有动作条的 kind 落到后端既有的三种轨道操作上。
-   * 树干不认识任何平台，也不新造端点——「终止本轨」就是这条线的 stop。
+   * 轨道行上传来的动作出口：只查模块作用域那张唯一落点表 TRACK_ACTION_OPERATIONS。
+   * 表里的 kind 打到它对应的那一个后端操作；表外的 kind 不发请求、也不冒充做成了什么。
    */
-  async function operateTrack(
-    platform: Platform,
-    action: "pause" | "continue" | "start" | "recrawl" | "pause-recrawl" | "continue-recrawl" | "pause-scrape" | "continue-scrape" | "cancel",
-  ) {
-    if (action === "cancel") return operate(platform, "stop");
-    if (action === "pause" || action === "pause-scrape") return operate(platform, "pause");
-    if (action === "continue" || action === "continue-scrape") return operate(platform, "resume");
-    return null;
+  async function operateTrack(platform: Platform, action: TrackActionKind) {
+    const operation = TRACK_ACTION_OPERATIONS[action];
+    if (!operation) return null;
+    return operate(platform, operation);
   }
 
   function restore(next: ParallelFlowState | null) {
@@ -732,7 +757,8 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
         UNFINISHED_ROUND_FLOW_STATUSES.has(String(track.status || "")),
       ));
       if (hasUnfinishedParallelRound(next) && (!next?.tracks.length || hasUnfinishedTrackRow)) {
-        startPolling();
+        // 载荷本身就是后端刚写完那一份权威现场，装轮询不再补一次 /api/flows/current。
+        startPolling(false);
       }
       clearFlowStatus();
     } catch (reason: unknown) {

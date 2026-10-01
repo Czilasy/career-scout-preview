@@ -79,6 +79,19 @@ export function roundScopeLabel(scope: RoundStatusScope, platform: Platform): st
 export const ACTIVE_TRACK_STATUSES = ["queued", "running"];
 
 /**
+ * 轨道问题态（树干唯一一份）：整条线已经停下、需要用户处理，界面据此说「失败 / 不可用 /
+ * 已中断」。不含用户主动暂停——暂停是用户自己按下的出口，还有「就地继续」可走，把它算成
+ * 问题会把一次暂停报成失败（状态所有权：清单只许这一处，消费者一律引用）。
+ */
+export const TRACK_PROBLEM_STATUSES = ["failed", "interrupted", "unavailable"];
+
+/**
+ * 轨道不再活动的全集：问题态 + 用户主动暂停，只由上面那份派生，不再另抄一遍。
+ * 阶段卡用它判「这条线已经不跑了，本段按自己的口径定格」。
+ */
+export const TRACK_STOPPED_STATUSES = [...TRACK_PROBLEM_STATUSES, "paused"];
+
+/**
  * 本段快照还没说完自己那段话的状态（空串＝后端还没写状态，同样没说完）。
  * 轨道已经不是活动态时，这些状态要按整条线定格；本段快照是这些状态时，
  * 它继续替整条线说话。
@@ -156,7 +169,8 @@ export function stageStatusLabel(status?: string | null, integrityConclusion?: s
   return "运行中";
 }
 
-export function historyStatusLabel(status: string, jobCount: number): string {  const normalized = String(status || "").toLowerCase();
+export function historyStatusLabel(status: string, jobCount: number): string {
+  const normalized = String(status || "").toLowerCase();
   if (["scraped_only"].includes(normalized)) return "已抓取，未筛选";
   if (["done", "succeeded", "completed"].includes(normalized)) return "完成";
   if (["partial", "completed_with_pending"].includes(normalized)) return "部分结果";

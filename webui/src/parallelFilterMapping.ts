@@ -6,6 +6,9 @@ import type {
   UnifiedFilterField,
   UnifiedFilterValues,
 } from "./types";
+// 平台显示名唯一权威在树干（discovery.ts）：映射表是树枝，出错时点名靠这份投影，
+// 不在这里写平台名，也不把内部平台码吐给用户（contracts/condition-snapshot.md 第 6 节）。
+import { platformLabel } from "./discovery";
 
 export const MAPPER_VERSION = "b096-v2-2026-09-27";
 export const UNIFIED_FILTER_FIELDS = [
@@ -231,6 +234,13 @@ function optionValues(schema: PlatformFilterSchema | undefined, field: string): 
     Boolean(item) && typeof item.label === "string" && typeof item.value === "string");
 }
 
+function mappingError(platform: Platform, field: UnifiedFilterField, label: string): Error {
+  // contracts/condition-snapshot.md 第 6 节要求「标明平台」，而这句话会原样显示给用户
+  // （useDiscoveryFlowCoordinator 把它写进对话框错误位）：平台走 discovery.ts 的显示名
+  // 投影，字段走本文件既有的人类标签，内部字段码与平台码都不吐给用户。
+  return new Error(`平台筛选条件已变化，请更新后重试（${platformLabel(platform)} ${UNIFIED_FIELD_LABELS[field]}：${label}）`);
+}
+
 function platformFieldValues(
   platform: Platform,
   field: UnifiedFilterField,
@@ -244,11 +254,11 @@ function platformFieldValues(
   for (const label of unified[field]) {
     if (label === "不限") return [];
     const mappedLabels = MAPPING[field][platform]?.[label];
-    if (!mappedLabels) throw new Error(`平台筛选条件已变化，请更新后重试（${field}: ${label}）`);
+    if (!mappedLabels) throw mappingError(platform, field, label);
     for (const mappedLabel of mappedLabels) {
       const value = byLabel.get(mappedLabel);
       if (value === undefined) {
-        throw new Error(`平台筛选条件已变化，请更新后重试（${platform} ${field}: ${mappedLabel}）`);
+        throw mappingError(platform, field, mappedLabel);
       }
       selected.push(value);
     }

@@ -7408,6 +7408,75 @@ describe("DiscoveryView 03 页锁定轮次的条件汇总（046 D-07）", () => 
     wrapper.unmount();
     vi.unstubAllGlobals();
   });
+
+  // D-07 的另一半：文案写了「当前只读」，界面就必须真的锁住。锁定事实只有一份
+  // （useDiscoveryFlowCoordinator 的 roundConditionLocked），汇总、卡片与芯片都读它。
+  it("锁定轮：汇总说出该轮快照里的实际条件，芯片与卡片按同一份锁定事实置灰", async () => {
+    const lockedBothPlatforms = {
+      snapshotVersion: 2,
+      mappingVersion: "b096-v2-locked",
+      unifiedValues: { salary: ["10K-20K"] },
+      platformValues: { boss: { salary: ["406"] }, zhilian: { salary: ["406"] } },
+    };
+    const fetchMock = lockedFlowFetch({
+      id: "flow-locked-values",
+      profile_id: "profile-locked-values",
+      selection: "all",
+      status: "running",
+      tracks: [
+        { id: "t-b", flow_id: "flow-locked-values", platform: "boss", status: "running", stage: "ai", confirmed_filters_snapshot: lockedBothPlatforms },
+        { id: "t-z", flow_id: "flow-locked-values", platform: "zhilian", status: "queued", stage: "scrape", confirmed_filters_snapshot: lockedBothPlatforms },
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-locked-values" } });
+    await flushPromises();
+
+    // 汇总报的是这一轮冻结的条件本身，不是「有快照」这件事。
+    const summary = wrapper.get('[data-testid="screen-summary-locked"]');
+    expect(summary.text()).toContain("已按本轮确认条件锁定");
+    expect(summary.text()).toContain("薪资范围");
+    expect(summary.text()).toContain("10-20K");
+
+    // 同一份锁定事实：03 卡自己标出锁定，芯片全部点不动。
+    const card = wrapper.get('[data-testid="screen-condition-card"]');
+    expect(card.attributes("data-locked")).toBe("true");
+    const chips = wrapper.findAll(".choice-chip");
+    expect(chips.length).toBeGreaterThan(0);
+    expect(chips.every((chip) => chip.attributes("disabled") !== undefined)).toBe(true);
+
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("没有锁定事实时，芯片照常可点，锁定标记不外溢", async () => {
+    const fetchMock = lockedFlowFetch(null);
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-unlocked-chips" } });
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="screen-condition-card"]').attributes("data-locked")).toBeUndefined();
+    const chips = wrapper.findAll(".choice-chip");
+    expect(chips.length).toBeGreaterThan(0);
+    expect(chips.every((chip) => chip.attributes("disabled") === undefined)).toBe(true);
+
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  // 锁定事实只许有一份：卡片汇总、芯片置灰与锁定标记都读同一个 computed。
+  it("锁定判定与汇总同出一份事实，界面不再各自拼一套", () => {
+    const view = readFileSync(path.join(__dirname, "../../views/DiscoveryView.vue"), "utf8");
+    const coordinator = readFileSync(
+      path.join(__dirname, "../../composables/useDiscoveryFlowCoordinator.ts"), "utf8",
+    );
+    expect(coordinator).toMatch(/const roundConditionLocked = computed/);
+    // 汇总自己不再判一遍：它读的是同一份锁定事实。
+    expect(coordinator).toMatch(/if \(!roundConditionLocked\.value\) return ""/);
+    // 两组芯片（哨兵芯片 + 档位芯片）都按同一份锁定事实置灰，没有第三份判定。
+    expect((view.match(/:disabled="Boolean\([^"]*roundConditionLocked[^"]*"/g) ?? []).length).toBe(2);
+    expect((view.match(/roundConditionLocked/g) ?? []).length).toBeGreaterThanOrEqual(4);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -7517,5 +7586,49 @@ describe("DiscoveryView 04 页「本轮仍在进行」说明（046 D-08）", () 
     expect(wrapper.find('[data-testid="flow-round-progress-notice"]').exists()).toBe(false);
     wrapper.unmount();
     vi.unstubAllGlobals();
+  });
+
+  // D-08 的另一半：04 页的「本轮仍在进行」必须与「04 能不能进」读同一份事实。
+  // 一条线 AI 失败却已持久化部分岗位时，页面按分轨合流规则已经开放（contracts
+  // /flow-presentation.md 第 2、6 节），说明就必须跟着一起出现，否则用户把
+  // 「只有半条线的结果」读成「整轮筛完了」。
+  it("一条线失败带部分岗位、另一条仍在跑时，04 页同样说明本轮仍在进行", async () => {
+    const fetchMock = partialRoundFetch("running", [
+      {
+        id: "p-b3", platform: "boss", status: "failed", stage: "ai", result_run_id: null,
+        jobs: [{ job_id: "job-1", platform: "boss", title: "Python" }],
+        unfinished_ai_screening: true,
+      },
+      { id: "p-z3", platform: "zhilian", status: "running", stage: "scrape", result_run_id: null },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-failed-partial-round" } });
+    await flushPromises();
+    const resultsStep = wrapper.findAll(".step-nav button").find((button) => button.text().includes("查看结果"));
+    await resultsStep!.trigger("click");
+    await flushPromises();
+
+    const notice = wrapper.get('[data-testid="flow-round-progress-notice"]');
+    expect(notice.text()).toContain("本轮仍在进行");
+    expect(notice.text()).toContain("BOSS");
+    expect(notice.text()).toContain("智联");
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  // 同源门禁：04 的解锁判定与这句说明必须用同一个「这条线有没有结果」的谓词，
+  // 页面这一层不许再自己拼一份 result_run_id 判定。
+  it("04 解锁判定与本轮说明读同一份「这条线有没有结果」的谓词", () => {
+    const presentation = readFileSync(
+      path.join(__dirname, "../../composables/useDiscoveryFlowPresentation.ts"), "utf8",
+    );
+    const coordinator = readFileSync(
+      path.join(__dirname, "../../composables/useDiscoveryFlowCoordinator.ts"), "utf8",
+    );
+    expect(presentation).toMatch(/const hadResult = tracks\.value\.some\(\(track\) => trackHasDeliveredResult\(track\)\)/);
+    // 说明读的是呈现层同一份轨道投影，且不再自己判 result_run_id。
+    expect(coordinator).toMatch(/flowPresentation\.flowTracks\.value/);
+    expect(coordinator).toMatch(/trackHasDeliveredResult/);
+    expect(coordinator).not.toMatch(/filter\(\(track\) => String\(track\.result_run_id/);
   });
 });

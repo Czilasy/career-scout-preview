@@ -423,7 +423,7 @@ const {
   parallelStartBlockedNotice,
   oneClickStartDisabled,
   skipAvailabilityPrecheckForPackageRestore,
-  roundConditionLockSummary,
+  roundConditionLockSummary, roundConditionLocked,
   selectParallelMode,
   openOneClickWithParallel,
   handleUnifiedFilterChange,
@@ -906,7 +906,7 @@ watch(restoredTaskHint, (value) => {
         </div>
       </section>
       <section v-show="activeStep === 'screen'" class="workflow-stack">
-        <CollapsibleCard title="确认筛选条件" v-model="screenPanelOpen" :scene-identity="sceneIdentity" scene-card-key="screen">
+        <CollapsibleCard title="确认筛选条件" v-model="screenPanelOpen" :scene-identity="sceneIdentity" scene-card-key="screen" data-testid="screen-condition-card" :data-locked="roundConditionLocked ? 'true' : undefined">
           <template #prefix>
             <Filter :size="17" aria-hidden="true" />
           </template>
@@ -940,7 +940,7 @@ watch(restoredTaskHint, (value) => {
               />
             </div>
           </template>
-          <div class="filter-groups">
+          <div class="filter-groups"><!-- 046 D-07：本轮锁定（roundConditionLocked）时芯片一律点不动；锁定事实与上面的汇总同源，只有这一份。 -->
             <fieldset v-for="group in filterGroups" :key="group.key" class="filter-group">
               <legend>{{ group.label }}</legend>
               <div class="chip-grid compact">
@@ -949,7 +949,7 @@ watch(restoredTaskHint, (value) => {
                   class="choice-chip"
                    :class="{ selected: !(filterValues[draftPlatform][group.key] || []).length }"
                    type="button"
-                  :disabled="Boolean(screenBusy || screenTaskId || pausedRunId || interruptedRunId || finishedPartial)"
+                  :disabled="Boolean(roundConditionLocked || screenBusy || screenTaskId || pausedRunId || interruptedRunId || finishedPartial)"
                   :aria-pressed="!(filterValues[draftPlatform][group.key] || []).length"
                   @click="filterValues[draftPlatform][group.key] = []"
                 >{{ group.sentinel.label }}</button>
@@ -959,7 +959,7 @@ watch(restoredTaskHint, (value) => {
                   class="choice-chip"
                    :class="{ selected: (filterValues[draftPlatform][group.key] || []).includes(code) }"
                    type="button"
-                  :disabled="Boolean(screenBusy || screenTaskId || pausedRunId || interruptedRunId || finishedPartial)"
+                  :disabled="Boolean(roundConditionLocked || screenBusy || screenTaskId || pausedRunId || interruptedRunId || finishedPartial)"
                   :aria-pressed="(filterValues[draftPlatform][group.key] || []).includes(code)"
                   @click="toggleFilter(group.key, code)"
                 >{{ label }}</button>

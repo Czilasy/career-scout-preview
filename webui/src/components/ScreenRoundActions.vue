@@ -82,6 +82,10 @@ function anyActionBusy(): boolean {
   return Boolean(props.busy || props.finishBusy || props.cancelBusy);
 }
 
+// 046 D-03 / FR-015：`disabled` 说的是「这一片现场的主动作此刻不可操作」（本轮已锁定、
+// 流程状态读不到…），只作用于主操作。「结束并保存结果」与「放弃本轮」是用户在这条线上
+// 唯一的收口出路，没有任何条文授权把它们一起锁掉——锁掉之后这一轮只能靠刷新页面离开。
+// 这两条因此只看忙态：真的有请求在飞时照旧锁住，不在飞时必须点得动。
 function cancelDisabled(): boolean {
   // 暂停等待期间（暂停按钮已变灰、任务仍在收尾）必须保留「放弃本轮/终止」
   // 这条出路，否则任务长时间不收尾时整个操作区被锁死、用户只能刷新页面。
@@ -89,12 +93,6 @@ function cancelDisabled(): boolean {
     return Boolean(props.cancelBusy || props.finishBusy);
   }
   return anyActionBusy();
-}
-
-// disabled 说的是「这一整片现场此刻不可操作」（例如流程状态读不到、只能看），
-// 因此三个按钮一起锁；只锁主动作会让收尾与终止在不可确认的状态下仍然可点。
-function sharedDisabled(): boolean {
-  return anyActionBusy() || Boolean(props.disabled);
 }
 </script>
 
@@ -121,7 +119,7 @@ function sharedDisabled(): boolean {
       class="button danger"
       type="button"
       :data-testid="finishTestId()"
-      :disabled="sharedDisabled()"
+      :disabled="anyActionBusy()"
       @click="emit('finish-save')"
     >
       <LoaderCircle
@@ -137,7 +135,7 @@ function sharedDisabled(): boolean {
       class="button danger"
       type="button"
       :data-testid="cancelTestId()"
-      :disabled="cancelDisabled() || Boolean(disabled)"
+      :disabled="cancelDisabled()"
       @click="emit('cancel')"
     >
       <LoaderCircle

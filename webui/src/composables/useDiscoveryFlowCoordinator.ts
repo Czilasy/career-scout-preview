@@ -1,7 +1,9 @@
 import { computed, onBeforeUnmount, ref, watch, type Ref } from "vue";
 import type { ConditionSnapshotV2, Notice, Platform, TaskSnapshot as ApiTaskSnapshot } from "../types";
 import { errorMessage, userFacingMessage } from "../api";
-import { platformLabel, ACTIVE_TRACK_STATUSES } from "../discovery";
+import { platformLabel, ACTIVE_TRACK_STATUSES, TRACK_PROBLEM_STATUSES } from "../discovery";
+import { projectConditionChips } from "./useDiscoveryState";
+import { trackHasDeliveredResult, type FlowPresentationTrack } from "./useDiscoveryFlowPresentation";
 import { hasUnfinishedRound } from "./useDiscoveryState";
 import type { DiscoveryState, StepId } from "./useDiscoveryState";
 import { setThemePlatform } from "./useTheme";
@@ -230,7 +232,7 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
       flow_tracks?: Array<Record<string, unknown>>;
     }) | null)?.flow_tracks || [];
     return tracks
-      .filter((track) => ["failed", "unavailable", "interrupted"].includes(String(track.status || ""))
+      .filter((track) => TRACK_PROBLEM_STATUSES.includes(String(track.status || ""))
         || track.unfinished_ai_screening === true)
       .map((track) => `${platformLabel(String(track.platform || ""))}：${String(track.message || track.reason || track.error || "AI 筛选未完成")}`)
       .join("；");
@@ -408,20 +410,44 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
   });
 
   // ---------------------------------------------------------------------------
-  // SPEC 046 D-07：本轮范围锁定时，03 页卡片汇总必须说本轮冻结的那一份事实。
-  // 条件草稿按平台分槽，「全部」轮锁定后草稿槽与用户看到的芯片不再是同一件事
-  // （芯片按空草稿把「不限 / 全部」点亮，汇总却写「未设置筛选条件」）。本轮条件的
-  // 唯一事实源是轨道的 confirmed_filters_snapshot：这里只如实报"已锁定、只读"，
-  // 不重算条件、不抄原始 JSON，也不去改芯片的渲染口径掩盖矛盾。
+  // SPEC 046 D-07：本轮范围锁定时，03 页不能只把话说成「只读」——界面也得真的锁住。
+  // 锁定事实只有这一份：本轮（「全部」轮且按状态词表的唯一谓词判为未结束）已把条件
+  // 交给轨道，条件草稿槽与用户看到的芯片就不再是同一件事（芯片按空草稿把「不限 /
+  // 全部」点亮，汇总却写「未设置筛选条件」）。汇总读本轮冻结快照投影出的实际值，
+  // 卡片与芯片读同一个 computed，不再各判一遍。
   // ---------------------------------------------------------------------------
+  const roundConditionLocked = computed(() => parallelMode.value
+    && flow.flow.value?.selection === "all"
+    && flow.hasUnfinishedRound.value);
+
+  // 本轮条件的唯一事实源是轨道的 confirmed_filters_snapshot：这里只把它投影成人话，
+  // 不重算条件、不抄原始 JSON，也不去改芯片的渲染口径掩盖矛盾。
+  function frozenPlatformValues(track: ParallelTrackState | undefined): Record<string, string[]> {
+    const raw = track?.confirmed_filters_snapshot as Record<string, unknown> | undefined;
+    if (!raw || typeof raw !== "object") return {};
+    const platformValues = raw.platformValues as Record<string, Record<string, string[]>> | undefined;
+    if (raw.snapshotVersion === 2) {
+      return (platformValues && platformValues[state.draftPlatform.value]) || {};
+    }
+    // V1 的轨道快照就是纯字段对象（contracts/condition-snapshot.md 第 3 节）。
+    return raw as Record<string, string[]>;
+  }
+
   const roundConditionLockSummary = computed(() => {
+    if (!roundConditionLocked.value) return "";
     const current = flow.flow.value;
-    if (!parallelMode.value || current?.selection !== "all" || !flow.hasUnfinishedRound.value) return "";
-    const frozen = current.tracks.some((track) => {
+    const frozenTracks = (current?.tracks || []).filter((track) => {
       const snapshot = track.confirmed_filters_snapshot;
       return Boolean(snapshot && typeof snapshot === "object" && Object.keys(snapshot).length);
     });
-    return frozen ? "已按本轮确认条件锁定，当前只读" : "";
+    if (!frozenTracks.length) return "";
+    const frozenTrack = frozenTracks.find((track) => track.platform === state.draftPlatform.value)
+      || frozenTracks[0];
+    const chips = projectConditionChips(state.filterGroups.value, frozenPlatformValues(frozenTrack));
+    const detail = chips.map((chip) => `${chip.label}：${chip.value}`).join("、");
+    return detail
+      ? `已按本轮确认条件锁定，当前只读——${detail}`
+      : "已按本轮确认条件锁定，当前只读（本轮未设置筛选条件）";
   });
 
   // ---------------------------------------------------------------------------
@@ -435,9 +461,12 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
     const current = flow.flow.value;
     if (!parallelMode.value || current?.selection !== "all" || !flow.hasUnfinishedRound.value) return "";
     if (state.historyMode.value) return "";
-    const trackName = (track: ParallelTrackState) => platformLabel(track.platform);
-    const delivered = current.tracks.filter((track) => String(track.result_run_id || "").trim());
-    const catchingUp = current.tracks.filter((track) => !String(track.result_run_id || "").trim()
+    const trackName = (track: FlowPresentationTrack) => platformLabel(String(track.platform || ""));
+    // 「有没有结果」「还在不在跑」都读呈现层那一份轨道投影（与 04 的解锁判定同源），
+    // 页面层不再自己数 result_run_id：失败但已持久化部分岗位的那条线同样算已有结果。
+    const tracks = flowPresentation.flowTracks.value;
+    const delivered = tracks.filter((track) => trackHasDeliveredResult(track));
+    const catchingUp = tracks.filter((track) => !trackHasDeliveredResult(track)
       && ACTIVE_TRACK_STATUSES.includes(String(track.status || "")));
     if (!delivered.length || !catchingUp.length) return "";
     const arrived = delivered.map(trackName).filter(Boolean).join("、");
@@ -716,6 +745,7 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
     parallelStartBlockedNotice,
     oneClickStartDisabled,
     skipAvailabilityPrecheckForPackageRestore,
+    roundConditionLocked,
     roundConditionLockSummary,
     flowRoundPartialNotice,
     selectParallelMode,

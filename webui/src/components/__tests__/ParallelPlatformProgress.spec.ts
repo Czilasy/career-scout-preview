@@ -28,9 +28,7 @@ function item(overrides: Record<string, unknown> = {}) {
     stage: kind,
     status,
     snapshot: snapshotFor(status, { overall_percent: 42, current: 3, total: 7 }),
-    statusLabel: "运行中",
     enteredAt: 0,
-    carriesLineState: true,
     ...bar,
     finishRunId: runId,
     finishTestId: `parallel-track-${platform}-finish-save`,
@@ -54,7 +52,6 @@ describe("ParallelPlatformProgress", () => {
             kind: "screen",
             stage: "screen",
             status: "paused",
-            statusLabel: "已暂停",
             snapshot: snapshotFor("paused"),
           }),
         ],
@@ -78,7 +75,7 @@ describe("ParallelPlatformProgress", () => {
       props: {
         items: [
           item({ platform: "boss" }),
-          item({ platform: "zhilian", kind: "screen", stage: "screen", statusLabel: "已暂停" }),
+          item({ platform: "zhilian", kind: "screen", stage: "screen" }),
         ],
       },
     });
@@ -112,7 +109,7 @@ describe("ParallelPlatformProgress", () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {
         items: [
-          item({ platform: "boss", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") }),
+          item({ platform: "boss", status: "paused", snapshot: snapshotFor("paused") }),
           item({ platform: "zhilian", status: "running", snapshot: snapshotFor("running") }),
         ],
       },
@@ -136,7 +133,7 @@ describe("ParallelPlatformProgress", () => {
       props: {
         items: [
           item({ platform: "boss", status: "running" }),
-          item({ platform: "zhilian", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") }),
+          item({ platform: "zhilian", status: "paused", snapshot: snapshotFor("paused") }),
         ],
       },
     });
@@ -169,8 +166,8 @@ describe("ParallelPlatformProgress", () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {
         items: [
-          item({ platform: "boss", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") }),
-          item({ platform: "zhilian", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") }),
+          item({ platform: "boss", status: "paused", snapshot: snapshotFor("paused") }),
+          item({ platform: "zhilian", status: "paused", snapshot: snapshotFor("paused") }),
         ],
       },
     });
@@ -189,7 +186,6 @@ describe("ParallelPlatformProgress", () => {
         items: [item({
           platform: "boss",
           status: "interrupted",
-          statusLabel: "已中断",
           snapshot: snapshotFor("interrupted"),
         })],
       },
@@ -207,7 +203,7 @@ describe("ParallelPlatformProgress", () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {
         items: [item({
-          platform: "boss", status: "stopped", statusLabel: "已停止", snapshot: snapshotFor("stopped"),
+          platform: "boss", status: "stopped", snapshot: snapshotFor("stopped"),
         })],
       },
     });
@@ -221,8 +217,8 @@ describe("ParallelPlatformProgress", () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {
         items: [
-          item({ platform: "boss", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") }),
-          item({ platform: "zhilian", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") }),
+          item({ platform: "boss", status: "paused", snapshot: snapshotFor("paused") }),
+          item({ platform: "zhilian", status: "paused", snapshot: snapshotFor("paused") }),
         ],
         busyPlatform: "boss",
       },
@@ -233,19 +229,44 @@ describe("ParallelPlatformProgress", () => {
     wrapper.unmount();
   });
 
-  // 流程状态读不到（stale）时整条动作条不可操作：三个按钮一起锁，
-  // 但按钮仍在原位，用户看得到这一条线，只是点不动。
-  it("disables every Track action while Flow state is stale", () => {
+  // 046 D-03 / FR-015：现场只读（流程状态读不到、本轮已锁定）锁的是这条线的主动作，
+  // 不是用户唯一的收口出路。「结束并保存结果」与「终止本轨」在没有请求在飞时必须仍可点，
+  // 否则这一轮就只能靠刷新页面离开这里。按钮位置不变，仍在这条线的卡里。
+  it("keeps the two close-out exits clickable while only the primary action is read-only", async () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {
         stale: true,
-        items: [item({ platform: "boss", status: "paused", statusLabel: "已暂停", snapshot: snapshotFor("paused") })],
+        items: [item({ platform: "boss", status: "paused", snapshot: snapshotFor("paused") })],
       },
     });
 
     const buttons = row(wrapper, "boss").findAll("button");
     expect(buttons.length).toBeGreaterThan(0);
-    expect(buttons.every((button) => button.attributes("disabled") !== undefined)).toBe(true);
+    expect(row(wrapper, "boss").get('[data-testid="continue-scrape"]').attributes("disabled")).toBeDefined();
+
+    const finish = row(wrapper, "boss").get('[data-testid="parallel-track-boss-finish-save"]');
+    const cancel = row(wrapper, "boss").get('[data-testid="parallel-track-boss-cancel"]');
+    expect(finish.attributes("disabled")).toBeUndefined();
+    expect(cancel.attributes("disabled")).toBeUndefined();
+
+    await finish.trigger("click");
+    await cancel.trigger("click");
+    expect(wrapper.emitted("finish")).toEqual([["run-boss"]] as never);
+    expect(wrapper.emitted("action")).toEqual([["boss", "cancel"]] as never);
+    wrapper.unmount();
+  });
+
+  // 反向配对：真的有请求在飞时，收尾两条按忙态锁住（不许把这条当成只读锁来删）。
+  it("still locks both close-out exits while one of them is in flight", () => {
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: {
+        items: [item({ platform: "boss", status: "paused", snapshot: snapshotFor("paused") })],
+        finishBusy: true,
+      },
+    });
+
+    expect(row(wrapper, "boss").get('[data-testid="parallel-track-boss-finish-save"]').attributes("disabled")).toBeDefined();
+    expect(row(wrapper, "boss").get('[data-testid="parallel-track-boss-cancel"]').attributes("disabled")).toBeDefined();
     wrapper.unmount();
   });
 
@@ -253,7 +274,7 @@ describe("ParallelPlatformProgress", () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {
         items: [item({
-          platform: "boss", status: "interrupted", statusLabel: "已中断", snapshot: snapshotFor("interrupted"),
+          platform: "boss", status: "interrupted", snapshot: snapshotFor("interrupted"),
         })],
       },
     });
@@ -273,7 +294,6 @@ describe("ParallelPlatformProgress", () => {
       props: {
         items: [{
           ...item({ platform: "zhilian", status: "paused", runId: "run-scrape-done" }),
-          statusLabel: "已完成",
           snapshot: { ...snapshotFor("succeeded"), progress: { overall_percent: 100, current: 7, total: 7 } },
         }],
       },
@@ -290,7 +310,7 @@ describe("ParallelPlatformProgress", () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {
         items: [{
-          ...item({ platform: "zhilian", status: "failed", statusLabel: "执行失败" }),
+          ...item({ platform: "zhilian", status: "failed" }),
           snapshot: { status: "failed", progress: {}, logs: [], error: "AI unavailable" },
         }],
       },
@@ -302,7 +322,7 @@ describe("ParallelPlatformProgress", () => {
 
   it("renders each item with the original TaskProgress and real snapshot data", () => {
     const wrapper = mount(ParallelPlatformProgress, {
-      props: { items: [item({ platform: "boss" }), item({ platform: "zhilian", kind: "screen", stage: "screen", statusLabel: "已暂停" })] },
+      props: { items: [item({ platform: "boss" }), item({ platform: "zhilian", kind: "screen", stage: "screen" })] },
     });
     expect(wrapper.findAllComponents({ name: "TaskProgress" })).toHaveLength(2);
     expect(wrapper.find(".parallel-platform-bar").exists()).toBe(false);
@@ -332,13 +352,12 @@ describe("ParallelPlatformProgress", () => {
     wrapper.unmount();
   });
 
-  // 白箱结论与状态别名同出一处（呈现层算好的 statusLabel），头部与卡体不许两句结论。
+  // 白箱结论与状态别名同出一处：口径由卡自己按唯一词表算，头部与卡体不许两句结论。
   it("says one single conclusion on a card whose whitebox verdict is unverifiable", () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {
         items: [{
           ...item({ platform: "boss", kind: "screen", stage: "screen", status: "completed_with_pending" }),
-          statusLabel: "无法确认是否完成",
           snapshot: {
             status: "completed_with_pending", progress: { overall_percent: 100 }, logs: [],
             integrity: { conclusion: "unverifiable", label: "无法确认", primary_reason: "证据不足" },
@@ -419,9 +438,11 @@ describe("ParallelPlatformProgress", () => {
     expect(component).not.toMatch(/STAGE_IN_FLIGHT_STATUSES|ACTIVE_TRACK_STATUSES/);
     expect(body).not.toMatch(/AI_FAILURE_STAGES|ownsTrackState|isAiCurrentStage/);
     expect((presentation.match(/const AI_FAILURE_STAGES\s*=/g) ?? []).length).toBe(1);
-    // 正向：状态词仍然只有 discovery.ts 一份，头部与卡体都从那里取。
+    // 正向：状态词仍然只有 discovery.ts 一份，由卡自己算（头部与卡体同出一处）。
     expect(trunk).toMatch(/export function stageStatusLabel/);
     expect(body).toMatch(/stageStatusLabel/);
-    expect(presentation).toMatch(/stageStatusLabel/);
+    // 呈现层只定稿「这一段说什么状态」，那句话的措辞不再在中间层抄第二份。
+    expect(presentation).not.toMatch(/stageStatusLabel\(/);
+    expect(presentation).not.toMatch(/const STAGE_STATUS_LABELS|const STATUS_LABELS/);
   });
 });

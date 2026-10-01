@@ -2,8 +2,9 @@ import { computed, reactive, ref, type Ref } from "vue";
 import {
   ACTIVE_TRACK_STATUSES,
   STAGE_IN_FLIGHT_STATUSES,
+  TRACK_PROBLEM_STATUSES,
+  TRACK_STOPPED_STATUSES,
   UNREADABLE_STAGE_STATUS,
-  stageStatusLabel,
 } from "../discovery";
 import { deriveTrackActionBar, type SharedPrimaryAction } from "../screenFlow";
 import type { Platform, TaskSnapshot as ApiTaskSnapshot } from "../types";
@@ -24,14 +25,6 @@ export interface FlowProgressItem {
    */
   snapshot: ApiTaskSnapshot;
   enteredAt: number;
-  /**
-   * 这张卡是否代表这条线当前所在的那一段（stage 与 durable run id 一起判）。
-   * 缺省视为「是」，保持旧调用方口径不变；为「否」时轨道状态不再往本段快照上压，
-   * 头部与卡体就都说本段那一句（拿不到证据时是兜底口径，见下方 stageStatus）。
-   */
-  carriesLineState: boolean;
-  /** 头部徽章与卡体共用的一句话状态词（唯一词表在 discovery.ts）。 */
-  statusLabel: string;
   /** 这一条线的动作事实：与单平台同一份派生，按轨道各算一份。 */
   action: SharedPrimaryAction;
   showFinishSave: boolean;
@@ -84,8 +77,10 @@ const SCRAPE_READY_STATUSES = new Set([
 ]);
 /** 线停在 AI 段（含收尾/完成）的阶段名。 */
 const AI_FAILURE_STAGES = new Set(["ai", "screen", "ai_screen", "complete"]);
-/** 轨道级问题态：整条线停了，停在哪个阶段由交接证据决定，不由状态决定。 */
-const TRACK_FAILURE_STATUSES = new Set(["failed", "paused", "interrupted", "unavailable"]);
+/**
+ * 轨道级问题态：整条线停了，停在哪个阶段由交接证据决定，不由状态决定。
+ * 清单（问题态 + 暂停）的唯一一份在 discovery.ts，这里只引用不重抄（状态所有权）。
+ */
 /**
  * 本段既不是当前段、又拿不到自己的证据时的中性口径（卡体显示「等待开始」）。
  * 只适用于从没拿到 run 身份的段；已经跑过却读不到状态的段走 UNREADABLE_STAGE_STATUS。
@@ -112,7 +107,7 @@ function ownsTrackState(kind: FlowProgressKind, track: FlowPresentationTrack): b
 }
 
 function isTrackFailure(status: string): boolean {
-  return TRACK_FAILURE_STATUSES.has(status);
+  return TRACK_STOPPED_STATUSES.includes(status);
 }
 
 /**
@@ -171,6 +166,16 @@ function fallbackSnapshot(track: FlowPresentationTrack): ApiTaskSnapshot {
 function hasVisibleJobs(track: FlowPresentationTrack): boolean {
   const jobs = (track as Record<string, unknown>).jobs;
   return Array.isArray(jobs) && jobs.length > 0;
+}
+
+/**
+ * 「这一条线到底有没有结果可看」的唯一判定（046 D-08）：04 页的解锁与「本轮仍在进行」
+ * 那句说明必须读同一份事实。只认 result_run_id 会把「AI 失败但已持久化部分岗位」那条线
+ * 说成还没有结果——页面按分轨合流规则已经开了（contracts/flow-presentation.md 第 2、6 节），
+ * 说明却没有，用户就把半条线的结果读成整轮筛完。
+ */
+export function trackHasDeliveredResult(track: FlowPresentationTrack): boolean {
+  return Boolean(String(track.result_run_id || "").trim()) || hasVisibleJobs(track);
 }
 
 export interface FlowPresentationOptions {
@@ -261,7 +266,7 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
       delete projectionFields.platform;
       delete projectionFields.status;
       delete projectionFields.stage;
-      if (["failed", "unavailable", "interrupted"].includes(String(resultTrack.status || ""))) {
+      if (TRACK_PROBLEM_STATUSES.includes(String(resultTrack.status || ""))) {
         projectionFields.status = resultTrack.status;
         if (resultTrack.stage !== undefined) projectionFields.stage = resultTrack.stage;
       }
@@ -440,8 +445,6 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
         status: trackStatus,
         runId: entry.runId,
         snapshot: displaySnapshot,
-        statusLabel: stageStatusLabel(stageStatus, displaySnapshot.integrity?.conclusion),
-        carriesLineState,
         action: actionBar.action,
         showFinishSave: actionBar.showFinishSave,
         showCancel: actionBar.showCancel,
@@ -566,7 +569,7 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
     const hadFailedAi = tracks.value.some((track) => (
       isTrackFailure(String(track.status || "")) && ownsTrackState("screen", track)
     ));
-    const hadResult = tracks.value.some((track) => track.result_run_id || hasVisibleJobs(track));
+    const hadResult = tracks.value.some((track) => trackHasDeliveredResult(track));
     const nextScrapeItems = await buildItems("scrape_run_id", "scrape", runtimeState, generation, id);
     if (!isCurrentRefresh(generation, id) || !nextScrapeItems) return;
     scrapeItems.value = nextScrapeItems;
@@ -637,6 +640,9 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
     manualHold,
     unlockedSteps: enabledSteps,
     highestUnlocked,
+    // 页面层要回答「这条线有没有结果、还有谁在跑」时读这一份投影——与上面的解锁判定
+    // 同一条 tracks 链（结果投影进来后会覆盖失败轨道的状态与岗位），不再各数一份 Flow。
+    flowTracks: tracks,
     scrapeItems,
     screenItems,
     setManualHold,

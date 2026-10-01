@@ -5,6 +5,13 @@ import { useDiscoveryFlowPresentation } from "../useDiscoveryFlowPresentation";
 import type { FlowPresentationDeps, FlowPresentationTrack } from "../useDiscoveryFlowPresentation";
 import type { TaskSnapshot as ApiTaskSnapshot } from "../../types";
 import { useDiscoveryState } from "../useDiscoveryState";
+import { stageStatusLabel } from "../../discovery";
+
+// 这一行对用户说的那一句话：头部徽章与卡体都由 TaskProgress 按唯一词表算这两参，
+// 呈现层负责的是把状态定稿进 snapshot——于是断言读的就是卡真正会说的那句。
+function theRowSays(item?: { snapshot: ApiTaskSnapshot } | null): string {
+  return stageStatusLabel(item?.snapshot.status, item?.snapshot.integrity?.conclusion);
+}
 
 function track(overrides: Record<string, unknown> = {}): FlowPresentationTrack {
   return {
@@ -625,8 +632,14 @@ it("hands the Track state to the AI stage once its run is bound even while the s
 
   await presentation.refresh();
 
-  expect(presentation.scrapeItems.value[0]).toMatchObject({ kind: "scrape", carriesLineState: false });
-  expect(presentation.screenItems.value[0]).toMatchObject({ kind: "screen", carriesLineState: true });
+  // 抓取段已经自己跑完：这张卡只说本段那一句「已完成」，不替整条线背「已中断」；
+  // 中断那句归真正停摆的 AI 段那张卡。判定看得见的位置就是两张卡各自定稿的快照。
+  expect(presentation.scrapeItems.value[0]).toMatchObject({ kind: "scrape" });
+  expect(presentation.scrapeItems.value[0]?.snapshot.status).toBe("succeeded");
+  expect(theRowSays(presentation.scrapeItems.value[0])).toBe("已完成");
+  expect(presentation.screenItems.value[0]).toMatchObject({ kind: "screen" });
+  expect(presentation.screenItems.value[0]?.snapshot.status).toBe("interrupted");
+  expect(theRowSays(presentation.screenItems.value[0])).toBe("已中断");
 });
 
 // 交接窗口的真实一态：webui/runners/pipeline_task.py 调 mark_scrape_complete 时不带
@@ -650,10 +663,12 @@ it("collects the current AI stage card during the hand-off window before its run
   // 本段就是当前段、整条线还在活动态 → 这张卡必须收进 03。
   expect(presentation.screenItems.value).toHaveLength(1);
   expect(presentation.screenItems.value[0]).toMatchObject({
-    kind: "screen", runId: "", status: "running", carriesLineState: true,
+    kind: "screen", runId: "", status: "running",
   });
+  // 这条线当前的段就是 AI 段：轨道状态落进这张卡自己定稿的快照。
+  expect(presentation.screenItems.value[0]?.snapshot.status).toBe("running");
   // 抓取段自己已经跑完，照旧只说自己那一句「已完成」，不替 AI 段背状态。
-  expect(presentation.scrapeItems.value[0]).toMatchObject({ kind: "scrape", carriesLineState: false });
+  expect(presentation.scrapeItems.value[0]).toMatchObject({ kind: "scrape" });
   expect(presentation.scrapeItems.value[0]?.snapshot.status).toBe("succeeded");
 });
 
@@ -679,14 +694,16 @@ it("keeps a handed-off stage card that already started but reads no state off th
   await presentation.refresh();
 
   const scrape = presentation.scrapeItems.value[0];
-  expect(scrape).toMatchObject({ kind: "scrape", carriesLineState: false, runId: "scrape-z" });
+  expect(scrape).toMatchObject({ kind: "scrape", runId: "scrape-z" });
   const blind = scrape?.snapshot as ApiTaskSnapshot & { reason?: string; error_code?: string } | undefined;
   expect(scrape?.snapshot.status).toBe("unknown");
   expect(blind?.reason).toBeUndefined();
   expect(blind?.error).toBeUndefined();
   expect(blind?.error_code).toBeUndefined();
   expect(scrape?.snapshot.progress).toEqual({});
-  expect(presentation.screenItems.value[0]).toMatchObject({ kind: "screen", carriesLineState: true });
+  expect(presentation.screenItems.value[0]).toMatchObject({ kind: "screen" });
+  // 这条线自己停在抓取段之后的 AI 段：卡说的是这条线那段真正说的话（用户取消＝已停止）。
+  expect(presentation.screenItems.value[0]?.snapshot.status).toBe("stopped");
 });
 
 // 另一种无证据：这一段连 run 身份都还没有（刚提交的一轮整条线在排队），
@@ -702,7 +719,7 @@ it("keeps a stage card that never got a run on the neutral queued wording", asyn
   await presentation.refresh();
 
   expect(presentation.screenItems.value[0]).toMatchObject({
-    kind: "screen", runId: "", carriesLineState: false,
+    kind: "screen", runId: "",
   });
   expect(presentation.screenItems.value[0]?.snapshot.status).toBe("queued");
 });
@@ -744,8 +761,8 @@ it("does not invent progress items for tracks that never entered the queue", asy
 });
 
 // 一张阶段卡的状态标签只说这一段的事：轨道级状态归「线当前所在的那一段」，
-// 已经自己跑完的段不再替整条线背「已中断」。carriesLineState 是呈现层做出的
-// 唯一判定，组件据此决定头部徽章走轨道状态还是阶段快照状态。
+// 已经自己跑完的段不再替整条线背「已中断」。这个判定看得见的位置就是两张卡
+// 各自定稿的快照——头部徽章与卡体都由 TaskProgress 按唯一词表念那一份。
 it("hands the Track state only to the card of the stage the Track is currently at", async () => {
   const { presentation } = setup([
     track({
@@ -760,8 +777,8 @@ it("hands the Track state only to the card of the stage the Track is currently a
 
   await presentation.refresh();
 
-  expect(presentation.scrapeItems.value[0]).toMatchObject({ kind: "scrape", carriesLineState: false });
-  expect(presentation.screenItems.value[0]).toMatchObject({ kind: "screen", carriesLineState: true });
+  expect(theRowSays(presentation.scrapeItems.value[0])).toBe("已完成");
+  expect(theRowSays(presentation.screenItems.value[0])).toBe("已中断");
 });
 
 it("keeps the in-flight stage card carrying the Track state", async () => {
@@ -773,7 +790,9 @@ it("keeps the in-flight stage card carrying the Track state", async () => {
 
   await presentation.refresh();
 
-  expect(presentation.scrapeItems.value[0]).toMatchObject({ kind: "scrape", status: "running", carriesLineState: true });
+  expect(presentation.scrapeItems.value[0]).toMatchObject({ kind: "scrape", status: "running" });
+  expect(presentation.scrapeItems.value[0]?.snapshot.status).toBe("running");
+  expect(theRowSays(presentation.scrapeItems.value[0])).toBe("运行中");
 });
 
 // 抓取段自己失败了、线已经停在抓取段：这一张卡既代表这一段也代表这条线，
@@ -786,7 +805,8 @@ it("keeps a failed scrape stage carrying the Track state and reassigns it after 
     }),
   ], { fetchTaskState: async () => ({ status: "failed", progress: {}, logs: [] }) });
   await stuck.presentation.refresh();
-  expect(stuck.presentation.scrapeItems.value[0]).toMatchObject({ kind: "scrape", carriesLineState: true });
+  expect(stuck.presentation.scrapeItems.value[0]?.snapshot.status).toBe("failed");
+  expect(theRowSays(stuck.presentation.scrapeItems.value[0])).toBe("执行失败");
 
   const handedOff = setup([
     track({
@@ -799,8 +819,8 @@ it("keeps a failed scrape stage carrying the Track state and reassigns it after 
       : { status: "paused", progress: {}, logs: [] }),
   });
   await handedOff.presentation.refresh();
-  expect(handedOff.presentation.scrapeItems.value[0]).toMatchObject({ kind: "scrape", carriesLineState: false });
-  expect(handedOff.presentation.screenItems.value[0]).toMatchObject({ kind: "screen", carriesLineState: true });
+  expect(theRowSays(handedOff.presentation.scrapeItems.value[0])).toBe("已完成");
+  expect(theRowSays(handedOff.presentation.screenItems.value[0])).toBe("已暂停");
 });
 
 // D-03 结构收敛：动作派生按轨道各算一份。一平台一行的动作、结束并保存与终止显隐
@@ -919,8 +939,8 @@ it.each([
   await presentation.refresh();
 
   const entry = presentation.scrapeItems.value[0];
-  expect(entry?.statusLabel).toBe(label);
   expect(entry?.snapshot.status).toBe(status);
+  expect(theRowSays(entry)).toBe(label);
 });
 
 // 轨道已经停止、本段快照还停在「正在暂停」：以线为准把状态压进这一段，
@@ -932,8 +952,8 @@ it("pushes a stopped Track down onto a stage still pausing", async () => {
 
   await presentation.refresh();
 
-  expect(presentation.scrapeItems.value[0]?.statusLabel).toBe("已停止");
   expect(presentation.scrapeItems.value[0]?.snapshot.status).toBe("stopped");
+  expect(theRowSays(presentation.scrapeItems.value[0])).toBe("已停止");
 });
 
 // 抓取段自己已完成、整条线还在跑：这张卡只说自己那一段（头部与卡体都是「已完成」），
@@ -952,8 +972,8 @@ it("freezes a finished scrape stage while its Track is still running", async () 
 
   await presentation.refresh();
 
-  expect(presentation.scrapeItems.value[0]?.statusLabel).toBe("已完成");
   expect(presentation.scrapeItems.value[0]?.snapshot.status).toBe("succeeded");
+  expect(theRowSays(presentation.scrapeItems.value[0])).toBe("已完成");
   expect(presentation.screenItems.value[0]?.action).toEqual({ kind: "pause", label: "暂停筛选" });
 });
 
@@ -976,8 +996,8 @@ it("routes the Track-level 已中断 badge to the stage the interruption actuall
 
   await presentation.refresh();
 
-  expect(presentation.scrapeItems.value[0]?.statusLabel).toBe("完整成功");
-  expect(presentation.screenItems.value[0]?.statusLabel).toBe("已中断");
+  expect(theRowSays(presentation.scrapeItems.value[0])).toBe("完整成功");
+  expect(theRowSays(presentation.screenItems.value[0])).toBe("已中断");
   // 中断不给继续：这一条线不再有注定 503 的继续，但保存与终止两条出口照旧留着。
   expect(presentation.screenItems.value[0]?.action).toEqual({ kind: "none" });
   expect(presentation.screenItems.value[0]?.showCancel).toBe(true);
@@ -996,8 +1016,8 @@ it("keeps a handed-off stage card that has a run but no readable state on the �
 
   await presentation.refresh();
 
-  expect(presentation.scrapeItems.value[0]?.statusLabel).toBe("状态更新中");
   expect(presentation.scrapeItems.value[0]?.snapshot.status).toBe("unknown");
+  expect(theRowSays(presentation.scrapeItems.value[0])).toBe("状态更新中");
 });
 
 // 白箱 unverifiable 被后端公开成 completed_with_pending：两处必须同一句，
@@ -1014,7 +1034,7 @@ it("says one single conclusion on a card whose whitebox verdict is unverifiable"
 
   await presentation.refresh();
 
-  expect(presentation.scrapeItems.value[0]?.statusLabel).toBe("无法确认是否完成");
+  expect(theRowSays(presentation.scrapeItems.value[0])).toBe("无法确认是否完成");
 });
 
 // SPEC 046 V2 FR-011 / contracts/flow-presentation.md 第 3 节第 1 条：
@@ -1054,4 +1074,55 @@ it("同一 Flow 重新水合与投影回退都不回退已解锁集合", async (
   // 换到另一条 Flow：上一轮的入口不带给这一轮。
   state.setFlowReachableSteps(new Set(["search"]), "flow-next-round");
   expect(state.enabledSteps.value).toEqual(["upload", "search"]);
+});
+
+// 项目规则：没有实际调用方就不写「预留」字段。轨道行项目上的 carriesLineState 与
+// statusLabel 从来没有产品消费方（头部徽章与卡体的那句话由 TaskProgress 自己按
+// 唯一词表算），只有测试夹具在喂值。删掉它们之后，判定仍然要从看得见的输出里验出来：
+// 「这张卡承不承担整条线的状态」体现在它定稿的 snapshot.status 上。
+it("publishes only the facts a Track row renders, without reserved fields", async () => {
+  const { presentation } = setup([
+    track({ id: "track-a", platform: "boss", status: "running", stage: "scrape" }),
+  ], {
+    fetchTaskState: async () => ({ status: "running", progress: { overall_percent: 30 }, logs: [] }),
+  });
+
+  await presentation.refresh();
+
+  const item = presentation.scrapeItems.value[0]!;
+  expect(Object.prototype.hasOwnProperty.call(item, "carriesLineState")).toBe(false);
+  expect(Object.prototype.hasOwnProperty.call(item, "statusLabel")).toBe(false);
+  // 正向：承载线状态的判定照旧落在卡自己那一份定稿快照上，TaskProgress 据此说「运行中」。
+  expect(item.snapshot.status).toBe("running");
+  expect(item.action.kind).toBe("pause-scrape");
+});
+
+// 046 D-08 的上半段：04 能不能进，与「这条线到底有没有结果」是同一份事实。
+// 失败但已持久化部分岗位的那条线算已经有结果可见（contracts/flow-presentation.md 第 6 节）。
+it("counts a failed Track's persisted jobs as a delivered result for the same predicate", async () => {
+  const { presentation } = setup([
+    track({
+      id: "track-a", platform: "boss", status: "failed", stage: "ai",
+      screen_run_id: "screen-a", result_run_id: null,
+    }),
+    track({
+      id: "track-b", platform: "zhilian", status: "running", stage: "scrape",
+      scrape_run_id: "scrape-b", screen_run_id: null, result_run_id: null,
+    }),
+  ], {
+    fetchTaskState: async () => null,
+    fetchFlowResults: async () => ({
+      tracks: [{
+        id: "track-a", platform: "boss", status: "failed", stage: "ai", result_run_id: null,
+        jobs: [{ job_id: "job-1" }],
+      }],
+    }),
+  });
+
+  await presentation.refresh();
+
+  expect(presentation.unlockedSteps.value.has("results")).toBe(true);
+  // 同一份投影外抛给页面层：说明文案读的就是这一份，不再自己数 result_run_id。
+  expect(presentation.flowTracks.value.some((entry) => entry.platform === "boss"
+    && Array.isArray((entry as Record<string, unknown>).jobs))).toBe(true);
 });
