@@ -1731,7 +1731,7 @@ class Slice12AiRoughCheckpointTests(unittest.TestCase):
                     "WHERE run_id = ? AND platform_job_id = ?",
                     (run_id, "job-1")).fetchone()
             self.assertIsNotNone(row, "verdict 必须写入 screening_results")
-            self.assertEqual(json.loads(row["verdict"])["verdict"], "match")
+            self.assertEqual(row["verdict"], "match")
             # checkpoint 推进
             self.assertEqual(store.load_checkpoint(run_id, "ai_rough"),
                              {"job-1"})
@@ -1785,11 +1785,139 @@ class Slice12AiRoughCheckpointTests(unittest.TestCase):
                     "WHERE run_id = ? AND platform_job_id = ?",
                     (run_id, "job-1")).fetchone()
             self.assertIsNotNone(row, "限流后第一批 verdict 不得丢失")
-            self.assertEqual(json.loads(row["verdict"])["verdict"], "match")
+            self.assertEqual(row["verdict"], "match")
             # checkpoint 仍含 job-1
             self.assertIn("job-1", store.load_checkpoint(run_id, "ai_rough"))
         finally:
             tmp.cleanup()
+
+    # ---- 046 V2 D-02：批次写入形状（判定事实落在 screening_results 既定列）----
+
+    def _temp_store(self, name):
+        """临时库起一个 store：批次写入形状用例共用，不碰任何真实状态文件。"""
+        from webui.app import create_app
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        app = create_app({
+            "TESTING": True, "START_TASKS": False,
+            "RESULT_DIR": str(pathlib.Path(tmp.name) / "results"),
+            "DB_PATH": str(pathlib.Path(tmp.name) / f"{name}.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        return app.config["TASK_STORE"]
+
+    def _verdict_columns(self, store, run_id, job_id):
+        """读回某岗位在 screening_results 上的五个判定列。"""
+        with store._connection() as conn:
+            row = conn.execute(
+                "SELECT verdict, verdict_reason, caveats_json, flags_json, is_dropped "
+                "FROM screening_results WHERE run_id = ? AND platform_job_id = ?",
+                (run_id, job_id),
+            ).fetchone()
+        self.assertIsNotNone(row, f"{job_id} 的判定必须落库")
+        return dict(row)
+
+    def test_ai_batch_verdict_shares_stage_end_columns(self):
+        """同一判定经批次写入与阶段末写入，落库列与取值必须完全一致。"""
+        from webui.store_runs import SCREENING_VERDICT_VALUES
+        verdict = {
+            "verdict": "not_match",
+            "reason": "城市不在意向范围",
+            "caveats": ["大小周"],
+            "flags": [{"level": "medium", "reason": "薪资偏低"}],
+        }
+        store = self._temp_store("ai-shape")
+        store.create_screening_run("batch-run", source_count=5)
+        store.create_screening_run("stage-run", source_count=5)
+        store.save_verdict_and_checkpoint_atomic(
+            "batch-run", "ai_fine", {"job-1": verdict}, ["job-1"])
+        store.save_screening_verdicts("stage-run", {"job-1": verdict})
+        batch = self._verdict_columns(store, "batch-run", "job-1")
+        stage = self._verdict_columns(store, "stage-run", "job-1")
+        self.assertEqual(batch, stage)
+        self.assertIn(batch["verdict"], SCREENING_VERDICT_VALUES)
+        self.assertEqual(batch["verdict"], "not_match")
+        self.assertTrue(batch["verdict_reason"], "理由必须进 verdict_reason 列")
+        self.assertEqual(json.loads(batch["caveats_json"]), ["大小周"])
+        self.assertEqual(
+            json.loads(batch["flags_json"]),
+            [{"level": "medium", "reason": "薪资偏低"}],
+        )
+
+    def test_ai_batch_never_persists_whole_json_verdict(self):
+        """整包 JSON 形态不得再出现在 screening_results 的任何单列里。"""
+        store = self._temp_store("ai-no-json")
+        store.create_screening_run("ai-json-run", source_count=5)
+        batches = (
+            ("ai_rough", {"job-1": {"verdict": "kept", "reason": ""}}),
+            ("ai_fine", {"job-2": {
+                "verdict": "match", "reason": "技能吻合",
+                "caveats": ["六天工作制"], "flags": [],
+            }}),
+        )
+        for stage, verdicts in batches:
+            store.save_verdict_and_checkpoint_atomic(
+                "ai-json-run", stage, verdicts, sorted(verdicts))
+        for job_id in ("job-1", "job-2"):
+            columns = self._verdict_columns(store, "ai-json-run", job_id)
+            for name in ("verdict", "verdict_reason"):
+                with self.subTest(job=job_id, column=name):
+                    raw = str(columns[name] or "")
+                    self.assertFalse(raw.startswith("{"), f"{name} 列被写进整包 JSON")
+                    try:
+                        parsed = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        parsed = None
+                    self.assertNotIsInstance(parsed, dict)
+            for name in ("caveats_json", "flags_json"):
+                with self.subTest(job=job_id, column=name):
+                    self.assertIsInstance(json.loads(columns[name] or "[]"), list)
+
+    def test_ai_batch_rejects_verdict_outside_whitelist(self):
+        """白名单外的判定值必须显式失败，不得静默落库污染事实源。"""
+        store = self._temp_store("ai-enum")
+        store.create_screening_run("enum-run", source_count=5)
+        with self.assertRaises(ValueError):
+            store.save_verdict_and_checkpoint_atomic(
+                "enum-run", "ai_fine",
+                {"job-x": {"verdict": "大概匹配", "reason": "脏值"}}, ["job-x"])
+        self.assertNotIn("job-x", store.load_screening_verdicts("enum-run"))
+        # checkpoint 与判定同事务：判定被拒时断点也不得前进
+        self.assertNotIn("job-x", store.load_checkpoint("enum-run", "ai_fine"))
+        with self.assertRaises(ValueError):
+            store.save_screening_verdicts(
+                "enum-run", {"job-y": {"verdict": "大概匹配"}})
+
+    def test_ai_batch_dropped_verdict_is_not_read_as_kept(self):
+        """批次中途停止：dropped 判定带 is_dropped=1，读方不得当保留岗。"""
+        store = self._temp_store("ai-dropped")
+        store.create_screening_run("drop-run", source_count=5)
+        store.save_verdict_and_checkpoint_atomic(
+            "drop-run", "ai_rough",
+            {"job-1": {"verdict": "dropped", "reason": "学历不符"},
+             "job-2": {"verdict": "kept", "reason": ""}},
+            ["job-1", "job-2"])
+        self.assertEqual(
+            self._verdict_columns(store, "drop-run", "job-1")["is_dropped"], 1)
+        self.assertEqual(
+            self._verdict_columns(store, "drop-run", "job-2")["is_dropped"], 0)
+        # 读方 1：断点续筛恢复出的判定形状不变
+        merged = store.load_screening_verdicts("drop-run")
+        self.assertEqual(merged["job-1"]["verdict"], "dropped")
+        self.assertEqual(merged["job-1"]["reason"], "学历不符")
+        self.assertEqual(merged["job-2"]["verdict"], "kept")
+        # 读方 2：「结束并保存」投影把 dropped 归进剔除侧，不进保留岗
+        from webui.task_continue_results import build_partial_pipeline_result
+        result = build_partial_pipeline_result(
+            [{"job_id": "job-1", "title": "后端"}, {"job_id": "job-2", "title": "前端"}],
+            merged, [], {}, "")
+        self.assertEqual([job["job_id"] for job in result["dropped"]], ["job-1"])
+        self.assertEqual([job["job_id"] for job in result["jobs"]], ["job-2"])
+        # 读方 3：done/partial 定级与 screened_count 都不认它是已筛保留岗
+        self.assertNotIn("job-1", {
+            str(job.get("job_id")) for job in result["jobs"]
+            if str(job.get("verdict") or "") in {"match", "not_match", "mismatch"}
+        })
 
     def test_ai_rough_resume_no_duplicate_calls(self):
         """resume 时已完成岗位不再进入 AI，只处理剩余岗位。"""

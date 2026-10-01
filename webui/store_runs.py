@@ -29,6 +29,53 @@ from webui.store_constants import (
     _UPDATED_AT_SET_CLAUSE,
 )
 
+# screening_results 判定列的唯一取值域（046 V2 D-02：判定事实只有一个形状）。
+# 粗筛产出 kept/dropped，精筛产出 match/not_match/uncertain，mismatch 是精筛
+# 历史值（精筛子集见 webui/task_runner_support._FINE_VERDICTS）。
+SCREENING_VERDICT_VALUES = frozenset({
+    "kept", "dropped", "match", "not_match", "mismatch", "uncertain",
+})
+
+_UPSERT_SCREENING_VERDICT_SQL = (
+    "INSERT INTO screening_results "
+    "(id, run_id, platform, platform_job_id, verdict, verdict_reason, "
+    " caveats_json, flags_json, is_dropped, created_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+    "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET "
+    " platform = excluded.platform, "
+    " verdict = excluded.verdict, "
+    " verdict_reason = excluded.verdict_reason, "
+    " caveats_json = excluded.caveats_json, "
+    " flags_json = excluded.flags_json, "
+    " is_dropped = excluded.is_dropped"
+)
+
+
+def _screening_verdict_columns(verdict: object) -> tuple[str, str, str, str, int]:
+    """把一条 AI 判定拆成 screening_results 的五个判定列。
+
+    整包 JSON 一律不得进任何单列：白名单外的判定值显式失败，由调用方的
+    事务回滚兜住，宁可停任务也不污染事实源。
+    """
+    if isinstance(verdict, dict):
+        value = str(verdict.get("verdict") or "")
+        reason = str(verdict.get("reason") or "")
+        caveats = verdict.get("caveats") if isinstance(verdict.get("caveats"), list) else []
+        flags = verdict.get("flags") if isinstance(verdict.get("flags"), list) else []
+    else:
+        value = str(verdict or "")
+        reason = ""
+        caveats = []
+        flags = []
+    if value not in SCREENING_VERDICT_VALUES:
+        raise ValueError(f"未知判定值不能写入 verdict 列: {value!r}")
+    return (
+        value, reason,
+        json.dumps(caveats, ensure_ascii=False),
+        json.dumps(flags, ensure_ascii=False),
+        1 if value == "dropped" else 0,
+    )
+
 
 class StoreRunsMixin:
     def create_search_run(self, profile_id, profile_snapshot, mode, total_detail_budget=MAX_DETAIL_BUDGET):
@@ -555,61 +602,39 @@ class StoreRunsMixin:
         ts = _now()
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
-            run_row = conn.execute(
-                "SELECT platform FROM screening_runs WHERE id = ?",
-                (str(run_id),),
-            ).fetchone()
-            platform = str(run_row["platform"] or "boss") if run_row is not None else "boss"
+            platform = self._screening_run_platform(conn, run_id)
             for job_id, verdict in verdicts.items():
-                if isinstance(verdict, dict):
-                    verdict_value = str(verdict.get("verdict") or "")
-                    reason = str(verdict.get("reason") or "")
-                    caveats = verdict.get("caveats") if isinstance(verdict.get("caveats"), list) else []
-                    flags = verdict.get("flags") if isinstance(verdict.get("flags"), list) else []
-                else:
-                    verdict_value = str(verdict or "")
-                    reason = ""
-                    caveats = []
-                    flags = []
                 conn.execute(
-                    "INSERT INTO screening_results "
-                    "(id, run_id, platform, platform_job_id, verdict, verdict_reason, caveats_json, flags_json, is_dropped, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET "
-                    " platform = excluded.platform, "
-                    " verdict = excluded.verdict, "
-                    " verdict_reason = excluded.verdict_reason, "
-                    " caveats_json = excluded.caveats_json, "
-                    " flags_json = excluded.flags_json, "
-                    " is_dropped = excluded.is_dropped",
-                    (
-                        _uuid(), str(run_id), platform, str(job_id), verdict_value, reason,
-                        json.dumps(caveats, ensure_ascii=False),
-                        json.dumps(flags, ensure_ascii=False),
-                        1 if verdict_value == "dropped" else 0, ts,
-                    ),
+                    _UPSERT_SCREENING_VERDICT_SQL,
+                    (_uuid(), str(run_id), platform, str(job_id),
+                     *_screening_verdict_columns(verdict), ts),
                 )
+
+    @staticmethod
+    def _screening_run_platform(conn, run_id):
+        """判定行的平台取自 run 本身（两条写入路径同一口径）。"""
+        run_row = conn.execute(
+            "SELECT platform FROM screening_runs WHERE id = ?",
+            (str(run_id),),
+        ).fetchone()
+        return str(run_row["platform"] or "boss") if run_row is not None else "boss"
 
     def save_verdict_and_checkpoint_atomic(
             self, run_id, stage, verdicts, completed_job_ids):
-        """Persist one AI batch and advance its checkpoint in one transaction."""
+        """Persist one AI batch and advance its checkpoint in one transaction.
+
+        批次判定与阶段末判定落同一套列（046 V2 D-02）：verdict 只放白名单
+        枚举值，理由进 verdict_reason，caveats/flags 分别进各自的 JSON 列。
+        """
         ts = _now()
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
-            run_row = conn.execute(
-                "SELECT platform FROM screening_runs WHERE id = ?",
-                (str(run_id),),
-            ).fetchone()
-            platform = str(run_row["platform"] or "boss") if run_row is not None else "boss"
+            platform = self._screening_run_platform(conn, run_id)
             for job_id, verdict in (verdicts or {}).items():
                 conn.execute(
-                    "INSERT INTO screening_results "
-                    "(id, run_id, platform, platform_job_id, verdict, created_at) VALUES (?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET platform = excluded.platform, verdict = excluded.verdict",
-                    (
-                        _uuid(), str(run_id), platform, str(job_id),
-                        json.dumps(verdict, ensure_ascii=False), ts,
-                    ),
+                    _UPSERT_SCREENING_VERDICT_SQL,
+                    (_uuid(), str(run_id), platform, str(job_id),
+                     *_screening_verdict_columns(verdict), ts),
                 )
             conn.execute(
                 "INSERT INTO pipeline_checkpoints "
