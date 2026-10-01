@@ -234,6 +234,9 @@ class B096V2StructuralGuardTests(unittest.TestCase):
     """T001: freeze V2 boundaries before implementation."""
 
     ROOT = pathlib.Path(__file__).resolve().parents[1]
+    #: SPEC 046 V2 之前那一个提交（`chore(release): bump version to 1.9.5`）：
+    #: 边界闸以此为基准核对「本链改过的全部文件」，而不只是未提交的那一层。
+    V2_CHAIN_BASE_COMMIT = "54164e6"
     BASELINE_PATH = (
         ROOT / "specs" / "046-parallel-platform-flow" / "v2"
         / "pre-v2-protected.sha256"
@@ -332,6 +335,84 @@ class B096V2StructuralGuardTests(unittest.TestCase):
         #   而非继续」（ai_screen_api.py:350-351 的分层覆写）。
         "webui/src/composables/useDiscoveryWorkflow.ts",
         "webui/src/composables/__tests__/useScreenRoundFlow.spec.ts",
+        # 边界闸改按「提交区间 54164e6..HEAD ∪ 工作树」核对后补登记的本链实际改动
+        # （T046：允许路径与冻结清单之外零新增差异）。逐条附规格依据，不改判定形式、
+        # 不整批放行；依据只取 v2/spec.md 的条文与本链 Known Defects 编号。
+        #
+        # 后端产品代码：
+        # - ai_platform_adapter.py：D-01「哨兵值与具体档互斥」——智联经验 `-1` 是岗位
+        #   属性档，不得当字段级不限制，否则冻结条件把岗位刷光。
+        "webui/ai_platform_adapter.py",
+        # - flow_task_coordinator.py：FR-015（一线动作不得改变另一线）与 `## 状态所有权`
+        #   （轨道状态归 flows/flow_tracks 一处）——任务动作与轨道事实必须同一处发布。
+        "webui/flow_task_coordinator.py",
+        # - platforms_boss.py：Edge Cases「任一平台被系统禁用新建任务时…指出不可用平台」
+        #   ——BOSS 侧被停用时要有可读原因，树干与前端显示名投影不动。
+        "webui/platforms_boss.py",
+        # - task_state_api.py / task_status.py：`## 状态词表`「活体任务」只算真有 worker
+        #   在跑——排队中与已中断/终态一律让时长定格，不再随轮询增长。
+        "webui/task_state_api.py",
+        "webui/task_status.py",
+        # - constants.py / core_api.py：`## 状态所有权`「平台名称、平台字段、平台特例只
+        #   允许出现在树枝」——环境检查不再由树干拼装 BOSS 登录项。
+        "webui/constants.py",
+        "webui/core_api.py",
+        #
+        # 树枝侧对上面这条树干改动的适配（树枝适配树干，不是树干迁就树枝）：
+        # - scripts/boss/constants.py / scripts/boss/smoke.py：BOSS 登录探测项退出共用
+        #   环境检查，`## 状态所有权` 平台名边界。
+        "scripts/boss/constants.py",
+        "scripts/boss/smoke.py",
+        #
+        # 后端验收用例：
+        # - tests/ai/test_ai_platform_filters.py：D-01 的字段级不限制码表与反向投影。
+        "tests/ai/test_ai_platform_filters.py",
+        # - tests/test_b096_flow_new_round_release.py：FR-015 与 `## 状态词表`——中断轮
+        #   没有活体 worker，外壳不得谎报「排队中」把「开始新一轮」永久锁死。
+        "tests/test_b096_flow_new_round_release.py",
+        # - tests/test_b096_round4_review.py：FR-009/FR-010 与 `## 状态所有权`——真实
+        #   双轨持久形状（一 Flow 两 Track、抓取后筛选）的读时派生回归。
+        "tests/test_b096_round4_review.py",
+        # - tests/test_env_check.py：`## 状态所有权` 平台名边界——环境检查项清单里不再
+        #   出现由树干点名的平台登录项。
+        "tests/test_env_check.py",
+        # - tests/test_resume_continue.py：FR-015 与 Edge Cases「…历史使用已冻结值，
+        #   不静默重算」——续跑沿用冻结的登录身份，一条线的恢复不得改写另一条线。
+        "tests/test_resume_continue.py",
+        # - tests/test_task_state_elapsed_freeze.py：`## 状态词表`——非在跑状态时长定格。
+        "tests/test_task_state_elapsed_freeze.py",
+        #
+        # 前端产品代码（`## 状态所有权`：状态文案与显示名唯一来源是 discovery.ts，
+        # 任何组件不得自带一套判定；Edge Cases 的点名也只在这一份权威上生效）：
+        "webui/src/components/AccountPoolSheet.vue",
+        "webui/src/components/BrowserAccountsDialog.vue",
+        # - DynamicIsland.vue：灵动岛不再用三元式猜平台名，未登记身份给中性中文。
+        "webui/src/components/DynamicIsland.vue",
+        # - EnvCheckDialog.vue：环境检查项只渲染树干那一份清单（同上平台名边界）。
+        "webui/src/components/EnvCheckDialog.vue",
+        "webui/src/components/JobWorkspace.vue",
+        "webui/src/components/ReminderDrawer.vue",
+        # - useDiscoverySearch.ts：`## 状态词表` 两个谓词分派（判活 ≠ 本轮未结束）＋
+        #   FR-012（人工停留与历史轮不回锁，提示必须跟真实落点）。
+        "webui/src/composables/useDiscoverySearch.ts",
+        # - useResumeAnalysisFlow.ts：FR-011/FR-012——页面可达性只由一处投影决定，
+        #   组件不再直接写步骤状态。
+        "webui/src/composables/useResumeAnalysisFlow.ts",
+        #
+        # 前端验收用例：
+        # - discovery.spec.ts：`## 状态词表`/`## 状态所有权` 与 Edge Cases 点名的唯一
+        #   权威落点（外壳状态中文口径、平台显示名不默认成任一平台）。
+        "webui/src/__tests__/discovery.spec.ts",
+        "webui/src/components/__tests__/BrowserAccountsDialog.spec.ts",
+        "webui/src/components/__tests__/EnvCheckDialog.spec.ts",
+        # - ScreenRoundActions.spec.ts：D-03——并行轨道复用既有动作条，禁用不得扩散到
+        #   「结束并保存 / 放弃本轮」。
+        "webui/src/components/__tests__/ScreenRoundActions.spec.ts",
+        # - TaskProgress.spec.ts：FR-009（复用原有单平台进度、不给百分比）与
+        #   `## 状态词表`（终态与中断定格、真在跑才继续走表）。
+        "webui/src/components/__tests__/TaskProgress.spec.ts",
+        "webui/src/composables/__tests__/useDiscoveryWorkflow.spec.ts",
+        "webui/src/composables/__tests__/useResumeAnalysisFlow.spec.ts",
     }
 
     E2E_FOLLOWUP_ALLOWED_PATHS = frozenset({
@@ -367,29 +448,60 @@ class B096V2StructuralGuardTests(unittest.TestCase):
         self.assertEqual(missing, [])
         self.assertEqual(changed, [])
 
-    def test_no_new_working_tree_changes_outside_v2_boundary(self):
+    def _committed_chain_changes(self) -> set[str]:
+        """本链已提交的变更文件（`54164e6..HEAD`）。
+
+        只看工作树的那一版查不出已经进过仓库的越界改动：返修批次一路提交上去，
+        边界闸到收口时永远「干净」。T046 要的是允许路径与冻结清单之外零新增差异，
+        所以基准必须包含提交区间。
+        """
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"{self.V2_CHAIN_BASE_COMMIT}..HEAD"],
+            cwd=self.ROOT, check=True, capture_output=True, text=True,
+            encoding="utf-8",
+        )
+        return {
+            line.strip().replace("\\", "/")
+            for line in result.stdout.splitlines()
+            if line.strip()
+        }
+
+    def _working_tree_changes(self) -> set[str]:
+        """工作树里尚未提交的变更与未跟踪文件。"""
         result = subprocess.run(
             ["git", "status", "--porcelain=v1", "--untracked-files=all"],
             cwd=self.ROOT, check=True, capture_output=True, text=True,
             encoding="utf-8",
         )
+        paths = set()
+        for raw in result.stdout.splitlines():
+            path = raw[3:].strip().strip('"').replace("\\", "/")
+            if "->" in path:  # 重命名条目取新路径
+                path = path.split("->")[-1].strip().strip('"')
+            if path.endswith("/"):
+                continue
+            paths.add(path)
+        return paths
+
+    def test_no_chain_or_working_tree_changes_outside_v2_boundary(self):
+        """T046「允许路径和冻结清单之外零新增差异」（原 `test_no_new_working_tree_changes_outside_v2_boundary`）。
+
+        基准从「只看工作树」改成「提交区间 `54164e6..HEAD` 的变更文件 ∪ 工作树未提交变更」：
+        本链的越界改动大多已经提交，旧写法在收口时看不见它们。断言形式不放宽——
+        清单里只要有一条文件既不在冻结基线、也不在逐条登记过的允许路径里，就失败。
+        """
+        changed = self._committed_chain_changes() | self._working_tree_changes()
         protected = {
             raw.split("  ", 1)[1].strip().replace("\\", "/")
             for raw in self.BASELINE_PATH.read_text(encoding="utf-8").splitlines()
             if raw.strip() and not raw.strip().startswith("#")
         }
-        unexpected = []
-        for raw in result.stdout.splitlines():
-            path = raw[3:].strip().strip('"').replace("\\", "/")
-            if path.endswith("/"):
-                continue
-            if (
-                path in protected
-                or path in self.V2_ALLOWED_PATHS
-                or path in self.E2E_FOLLOWUP_ALLOWED_PATHS
-            ):
-                continue
-            unexpected.append(path)
+        unexpected = sorted(
+            path for path in changed
+            if path not in protected
+            and path not in self.V2_ALLOWED_PATHS
+            and path not in self.E2E_FOLLOWUP_ALLOWED_PATHS
+        )
         self.assertEqual(unexpected, [])
 
     def test_e2e_followup_allowlist_is_exact(self):

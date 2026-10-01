@@ -120,6 +120,36 @@ class B096FlowApiTests(unittest.TestCase):
         self.assertNotIn("boss", payload["message"])
         self.assertTrue(payload["message"])
 
+    def test_disabled_boss_message_names_the_platform_and_gives_a_reason(self):
+        """SPEC 046 Edge Cases「指出不可用平台」在 BOSS 侧同样要落得下来。
+
+        树枝（webui/platforms_boss）在注册数据缺项时把 BOSS 标为不可用并带上可读
+        原因；树干只转述注册表那一份原因，显示名投影仍归前端，不在此硬编码平台名。
+        """
+        from webui.platforms import get_platform, register_platform
+        from webui.platforms_boss import BOSS_AVAILABILITY_REASON, register_boss_from_maps
+
+        original = get_platform("boss")
+        self.enabled["boss"] = False
+        register_boss_from_maps({}, {})
+        try:
+            response = self.client.post(
+                "/api/flows",
+                json=self._payload(start_key="api-disabled-boss-message"),
+            )
+        finally:
+            register_platform(original)
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.get_json()
+        self.assertEqual(payload["error_code"], "platform_disabled")
+        self.assertEqual(payload["platform"], "boss")
+        # 原因非空，且不落在「该平台暂不可用」这类不点名的兜底文案上。
+        self.assertTrue(payload["message"].strip())
+        self.assertNotIn("暂不可用，请改用可用平台", payload["message"])
+        self.assertIn("BOSS直聘", payload["message"])
+        self.assertEqual(payload["message"], BOSS_AVAILABILITY_REASON)
+
     def test_retry_key_returns_same_flow_and_active_gate_blocks_other_round(self):
         first = self.client.post("/api/flows", json=self._payload())
         self.assertEqual(first.status_code, 201)

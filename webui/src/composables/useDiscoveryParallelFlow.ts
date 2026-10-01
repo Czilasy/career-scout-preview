@@ -552,21 +552,18 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
   }
 
   /**
-   * 装轮询定时器。`immediateRead` 用于区分「装轮询时手上有没有权威现场」：
-   * - 缺省 true：调用方只有本地状态（例如显式 startPolling），先补一次读，
-   *   避免把本地猜测当成现场挂两秒。
-   * - false：调用方刚拿到后端那一份（restore 收到的载荷就是上一次权威读的结果，
-   *   服务端写完才回），再补一次同一条 /api/flows/current 是重复请求，
-   *   响应回来还会把刚摆好的现场又换一遍。
+   * 装轮询定时器：装之前先无条件补一次权威读（`/api/flows/current`）。
+   *
+   * 冷启动与刷新恢复是本项目反复出问题的路径：本地手上的那份载荷只可能是
+   * 上一次读的副本，隔多久都可能已经过期。宁可多发一次读、让服务端那一份
+   * 立刻覆盖本地，也不许把本地猜测当成现场挂满一个轮询周期。
    */
-  function startPolling(immediateRead = true) {
+  function startPolling() {
     clearPolling();
     polling.value = true;
-    if (immediateRead) {
-      void refresh().catch((reason: unknown) => {
-        if (!error.value) error.value = errorMessage(reason, "流程状态读取失败");
-      });
-    }
+    void refresh().catch((reason: unknown) => {
+      if (!error.value) error.value = errorMessage(reason, "流程状态读取失败");
+    });
     pollTimer = setInterval(() => {
       void refresh().catch((reason: unknown) => {
         if (!error.value) error.value = errorMessage(reason, "流程状态读取失败");
@@ -757,8 +754,7 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
         UNFINISHED_ROUND_FLOW_STATUSES.has(String(track.status || "")),
       ));
       if (hasUnfinishedParallelRound(next) && (!next?.tracks.length || hasUnfinishedTrackRow)) {
-        // 载荷本身就是后端刚写完那一份权威现场，装轮询不再补一次 /api/flows/current。
-        startPolling(false);
+        startPolling();
       }
       clearFlowStatus();
     } catch (reason: unknown) {

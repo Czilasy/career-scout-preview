@@ -32,6 +32,16 @@ from webui.platforms_urls import (
 
 
 
+#: BOSS 不可用原因（与智联 ZHILIAN_AVAILABILITY_REASON 同一形状：注册数据未核验时
+#: 才带上，可读、点名平台，供 /api/flows 等入口直接转述；树干不硬编码平台名）。
+BOSS_AVAILABILITY_REASON = (
+    "BOSS直聘 筛选选项 / 城市目录 "
+    "未由当前真实运行数据核验"
+)
+
+
+
+
 # ---------------------------------------------------------------------------
 # BOSS 注册（tasks001 基线）
 # ---------------------------------------------------------------------------
@@ -149,13 +159,16 @@ def _register_boss(
     catalog = _build_boss_city_catalog(
         city_map, nationwide_name=nationwide_name, nationwide_code=nationwide_code,
     )
+    # 与智联同一口径：注册数据缺项即不可新建任务，并带上可读原因，
+    # 让「指出不可用平台」在 BOSS 侧也落得下来（树干只转述，不造文案）。
+    enabled = bool(all(field.options for field in schema.fields) and catalog.entries)
     registry = PlatformRegistry(
         key="boss",
         display_name="BOSS直聘",
         filter_schema=schema,
         city_catalog=catalog,
-        enabled_for_new_tasks=True,
-        availability_reason="",
+        enabled_for_new_tasks=enabled,
+        availability_reason="" if enabled else BOSS_AVAILABILITY_REASON,
         default_cdp_port=BOSS_DEFAULT_CDP_PORT,
         normalize_job_url_fn=normalize_boss_job_url,
         resolve_login_space_fn=resolve_boss_login_space,

@@ -522,6 +522,78 @@ describe("useDiscoveryParallelFlow", () => {
     state.clearPolling();
   });
 
+  // 冷启动/刷新恢复（046 Edge Cases 与 ## 状态所有权）：restore 装轮询时一定补一次
+  // 权威读，且这一次读用的是当时那个画像。少了这次读，界面就会把本地副本当成现场
+  // 挂满一个轮询周期；多算成两次，说明轮询定时器提前打了第一枪。
+  it("reads the authoritative Flow once when restore installs polling", () => {
+    const urls: string[] = [];
+    const request = async <T>(url: string): Promise<T> => {
+      urls.push(String(url));
+      return {
+        flow: {
+          id: "flow-cold-start",
+          profile_id: "profile-cold-start",
+          selection: "all",
+          status: "running",
+          tracks: [{
+            id: "b", flow_id: "flow-cold-start", platform: "boss", status: "running", stage: "scrape",
+          }],
+        },
+      } as T;
+    };
+    const state = useDiscoveryParallelFlow({
+      profileId: "profile-cold-start", request, pollIntervalMs: 1000000,
+    });
+
+    state.restore({
+      id: "flow-cold-start",
+      profile_id: "profile-cold-start",
+      selection: "all",
+      status: "running",
+      tracks: [{
+        id: "b", flow_id: "flow-cold-start", platform: "boss" as const, status: "running", stage: "scrape",
+      }],
+    });
+
+    expect(state.polling.value).toBe(true);
+    expect(urls).toEqual(["/api/flows/current?profile_id=profile-cold-start"]);
+    state.clearPolling();
+  });
+
+  it("restore 补读用的就是当下那一个画像", () => {
+    const profileId = ref("profile-cold-old");
+    const urls: string[] = [];
+    const request = async <T>(url: string): Promise<T> => {
+      urls.push(String(url));
+      return { flow: null } as T;
+    };
+    const state = useDiscoveryParallelFlow({
+      profileId, request, pollIntervalMs: 1000000,
+    });
+
+    // 每次切换画像各读一次；restore 之后在那一份之上再补读一次。
+    void state.refresh();
+    profileId.value = "profile-cold-new";
+    void state.refresh();
+    expect(urls).toEqual([
+      "/api/flows/current?profile_id=profile-cold-old",
+      "/api/flows/current?profile_id=profile-cold-new",
+    ]);
+
+    urls.length = 0;
+    state.restore({
+      id: "flow-cold-new",
+      profile_id: "profile-cold-new",
+      selection: "boss",
+      status: "running",
+      tracks: [{
+        id: "b", flow_id: "flow-cold-new", platform: "boss" as const, status: "running", stage: "scrape",
+      }],
+    });
+    expect(urls).toEqual(["/api/flows/current?profile_id=profile-cold-new"]);
+    state.clearPolling();
+  });
+
   it("forwards a selected track operation to the Flow coordinator", async () => {
     const calls: string[] = [];
     const current = {
@@ -1212,9 +1284,12 @@ describe("useDiscoveryParallelFlow 轨道动作 kind 的实际落点", () => {
 
   it("映射表之外的 kind 既不发请求，也不冒充做成了什么", async () => {
     const { flow, urls } = flowWithRecordedRequests();
+    // restore 装轮询时先补读一次权威现场，那是状态读取、不是轨道动作；
+    // 下面的断言同时钉住「只有这一次读」和「表外的 kind 一个动作请求都不发」。
+    expect(urls).toEqual(["/api/flows/current?profile_id=profile-kinds"]);
     expect(await flow.operateTrack("boss", "start" as TrackActionKind)).toBeNull();
     expect(await flow.operateTrack("boss", "recrawl" as TrackActionKind)).toBeNull();
-    expect(urls).toEqual([]);
+    expect(urls).toEqual(["/api/flows/current?profile_id=profile-kinds"]);
     flow.clearPolling();
   });
 });

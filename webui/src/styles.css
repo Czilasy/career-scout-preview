@@ -1459,7 +1459,9 @@ button:disabled {
   font-size: 13px;
   color: var(--ink-3);
   white-space: nowrap;
-}/* 流程失败/错误通知：任何宽度都必须可见，不得与窄屏可隐藏的装饰提示同类 */
+}
+
+/* 流程失败/错误通知：任何宽度都必须可见，不得与窄屏可隐藏的装饰提示同类 */
 .flow-failure-notice {
   flex: 1 1 260px;
   min-width: 0;
@@ -1468,7 +1470,9 @@ button:disabled {
   font-weight: 600;
   line-height: 1.5;
   overflow-wrap: anywhere;
-}/* 本轮仍在进行说明（046 D-08）：分轨合流下 04 页可以只含一条平台线的结果，
+}
+
+/* 本轮仍在进行说明（046 D-08）：分轨合流下 04 页可以只含一条平台线的结果，
    这句话决定用户会不会把"先到的结果"读成"整轮跑完了"，任何宽度都必须可见 */
 .flow-round-progress-notice {
   flex: 1 1 260px;

@@ -27,6 +27,10 @@
 - 2026-09-28：根据真实 E2E 发现并经用户明确授权，补修智联回调契约、CDP 关闭端点容错、详情无效输出诊断、流水线失败证据和结果通知竞态；本地回归与结构门禁纳入验证，真实源码复验仍待执行。
 - 2026-09-28：根据后续真实 E2E 取证并经用户明确授权，新增 `webui/src/composables/discoveryDeps.ts` 与 `webui/src/composables/useDiscoveryExecution.ts` 精确 follow-up 路径，注入当前全部流程的抓取任务归属判断，阻止 Flow-owned 任务被 legacy 自动筛选重复启动；本地回归待随本轮验证，真实源码复验仍待执行。
 
+- 2026-10-01（V2 重新执行轮）：规格新增 `## 状态词表`、`## 状态所有权`、`## 冷启动走查（硬验收）` 三节作为验收尺子（提交 `4fe49ae`）。基线证据：前端全量 69 文件 / 1394 例全绿（`%TEMP%\cs046_v2\fe-baseline.log`）；后端聚焦组合 189 例中唯一失败为 `test_baseline_files_keep_pre_v2_hashes`（36/76 基线哈希不符，属结构门禁：基线取自未提交工作树且与 `e4ca9e0` 自相矛盾，在 HEAD 不可能绿）。
+- 2026-10-01 D-01（提交 `910589d`）：真实库冻结快照实测统一经验值为「1年以下」（来自简历建议，符合 FR-004），BOSS 四档同选符合冻结契约，其中「经验不限」是岗位属性档而非字段级哨兵。实测真因两处已修：智联把岗位档 `-1` 误登记为字段级不限制（`ai_platform_adapter.py`）、智联薪资「5K-10K」少映射一档 `4K-6K`（`parallelFilterMapping.ts`）；反向投影改为唯一命中。`tests.ai.test_ai_platform_filters` 17/17、`parallelFilterMapping.spec.ts` 17/17、`vue-tsc` 0 错。
+- 2026-10-01 D-02（提交 `39091ed`）：`store_runs.py` 批次与阶段末两条写入路径收敛为共用 upsert 与唯一取值域，整包 JSON 不再进 `verdict` 列；全仓 `json.dumps(verdict` 归零，文件 789 行仍在红线内。`tests.healthy_pipeline.test_pipeline_pause_resume` 69/69 通过（其中 2 条旧断言按新入库形状由整包 JSON 改为枚举比对，属规格驱动的返修）。历史 10851 行整包 JSON 未迁移，仍由读方容错分支与 `historical_recovery` 兜住。
+
 ## Phase 1: Setup（结构护栏）
 
 **Purpose**: 在改实现前先把本轮最容易复发的结构错误变成失败测试。
