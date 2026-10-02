@@ -69,8 +69,8 @@ describe("screenFlow", () => {
 
   // 状态词表（v2 规格「状态词表」）：中断＝服务重启或人为停止，没有活体 worker，
   // 只能开新一轮。「继续」这条动作对中断轨道注定 503，树干不得再给它继续出口。
-  it("derives paused/failed as continue and gives interrupted no continuation", () => {
-    for (const status of ["paused", "failed"]) {
+  it("derives authoritative paused as continue and gives terminal failed/interrupted no continuation", () => {
+    for (const status of ["paused"]) {
       const action = deriveScreenPrimaryAction({
         screenStatus: status, recrawlStatus: "", hasScreenRun: true, hasUncertain: false,
       });
@@ -79,6 +79,12 @@ describe("screenFlow", () => {
     expect(deriveScreenPrimaryAction({
       screenStatus: "interrupted", recrawlStatus: "", hasScreenRun: true, hasUncertain: false,
     }).kind).toBe("none");
+    expect(deriveScreenPrimaryAction({
+      screenStatus: "failed", recrawlStatus: "", hasScreenRun: true, hasUncertain: false,
+    }).kind).toBe("none");
+    expect(deriveScreenPrimaryAction({
+      screenStatus: "failed", recrawlStatus: "", hasScreenRun: true, hasUncertain: false, resumable: true,
+    }).kind).toBe("continue");
   });
 
   // 重抓同理：中断的重抓没有活体批次可续，只能由新一轮重新发起。
@@ -288,7 +294,7 @@ describe("轨道行动作 kind 与后端操作一一对应", () => {
   it("轨道行组件不再自带死掉的 kind 处理器", () => {
     const component = readFileSync(path.join(__dirname, "../components/ParallelPlatformProgress.vue"), "utf8");
     // 正：动作仍原样往上传，且上传的 kind 集合就是轨道映射那一份。
-    expect(component).toMatch(/emit\("action", item\.platform, kind\)/);
+    expect(component).toMatch(/emit\("action", item\.platform, kind, item\.runId\)/);
     expect(component).toMatch(/TRACK_ACTION_OPERATIONS/);
     // 负：轨道没有重抓与「开始 AI 筛选」这两个出口，就不该为它们绑处理器。
     for (const dead of ["\"start\"", "\"recrawl\"", "\"pause-recrawl\"", "\"continue-recrawl\""]) {

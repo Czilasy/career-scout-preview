@@ -245,7 +245,7 @@ async function applyFetchedLatestResult(
   // 走那里，切草稿会清掉现场。
   // setDraftPlatform 会顺带按新平台重载 schema/城市（否则提交会带旧平台的
   // filter_schema_version 触发后端 409）；草稿已是该平台时它直接返回。
-  if (!live && !historyMode.value && !draftAlignedToResult) {
+  if (!readCurrentFlowId() && !live && !historyMode.value && !draftAlignedToResult) {
     const platform = (merged as PipelineResult & { platform?: string }).platform || "";
     if (platform === "boss" || platform === "zhilian") {
       draftAlignedToResult = true;
@@ -263,13 +263,16 @@ async function applyFetchedLatestResult(
         const platformJobId = job.platform_job_id || job.job_id || job.id || job.canonical_url || "";
         return `${platform}:${String(platformJobId)}`;
       };
+      // 保留原列表位置，同时使用本轮最新判定；进入淘汰桶的岗位不再保留旧待确认对象。
+      const latestByKey = new Map(nextJobs.map((job) => [identity(job), job]));
+      const droppedKeys = new Set((merged.dropped || []).map(identity));
       const seen = new Set<string>();
       merged.jobs = [...previousJobs, ...nextJobs].filter((job) => {
         const key = identity(job);
-        if (seen.has(key)) return false;
+        if (seen.has(key) || droppedKeys.has(key)) return false;
         seen.add(key);
         return true;
-      });
+      }).map((job) => latestByKey.get(identity(job)) || job);
     }
     setPipelineResult(merged, { preservePresentation: true });
   } else {

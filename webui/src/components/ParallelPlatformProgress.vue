@@ -16,6 +16,7 @@ const props = defineProps<{
   busyPlatform?: Platform | null;
   stale?: boolean;
   finishBusy?: boolean;
+  busyActions?: Partial<Record<Platform, string>>;
 }>();
 
 const emit = defineEmits(["action", "finish"]);
@@ -28,7 +29,7 @@ const ACTION_KINDS = Object.keys(TRACK_ACTION_OPERATIONS) as TrackActionKind[];
 function actionHandlers(item: FlowProgressItem): Record<string, () => void> {
   const handlers: Record<string, () => void> = {};
   for (const kind of ACTION_KINDS) {
-    handlers[kind] = () => emit("action", item.platform, kind);
+    handlers[kind] = () => emit("action", item.platform, kind, item.runId);
   }
   return handlers;
 }
@@ -57,15 +58,16 @@ function actionHandlers(item: FlowProgressItem): Record<string, () => void> {
         <ScreenRoundActions
           v-on="actionHandlers(item)"
           :action="item.action"
-          :busy="props.busyPlatform === item.platform"
-          :finish-busy="Boolean(props.finishBusy)"
+          :busy="props.busyActions ? Boolean(props.busyActions[item.platform]) : props.busyPlatform === item.platform"
+          :finish-busy="props.busyActions ? props.busyActions[item.platform] === 'finish' : Boolean(props.finishBusy)"
+          :cancel-busy="props.busyActions?.[item.platform] === 'cancel'"
           :show-finish-save="item.showFinishSave"
           :show-cancel="item.showCancel"
           :cancel-label="item.cancelLabel"
           :finish-test-id="item.finishTestId"
           :cancel-test-id="item.cancelTestId"
           :disabled="props.stale === true"
-          @finish-save="emit('finish', item.finishRunId)"
+          @finish-save="emit('finish', item.finishRunId, item.platform, item.kind)"
         />
       </TaskProgress>
     </article>

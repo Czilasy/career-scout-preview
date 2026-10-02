@@ -32,6 +32,52 @@ describe("useDiscoveryWorkflow（026 B078）", () => {
     localStorage.clear();
   });
 
+  it.each(["search", "screen"] as const)("keeps a completed round's %s page and edited scope across reload", (step) => {
+    const state = makeState({
+      activeStep: ref(step), analysisReady: ref(true), resultsPageSeen: ref(true),
+      resultLoaded: ref(true), pipelineResult: ref({ jobs: [{ job_id: "kept" }], dropped: [] }),
+      currentRoundStatus: ref("screened"),
+    });
+    state.keywords.value = [{ word: "AI开发助理", recommended: false }];
+    state.selectedKeywords.value = ["AI开发助理"];
+    state.cityText.value = "东莞";
+    const workflow = useDiscoveryWorkflow(state, makeDeps());
+    workflow.persistWorkflowState();
+    const saved = JSON.parse(sessionStorage.getItem(WORKFLOW_KEY) || "{}");
+    expect(saved.completed).toBe(true);
+    expect(saved.activeStep).toBe(step);
+    const restored = makeState();
+    useDiscoveryWorkflow(restored, makeDeps()).restoreWorkflowState();
+    expect(restored.activeStep.value).toBe(step);
+    expect(restored.selectedKeywords.value).toEqual(["AI开发助理"]);
+    expect(restored.cityText.value).toBe("东莞");
+    expect(restored.resultLoaded.value).toBe(true);
+  });
+
+  it("restores the draft without overwriting an authoritative Flow result with the old 02 snapshot", () => {
+    const state = makeState();
+    const saved = {
+      analysisReady: true, activeStep: "screen", keywords: ["saved keyword"],
+      scrapeCompleted: false, resultLoaded: false, pipelineResult: null,
+      pipelineResultRunId: "", currentRoundStatus: "",
+    };
+    state.restoredWorkflowSnapshot.value = saved;
+    const result = { jobs: [{ job_id: "current", verdict: "match" }], dropped: [] };
+    state.pipelineResult.value = result;
+    state.pipelineResultRunId.value = "current-result";
+    state.scrapeCompleted.value = true;
+    state.resultLoaded.value = true;
+    state.currentRoundStatus.value = "screened";
+    useDiscoveryWorkflow(state, makeDeps()).restoreSaved02State({ preserveResult: true });
+    expect(state.keywords.value).toEqual(["saved keyword"]);
+    expect(state.pipelineResult.value).toEqual(result);
+    expect(state.pipelineResultRunId.value).toBe("current-result");
+    expect(state.resultLoaded.value).toBe(true);
+    expect(state.scrapeCompleted.value).toBe(true);
+    expect(state.currentRoundStatus.value).toBe("screened");
+    expect(state.enabledSteps.value).toContain("results");
+  });
+
   it("T003a: 未结束时持久化快照携带准确的 resultsPageSeen（false）", () => {
     const state = makeState({
       analysisReady: ref(true),

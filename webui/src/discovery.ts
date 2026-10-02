@@ -77,6 +77,8 @@ export function roundScopeLabel(scope: RoundStatusScope, platform: Platform): st
 
 /** 轨道级活动态：整条线还活着（排队 / 进行中）。 */
 export const ACTIVE_TRACK_STATUSES = ["queued", "running"];
+/** 与 Flow API 终态门禁一致：结果可读，轨道不能再次操作。 */
+export const TERMINAL_TRACK_STATUSES = ["done", "succeeded", "failed", "stopped", "cancelled"];
 
 /**
  * 轨道问题态（树干唯一一份）：整条线已经停下、需要用户处理，界面据此说「失败 / 不可用 /

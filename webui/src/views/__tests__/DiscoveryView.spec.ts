@@ -1983,15 +1983,55 @@ describe("DiscoveryView", () => {
     await flushPromises();
     expect(posts).toContain("tracks/boss/pause");
 
+    const resultEpochBeforeSave = (wrapper.vm as any).$.setupState.resultEpoch;
+    const categoryBeforeSave = (wrapper.vm as any).$.setupState.activeCategory;
     await zhilianRow.get('[data-testid="parallel-track-zhilian-finish-save"]').trigger("click");
     await flushPromises();
     expect(posts).toContain("task/finish/scrape-z");
+    expect((wrapper.vm as any).$.setupState.resultEpoch).toBe(resultEpochBeforeSave);
+    expect((wrapper.vm as any).$.setupState.activeCategory).toBe(categoryBeforeSave);
+    expect(bossRow.find('[data-testid="pause-scrape"]').exists()).toBe(true);
 
     await zhilianRow.get('[data-testid="parallel-track-zhilian-cancel"]').trigger("click");
     await flushPromises();
     expect(posts).toContain("tracks/zhilian/stop");
     wrapper.unmount();
     vi.unstubAllGlobals();
+  });
+
+  it.each(["pause", "finish"] as const)("046 A04: %s uses the clicked instance's shared batch dialog", async (action) => {
+    const trackFlow = { id: "instance-batch-flow", profile_id: "instance-batch-profile", selection: "all", status: "running", tracks: [
+      { id: "ib", platform: "boss", scrape_run_id: "ib-scrape", screen_run_id: "ib-screen", status: "running", stage: "ai" },
+      { id: "iz", platform: "zhilian", scrape_run_id: "iz-scrape", status: "running", stage: "scrape" },
+    ] };
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchMock = oneClickBase({
+      "/api/flows/current": () => response({ ok: true, flow: trackFlow }),
+      "/api/flows/instance-batch-flow/results": () => response({ ok: true, results: { flow_id: trackFlow.id, tracks: [] } }),
+      "/api/task-state/ib-scrape": () => response({ status: "completed", progress: {}, logs: [] }),
+      "/api/task-state/ib-screen": () => response({ status: "running", progress: { stage: "fetch_jd", jd_batch: { current: 2, total: 4 } }, logs: [] }),
+      "/api/task-state/iz-scrape": () => response({ status: "running", progress: {}, logs: [] }),
+      "/api/flows/instance-batch-flow/tracks/boss/pause": (url, init) => { requests.push({ url, body: JSON.parse(String(init?.body)) }); return response({ ok: true, flow: trackFlow }); },
+      "/api/task/finish/ib-screen": (url, init) => { requests.push({ url, body: JSON.parse(String(init?.body)) }); return response({ ok: true, platform: "boss", result: { jobs: [] } }); },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "instance-batch-profile" }, attachTo: document.body });
+    await flushPromises();
+    const screenRows = wrapper.findAll('[data-testid="parallel-track-boss"]');
+    const screenRow = screenRows.find((entry) => entry.find('[data-testid="pause-ai-screen"]').exists())!;
+    await screenRow.get(action === "pause" ? '[data-testid="pause-ai-screen"]' : '[data-testid="parallel-track-boss-finish-save"]').trigger("click");
+    await flushPromises();
+    expect(requests).toHaveLength(0);
+    const dialog = document.querySelector('[data-testid="pause-batch-dialog"]')!;
+    expect(dialog.textContent).toContain("第 2 批 / 共 4 批");
+    (dialog.querySelector('[data-testid="pause-graceful"]') as HTMLButtonElement).click();
+    await flushPromises();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.body).toEqual(action === "pause"
+      ? { profile_id: "instance-batch-profile", expected_run_id: "ib-screen", mode: "graceful" }
+      : { wait_for_batch: true });
+    expect(wrapper.findAll('[data-testid="parallel-track-zhilian"]').some((entry) => entry.find('[data-testid="pause-scrape"]').exists())).toBe(true);
+    wrapper.unmount(); vi.unstubAllGlobals();
   });
 
   // D-04/D-05 排版：并行轨道的动作行收在该轨道卡边框内部，轨道模块横跨整行、
@@ -2355,6 +2395,13 @@ describe("DiscoveryView", () => {
   });
 
   it("does not render a stale global result when a current single-platform Flow owns the round", async () => {
+    sessionStorage.setItem("career-scout-workflow:profile-single-current-result", JSON.stringify({
+      version: 2, unfinished: true, activeStep: "screen", analysisReady: true,
+      scrapeTaskId: "single-scrape", screenTaskId: "single-screen", scrapeCompleted: true,
+      scrapeSnapshot: { status: "completed", progress: {}, logs: [] },
+      screenSnapshot: { status: "completed", progress: {}, logs: [] },
+      resultLoaded: false, resultsPageSeen: false, pipelineResult: null,
+    }));
     const fetchMock = oneClickBase({
       "/api/flows/current": () => response({
         ok: true,
@@ -2386,6 +2433,12 @@ describe("DiscoveryView", () => {
     expect(wrapper.text()).not.toContain("另一模式旧结果");
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/flows/flow-single-current-result/results"))).toHaveLength(1);
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/latest-pipeline-result"))).toHaveLength(0);
+    const resultsStep = wrapper.findAll(".step-nav button").find((button) => button.text().includes("查看结果"))!;
+    expect(resultsStep.attributes("disabled")).toBeUndefined();
+    await resultsStep.trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".results-stage").isVisible()).toBe(true);
+    expect(wrapper.text()).toContain("当前单平台结果");
     wrapper.unmount();
     vi.unstubAllGlobals();
   });
@@ -6516,9 +6569,9 @@ describe("DiscoveryView", () => {
         } else {
           // failed/interrupted are visible facts, not an occupied task slot.
           // 中断不再给「继续」（后端续跑只收 paused/可续 failed）：按钮根本不再出现；
-          // failed 仍给继续，只是回到 02 现场时整片 03 隐藏。
+          // 普通 failed 是终态；既有可恢复失败由 task-state 投影成 paused。
           const continuation = wrapper.find('[data-testid="continue-ai-screen"]');
-          expect(status === "interrupted" ? continuation.exists() : continuation.isVisible()).toBe(false);
+          expect(continuation.exists()).toBe(false);
           expect(wrapper.find('[data-testid="finish-save-results"]').isVisible()).toBe(false);
           expect(wrapper.find('[data-testid="start-scrape"]').exists()).toBe(true);
           expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("disabled")).toBeUndefined();

@@ -53,6 +53,27 @@ class WhiteboxService:
         self._validate_plan(plan)
         try:
             row = self.store.resume_whitebox_run(owner_kind, owner_id, plan, parent_owner_id)
+            run_id = str(row['id'])
+            events = self.store.list_whitebox_events(run_id)
+            units = self.store.list_whitebox_units(run_id)
+            completed = {str(unit.get('unit_key') or '') for unit in units
+                         if unit.get('status') in {'succeeded', 'empty'}}
+            for item in plan['units']:
+                item = dict(item) if isinstance(item, dict) else {'unit_key': str(item)}
+                key = str(item.get('unit_key') or item.get('key') or '')
+                attempts = [int(event.get('attempt_no') or 1) for event in events
+                            if str(event.get('unit_key') or '') == key]
+                if key in completed or not attempts:
+                    continue
+                # Old events stay auditable; a fresh projection must not replay
+                # an earlier pause/failure as part of the resumed attempt.
+                self.store.upsert_whitebox_unit(run_id, {
+                    'unit_key': key,
+                    'unit_kind': item.get('unit_kind') or item.get('kind') or 'unit',
+                    'stage': item.get('stage') or (plan.get('stages') or ['task'])[0],
+                    'attempt_no': max(attempts) + 1,
+                    'planned_pages': item.get('planned_pages'), 'status': 'planned',
+                })
         except ValueError as exc:
             if 'conflict' in str(exc).lower():
                 raise WhiteboxConflictError(str(exc)) from exc
@@ -245,8 +266,10 @@ class WhiteboxService:
                     latest = max(matching, key=lambda unit: int(unit.get('attempt_no') or 1))
                     latest_attempt = int(latest.get('attempt_no') or 1)
                     latest_status = str(latest.get('status') or 'planned')
-                    if requested_attempt <= latest_attempt and latest_status in {'failed', 'incomplete', 'skipped'}:
-                        requested_attempt = latest_attempt + 1
+                    if requested_attempt < latest_attempt or (
+                        requested_attempt == latest_attempt and latest_status in {'failed', 'incomplete', 'skipped'}
+                    ):
+                        requested_attempt = latest_attempt + int(latest_status in {'failed', 'incomplete', 'skipped'})
                         normalized['attempt_no'] = requested_attempt
                         normalized['idempotency_key'] = (
                             f"{normalized.get('idempotency_key')}:attempt{requested_attempt}"

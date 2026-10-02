@@ -262,12 +262,16 @@ class PipelineGuard:
                 continue
             if now - st["last_heartbeat"] < self._stall_seconds:
                 continue
+            if self._retire_inactive_batch(st):
+                continue
             if not st["stalled"]:
                 self._mark_stalled(st, now)
             else:
                 self._maybe_fallback_pause(st, now)
 
     def _mark_stalled(self, st: dict, now: float) -> None:
+        if self._retire_inactive_batch(st):
+            return
         with self._mutex:
             state = self._batches.get(st["batch_key"])
             if state is None or state.terminal:
@@ -314,6 +318,8 @@ class PipelineGuard:
             return
         if now - st["stall_ts"] < self._fallback_seconds:
             return
+        if self._retire_inactive_batch(st):
+            return
         with self._mutex:
             state = self._batches.get(st["batch_key"])
             if state is None or state.terminal:
@@ -322,6 +328,25 @@ class PipelineGuard:
             state.terminal = True
         self._log_event("fallback", st, result="pause_thread_unresponsive")
         self._pause_task(st, FALLBACK_PAUSE_REASON, code=FALLBACK_PAUSE_CODE)
+
+    def _retire_inactive_batch(self, st: dict) -> bool:
+        """遗留批次不得把已暂停或终结的实例重新写成失联失败。"""
+        task_id = st["task_id"]
+        statuses = []
+        if self._tasks is not None and self._lock is not None:
+            with self._lock:
+                task = self._tasks.get(task_id)
+                if task is not None:
+                    statuses.append(str(task.get("status") or ""))
+        get_run = getattr(self._store, "get_screening_run", None)
+        if callable(get_run):
+            run = get_run(task_id)
+            if run is not None:
+                statuses.append(str(run.get("status") or ""))
+        if not any(status and status not in {"queued", "running"} for status in statuses):
+            return False
+        self.complete_batch(st["batch_key"])
+        return True
 
     # ------------------------------------------------------------------
     # 失联清理与暂停落库

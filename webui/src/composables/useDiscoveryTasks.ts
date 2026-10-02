@@ -169,6 +169,11 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       return;
     }
     if (isCompletedTaskStatus(data.status)) {
+      let flowSelection: "all" | Platform | undefined;
+      if (kind === "scrape") {
+        flowSelection = (await deps.refreshFlowOwnership?.())?.selection;
+        if (roundEpoch !== workflowEpoch.value) return;
+      }
       pollRetryCount.value = 0;
       restoredTaskHint.value = "";
       const hasJobs = typeof data.scraped_count === "number" ? data.scraped_count > 0 : true;
@@ -178,6 +183,8 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
         && !flowOwnedScrape
         && (autoScreenArmed.value || data.auto_screen === true)
         && hasJobs;
+      const attachFlowScreen = flowOwnedScrape && hasJobs
+        && flowSelection !== undefined && flowSelection !== "all";
       autoScreenArmed.value = false;
       if (kind === "scrape") {
         scrapeBusy.value = false;
@@ -207,6 +214,9 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
           if (roundEpoch !== workflowEpoch.value) return;
           deps.enterScreenStep();
           await deps.startAiScreen({ consumeAutoScreen: true, fields: autoScreenFields.value, profile: autoScreenProfile.value });
+        } else if (attachFlowScreen) {
+          deps.enterScreenStep();
+          await deps.restoreRunningTask();
         }
       } else {
         screenBusy.value = false;
@@ -512,18 +522,31 @@ async function cancelActiveTasksForNewRound(
     || expectedWorkflowEpoch === workflowEpoch.value;
   if (!isCurrent()) return false;
   lastCancellationCleanupFailed = false;
+  let flowPlan: Awaited<ReturnType<NonNullable<TasksNeeds["getFlowTaskCancellationPlan"]>>>;
+  try {
+    flowPlan = await deps.getFlowTaskCancellationPlan?.() || null;
+  } catch {
+    if (!silent) deps.notify("当前流程状态暂不可确认，请刷新后重试", "error");
+    return false;
+  }
+  if (!isCurrent()) return false;
+  if (flowPlan?.stale) {
+    if (!silent) deps.notify("当前流程状态暂不可确认，请刷新后重试", "error");
+    return false;
+  }
+  const ownedIds = new Set(flowPlan?.ownedIds || []);
   const ids = new Set<string>();
   for (const id of [scrapeTaskId.value, screenTaskId.value, recrawlTaskId.value]) {
     // The local snapshot is only one projection.  A shared task id may have
     // a terminal screening row while its search row is still active, so the
     // server must always decide whether cancellation is a no-op or a conflict.
-    if (id) ids.add(id);
+    if (id && !ownedIds.has(id)) ids.add(id);
   }
-  for (const id of deps.getFlowTaskIds?.() || []) {
+  for (const id of flowPlan?.targetIds || deps.getFlowTaskIds?.() || []) {
     const normalized = String(id || "").trim();
     if (normalized) ids.add(normalized);
   }
-  for (const id of [pausedRunId.value, interruptedRunId.value]) if (id) ids.add(id);
+  for (const id of [pausedRunId.value, interruptedRunId.value]) if (id && !ownedIds.has(id)) ids.add(id);
   // A Flow envelope/Track can be active while the legacy page has no local
   // task projection yet.  Do not guess with latest-running-task in that
   // state: without a durable Flow run id it is unsafe to reset another lane.
@@ -531,7 +554,7 @@ async function cancelActiveTasksForNewRound(
     if (!silent) deps.notify("当前流程状态暂不可确认，请刷新后重试", "error");
     return false;
   }
-  if (!ids.size) {
+  if (!ids.size && !flowPlan) {
     try {
       // Spec041：兜底也只取消当前画像的任务；服务端按画像过滤，
       // 返回体再核对一次身份，任何情况下都不跨画像取消。

@@ -906,6 +906,55 @@ describe("useDiscoveryResults Flow merge presentation", () => {
     apiRequestMock.mockReset();
   });
 
+  it("updates pending jobs from the latest verdict and removes dropped jobs while preserving their positions and reading scene", async () => {
+    const state = useDiscoveryState({ profileId: "merge-test" }, () => {});
+    state.pipelineResult.value = {
+      jobs: [
+        { job_id: "updated", platform: "boss", title: "岗位", verdict: "" },
+        { job_id: "removed", platform: "boss", title: "淘汰岗位", verdict: "" },
+        { job_id: "sibling", platform: "zhilian", title: "另一轨", verdict: "match" },
+      ], dropped: [],
+    } as never;
+    state.activeCategory.value = "uncertain";
+    const response = flowResult([
+      { job_id: "new", platform: "boss", title: "新岗位", verdict: "not_match" },
+      { job_id: "updated", platform: "boss", title: "岗位", verdict: "match" },
+    ], "result-latest");
+    response.results.tracks[0]!.dropped = [
+      { job_id: "removed", platform: "boss", title: "淘汰岗位", verdict: "drop" },
+    ] as never;
+    apiRequestMock.mockResolvedValue(response);
+    const results = useDiscoveryResults(state, makeDeps(), ref("flow-merge"));
+
+    await results.loadLatestResult({ preservePresentation: true });
+
+    const mergedResult = state.pipelineResult.value as unknown as {
+      jobs?: Array<{ job_id?: string; verdict?: string }>;
+      dropped?: Array<{ job_id?: string }>;
+    } | null;
+    expect(mergedResult?.jobs?.map(j => [j.job_id, j.verdict])).toEqual([
+      ["updated", "match"], ["sibling", "match"], ["new", "not_match"],
+    ]);
+    expect(mergedResult?.dropped?.map(j => j.job_id)).toEqual(["removed"]);
+    expect(state.activeCategory.value).toBe("uncertain");
+    expect(state.resultEpoch.value).toBe(0);
+  });
+
+  it("does not align a finished all-platform Flow draft to its leading result platform", async () => {
+    apiRequestMock.mockResolvedValue(flowResult([
+      { job_id: "result", platform: "boss", title: "岗位", verdict: "match" },
+    ], "result-finished"));
+    const state = useDiscoveryState({ profileId: "merge-test" }, () => {});
+    const deps = makeDeps();
+    const results = useDiscoveryResults(state, deps, ref("flow-merge"), undefined, ref("all"));
+
+    await results.loadLatestResult({ preservePresentation: true });
+
+    expect(deps.setDraftPlatform).not.toHaveBeenCalled();
+    expect(state.pipelineResult.value?.jobs?.length).toBe(1);
+    expect(document.documentElement.getAttribute("data-platform")).toBe("all");
+  });
+
   it("preservePresentation merges second Flow results without changing scene identity", async () => {
     apiRequestMock.mockImplementation(async (url: string) => {
       if (String(url).includes("latest-pipeline-result")) {

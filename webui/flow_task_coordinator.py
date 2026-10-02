@@ -586,6 +586,10 @@ def operate_bound_task(ctx, action: str, platform: str, flow: Mapping, track: Ma
     if action == "pause":
         if task is None:
             return True
+        from webui.flow_task_actions import delegate_task_pause
+
+        if delegate_task_pause(task_id):
+            return True
         current = str(task.get("status") or "")
         if current not in {"queued", "running"}:
             if current == "paused" and current_track_status == "running":

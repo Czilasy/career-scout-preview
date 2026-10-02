@@ -27,6 +27,7 @@ import TaskProgress from "../components/TaskProgress.vue";
 import SavedSearchPackagePicker from "../components/SavedSearchPackagePicker.vue";
 import SavedSearchPackageSaveActions from "../components/SavedSearchPackageSaveActions.vue";
 import { useScreenRoundFlow } from "../composables/useScreenRoundFlow";
+import { useDiscoveryInstanceActions } from "../composables/useDiscoveryInstanceActions";
 import {
   attachRoundFlow,
   createDiscoveryDeps,
@@ -262,10 +263,12 @@ wireDiscoveryDeps(deps, {
   tasks: {
     ...tasks,
     isFlowOwnedScrapeTask: parallelFlow.isFlowOwnedScrapeTask,
+    refreshFlowOwnership: async () => { const current = await parallelFlow.refresh(); parallelFlow.restore(current); return current; },
     getFlowTaskIds: () => parallelFlow.trackList.value.flatMap((track) => [
       track.scrape_run_id,
       track.screen_run_id,
     ].filter((runId): runId is string => Boolean(runId))),
+    getFlowTaskCancellationPlan: parallelFlow.getFlowTaskCancellationPlan,
     abandonRound: async () => { await tasks.abandonRound(); },
   },
   results,
@@ -463,6 +466,7 @@ const roundFlow = reactive(useScreenRoundFlow({
     resultsPageSeen,
     navigateStep: (step) => state.navigateStep(step, { source: "system" }), historyRound,
     flowActive: computed(() => parallelFlow.hasUnfinishedRound.value),
+    flowOwnership: computed(() => Boolean(parallelFlow.flow.value)),
     currentRoundStatus,
     resultPlatformFilter,
     uncertainCount: computed(() => groups.value.uncertain.length),
@@ -479,6 +483,7 @@ const roundFlow = reactive(useScreenRoundFlow({
   },
 }));
 attachRoundFlow(deps, roundFlow);
+const instanceActions = useDiscoveryInstanceActions({ parallel: parallelFlow, round: roundFlow, finish: execution.finishPausedTask, items: () => [...flowPresentation.scrapeItems.value, ...flowPresentation.screenItems.value], refreshResults: results.loadLatestResult, notify: workflow.notify });
 const isNarrowSearchLayout = useNarrowSearchLayout();
 watch([searchPanelsOpen, advancedPanelsOpen], ([newS, newA], [oldS, oldA]) => {
   if (isNarrowSearchLayout.value) return;
@@ -844,7 +849,7 @@ watch(restoredTaskHint, (value) => {
           </div>
           </div>
         </CollapsibleCard>
-        <ParallelPlatformProgress v-if="parallelMode && flowPresentation.scrapeItems.value.length" :items="flowPresentation.scrapeItems.value" :busy-platform="parallelFlow.operatingPlatform.value" :stale="parallelFlow.stale.value" :finish-busy="finishSaveBusy" @action="parallelFlow.operateTrack" @finish="finishPausedTask" />
+        <ParallelPlatformProgress v-if="parallelMode && flowPresentation.scrapeItems.value.length" :items="flowPresentation.scrapeItems.value" :busy-actions="instanceActions.busy" :stale="parallelFlow.stale.value" @action="instanceActions.operate" @finish="instanceActions.finish" />
         <TaskProgress v-if="!parallelMode" :snapshot="scrapeSnapshot" kind="scrape" :task-id="scrapeTaskId" :user-finished="finishedPartial" />
         <div
           v-if="loginGuide.visible"
@@ -968,7 +973,7 @@ watch(restoredTaskHint, (value) => {
           </div>
         </CollapsibleCard>
         <ContinuePlatformGuide v-if="!historyMode && roundFlow.continueGuide" :guide="roundFlow.continueGuide" @choose="roundFlow.chooseContinuePlatform" @cancel="roundFlow.cancelContinueGuide" />
-        <ParallelPlatformProgress v-if="parallelMode && flowPresentation.screenItems.value.length" :items="flowPresentation.screenItems.value" :busy-platform="parallelFlow.operatingPlatform.value" :stale="parallelFlow.stale.value" :finish-busy="finishSaveBusy" @action="parallelFlow.operateTrack" @finish="finishPausedTask" />
+        <ParallelPlatformProgress v-if="parallelMode && flowPresentation.screenItems.value.length" :items="flowPresentation.screenItems.value" :busy-actions="instanceActions.busy" :stale="parallelFlow.stale.value" @action="instanceActions.operate" @finish="instanceActions.finish" />
         <TaskProgress v-if="!parallelMode" :snapshot="screenSnapshot" kind="screen" :task-id="screenTaskId" :user-finished="finishedPartial" />
         <ScreenRecrawlProgress v-if="recrawlSnapshot || recrawlBusy" :snapshot="recrawlSnapshot" :task-id="recrawlTaskId" :action="roundFlow.recrawlAction" :busy="Boolean(roundFlow.busyAction)" :busy-action="roundFlow.busyAction" :busy-label="roundFlow.busyAction === 'pause-recrawl' ? '正在暂停重抓…' : ''" :show-finish-save="roundFlow.recrawlAction.kind === 'pause-recrawl' || roundFlow.recrawlAction.kind === 'continue-recrawl'" :show-cancel="roundFlow.recrawlAction.kind === 'pause-recrawl' || roundFlow.recrawlAction.kind === 'continue-recrawl'" :cancel-busy="roundFlow.busyAction === 'cancel-recrawl'" cancel-label="停止详情补抓" cancel-test-id="cancel-recrawl" @pause-recrawl="roundFlow.pauseRecrawl()" @continue-recrawl="roundFlow.continueRecrawl()" @finish-save="roundFlow.finishRecrawl()" @cancel="roundFlow.cancelRecrawl()" />
       </section>

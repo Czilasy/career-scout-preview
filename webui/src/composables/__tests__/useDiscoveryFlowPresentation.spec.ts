@@ -7,6 +7,30 @@ import type { TaskSnapshot as ApiTaskSnapshot } from "../../types";
 import { useDiscoveryState } from "../useDiscoveryState";
 import { stageStatusLabel } from "../../discovery";
 
+beforeEach(() => sessionStorage.clear());
+
+it("keeps first-observed progress order across reload without sharing it with another Flow", async () => {
+  const tracks = [
+    track({ id: "b", platform: "boss", stage: "ai", screen_run_id: "screen-b" }),
+    track({ id: "z", platform: "zhilian", stage: "ai", screen_run_id: "screen-z" }),
+  ];
+  const first = setup(tracks, { fetchTaskState: async (id) => ({
+    status: "running", progress: {}, logs: [], started_at: id === "screen-b" ? 100 : 200,
+  }) });
+  await first.presentation.refresh();
+  expect(first.presentation.screenItems.value.map((item) => item.trackId)).toEqual(["b", "z"]);
+  const resumed = { fetchTaskState: async (id: string) => ({
+    status: "completed", progress: {}, logs: [], started_at: id === "screen-b" ? 300 : 200,
+  }) };
+  const reload = setup(tracks, resumed);
+  await reload.presentation.refresh();
+  expect(reload.presentation.screenItems.value.map((item) => item.trackId)).toEqual(["b", "z"]);
+  const other = setup(tracks, resumed);
+  other.flow.value = { id: "other-flow", tracks };
+  await other.presentation.refresh();
+  expect(other.presentation.screenItems.value.map((item) => item.trackId)).toEqual(["z", "b"]);
+});
+
 // 这一行对用户说的那一句话：头部徽章与卡体都由 TaskProgress 按唯一词表算这两参，
 // 呈现层负责的是把状态定稿进 snapshot——于是断言读的就是卡真正会说的那句。
 function theRowSays(item?: { snapshot: ApiTaskSnapshot } | null): string {
@@ -38,6 +62,47 @@ function setup(tracks: FlowPresentationTrack[], deps: FlowPresentationDeps = {},
   });
   return { flow, activeStep, presentation };
 }
+
+it("046 A02: completed scrape has no action targeting the later running AI", async () => {
+  const { presentation } = setup([track({ stage: "ai", status: "running", screen_run_id: "screen-a" })], {
+    fetchTaskState: async (runId) => ({ status: runId === "scrape-a" ? "completed" : "running", progress: {}, logs: [] }),
+  });
+  await presentation.refresh();
+  const scrape = presentation.scrapeItems.value[0]!;
+  expect(scrape.snapshot.status).toBe("completed");
+  expect(scrape.action.kind).toBe("none");
+  expect(scrape.showFinishSave).toBe(false);
+  expect(scrape.showCancel).toBe(false);
+  expect(presentation.screenItems.value[0]?.action.kind).toBe("pause");
+});
+
+it("046 A03: paused Track uses authoritative recovered run capability", async () => {
+  const { presentation } = setup([track({ stage: "ai", status: "paused", screen_run_id: "screen-a" })], {
+    fetchTaskState: async (runId) => ({ status: runId === "screen-a" ? "paused" : "completed", progress: {}, logs: [] }),
+  });
+  await presentation.refresh();
+  expect(presentation.screenItems.value[0]?.action.kind).toBe("continue");
+});
+
+it("046 A03: terminal failed run offers no unsupported retry, stop or finish", async () => {
+  const { presentation } = setup([track({ stage: "ai", status: "failed", screen_run_id: "screen-a" })], {
+    fetchTaskState: async (runId) => ({ status: runId === "screen-a" ? "failed" : "completed", progress: {}, logs: [] }),
+  });
+  await presentation.refresh();
+  const item = presentation.screenItems.value[0]!;
+  expect(item.action.kind).toBe("none");
+  expect(item.showFinishSave).toBe(false);
+  expect(item.showCancel).toBe(false);
+});
+
+it("046 A03: a failed Track cannot resume even if a historical run projects paused", async () => {
+  const { presentation } = setup([track({ stage: "ai", status: "failed", screen_run_id: "screen-a" })], {
+    fetchTaskState: async (runId) => ({ status: runId === "screen-a" ? "paused" : "completed", progress: {}, logs: [] }),
+  });
+  await presentation.refresh();
+  expect(presentation.screenItems.value[0]?.action.kind).toBe("none");
+  expect(presentation.screenItems.value[0]?.snapshot.status).toBe("failed");
+});
 
 it("fetches real task state for each visible run and preserves scrape after AI starts", async () => {
   const calls: string[] = [];

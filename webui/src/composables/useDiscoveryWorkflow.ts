@@ -37,7 +37,8 @@ function isPlatformValue(value: unknown): value is Platform {
 function isCompletedWorkflowSnapshot(saved: Record<string, any>): boolean {
   // 只有已经展示过结果页、且快照带有结果，才把 sessionStorage 的 unfinished
   // 标记视为过期的完成态快照；02/03 页的半截现场仍按未完成流程恢复。
-  if (saved.activeStep !== "results" || saved.resultLoaded === false) return false;
+  if (saved.activeStep !== "results" && !saved.completed && !saved.resultsPageSeen) return false;
+  if (saved.resultLoaded === false) return false;
   if (!saved.pipelineResult || typeof saved.pipelineResult !== "object") return false;
   if (saved.pausedRunId || saved.interruptedRunId) return false;
   // Spec041：已抓取未筛选轮只是先看一眼结果，流程未结束；刷新要回到该现场，
@@ -258,8 +259,7 @@ function persistWorkflowState(): void {
   };
   // 完成态：结果页现场要留下（刷新原地接回）；没有结果的完成标记仍清掉。
   if (workflowIsFinished() || isCompletedWorkflowSnapshot(snapshot)) {
-    const restorable = activeStep.value === "results"
-      && resultLoaded.value
+    const restorable = resultLoaded.value
       && Boolean(pipelineResult.value)
       && !scrapeBusy.value && !screenBusy.value && !recrawlBusy.value
       && !pausedRunId.value && !interruptedRunId.value;
@@ -400,7 +400,7 @@ function restoreWorkflowStateInner(): void {
 }
 
 
-function restoreSaved02State(): void {
+function restoreSaved02State(options?: { preserveResult?: boolean }): void {
   const saved = restoredWorkflowSnapshot.value;
   if (!saved || resultsPageSeen.value) return;
   // 任务接口只负责恢复后台任务状态；02 页的用户草稿和停留步骤以本地快照为准。
@@ -413,11 +413,13 @@ function restoreSaved02State(): void {
   }
   profileSummary.value = String(saved.profileSummary || "");
   profileFacts.value = saved.profileFacts && typeof saved.profileFacts === "object" ? saved.profileFacts : {};
-  scrapeCompleted.value = Boolean(saved.scrapeCompleted);
-  pipelineResult.value = saved.pipelineResult || null;
-  pipelineResultRunId.value = String(saved.pipelineResultRunId || "");
-  currentRoundStatus.value = String(saved.currentRoundStatus || "");
-  resultLoaded.value = Boolean(saved.resultLoaded);
+  if (!options?.preserveResult) {
+    scrapeCompleted.value = Boolean(saved.scrapeCompleted);
+    pipelineResult.value = saved.pipelineResult || null;
+    pipelineResultRunId.value = String(saved.pipelineResultRunId || "");
+    currentRoundStatus.value = String(saved.currentRoundStatus || "");
+    resultLoaded.value = Boolean(saved.resultLoaded);
+  }
   if (saved.activeStep) state.navigateStep(String(saved.activeStep), { source: "restore" });
   // 恢复 02/03 页时面板默认关闭：任务运行中/完成后不自动展开，
   // 只有简历分析完成（analysisReady watch）才自动打开一次。

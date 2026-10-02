@@ -383,7 +383,7 @@ class FlowService:
             status=status,
         )
 
-    def operate_track(self, *, flow_id, platform, profile_id, action) -> dict:
+    def operate_track(self, *, flow_id, platform, profile_id, action, expected_run_id=None) -> dict:
         action = str(action or "").strip().lower()
         platform = str(platform or "").strip().lower()
         target_status = {
@@ -400,6 +400,9 @@ class FlowService:
         )
         if track is None:
             raise KeyError(f"{flow_id}:{platform}")
+        from webui.flow_task_actions import assert_action_target
+
+        assert_action_target(track, expected_run_id)
         if action == "pause" and self.track_finalizing is not None:
             if self.track_finalizing(flow, track):
                 raise FlowConflictError("finalizing")

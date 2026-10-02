@@ -72,6 +72,50 @@ describe("useDiscoveryTasks 开新一轮现场归档（Spec041 返工）", () =>
     sessionStorage.clear();
   });
 
+  it("uses authoritative Flow cancellation targets instead of cancelling completed owned stage ids", async () => {
+    const state = makeState({
+      activeStep: ref("results"), scrapeTaskId: ref("completed-scrape"),
+      screenTaskId: ref("completed-screen"),
+      scrapeSnapshot: ref({ status: "completed", progress: {}, logs: [] }),
+    });
+    const deps = makeDeps({
+      getFlowTaskCancellationPlan: async () => ({
+        ownedIds: ["completed-scrape", "completed-screen"], targetIds: [], stale: false,
+      }),
+    } as Partial<TasksNeeds>);
+    const tasks = useDiscoveryTasks(state, deps);
+
+    expect(await tasks.resetWorkflow()).toBe(true);
+    expect(apiRequestMock).not.toHaveBeenCalled();
+    expect(deps.clearLatestResult).toHaveBeenCalled();
+    expect(state.activeStep.value).toBe("upload");
+  });
+
+  it("cancels only the current active Flow stage and retains strict cancellation failure gates", async () => {
+    const state = makeState({ activeStep: ref("results"), scrapeTaskId: ref("old-scrape") });
+    const deps = makeDeps({
+      getFlowTaskCancellationPlan: async () => ({
+        ownedIds: ["old-scrape", "current-screen", "failed-sibling"], targetIds: ["current-screen"], stale: false,
+      }),
+    } as Partial<TasksNeeds>);
+    apiRequestMock.mockRejectedValue(new Error("active cancellation rejected"));
+    const tasks = useDiscoveryTasks(state, deps);
+
+    expect(await tasks.resetWorkflow()).toBe(false);
+    expect(apiRequestMock.mock.calls).toEqual([["/api/task/cancel/current-screen", { method: "POST" }]]);
+    expect(deps.clearLatestResult).not.toHaveBeenCalled();
+  });
+
+  it("blocks reset when the authoritative Flow cancellation plan is stale", async () => {
+    const state = makeState({ activeStep: ref("results") });
+    const deps = makeDeps({
+      getFlowTaskCancellationPlan: async () => ({ ownedIds: [], targetIds: [], stale: true }),
+    } as Partial<TasksNeeds>);
+    const tasks = useDiscoveryTasks(state, deps);
+    expect(await tasks.resetWorkflow()).toBe(false);
+    expect(deps.clearLatestResult).not.toHaveBeenCalled();
+  });
+
   it("任务状态查询一律带当前画像（后端口径：跨画像按不存在处理）", async () => {
     const state = makeState();
     const deps = makeDeps();
@@ -280,6 +324,25 @@ describe("抓取暂停占用与轮询保护", () => {
     await tasks.pollTask("scrape-flow-owned", "scrape");
 
     expect(deps.startAiScreen).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("refreshes single-Flow ownership before handing a completed scrape to its existing AI worker (auto_screen=%s)", async (autoScreen) => {
+    const state = makeState();
+    state.autoScreenArmed.value = autoScreen;
+    state.scrapeTaskId.value = "single-scrape";
+    let owned = false;
+    const deps = { ...makeDeps(),
+      isFlowOwnedScrapeTask: () => owned,
+      refreshFlowOwnership: vi.fn(async () => { owned = true; return { selection: "zhilian" as const }; }),
+    };
+    apiRequestMock.mockResolvedValue({ status: "completed", progress: {}, logs: [], scraped_count: 3, auto_screen: autoScreen });
+
+    await useDiscoveryTasks(state, deps).pollTask("single-scrape", "scrape");
+
+    expect(deps.refreshFlowOwnership).toHaveBeenCalledOnce();
+    expect(deps.restoreRunningTask).toHaveBeenCalledOnce();
+    expect(deps.startAiScreen).not.toHaveBeenCalled();
+    expect(deps.setPipelineResult).not.toHaveBeenCalled();
   });
 });
 

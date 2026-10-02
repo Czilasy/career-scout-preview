@@ -73,7 +73,7 @@ export interface DiscoveryFlowCoordinatorOptions {
   abandonRound: () => Promise<boolean>;
   maybeAutoStartNewRound: () => Promise<boolean>;
   restoreWorkflowState: () => unknown;
-  restoreSaved02State: () => unknown;
+  restoreSaved02State: (options?: { preserveResult?: boolean }) => unknown;
   loadAdvancedSettings: () => unknown;
   loadFilterLabels: () => unknown;
   loadCityCatalog: () => unknown;
@@ -179,23 +179,7 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
     return true;
   }
 
-  // 历史列表行只说用户能感知的一件事：这一轮的条件已经冻结、按当时条件跑。
-  // 原始 JSON、内部映射版本号与英文字段码都不属于列表行（它们既读不懂，又会整坨
-  // 成为该轮按钮的可访问名）；具体冻结了哪些条件留在点开该轮后的详情里。
-  function frozenFlowTrackMessage(track: (typeof state.historyStore.flowItems.value)[number]["tracks"][number]): string {
-    const raw = track.confirmed_filters_snapshot;
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return "";
-    if (!Object.keys(raw).length) return "";
-    return "筛选条件已按当时冻结";
-  }
-
-  const historyFlowItems = computed(() => state.historyStore.flowItems.value.map((flowItem) => ({
-    ...flowItem,
-    tracks: flowItem.tracks.map((track) => {
-      const frozen = frozenFlowTrackMessage(track);
-      return frozen ? { ...track, message: [track.message, frozen].filter(Boolean).join(" · ") } : track;
-    }),
-  })));
+  const historyFlowItems = computed(() => state.historyStore.flowItems.value);
 
   function drainFlowPresentationNotices(): void {
     let notice = flowPresentation.consumeNotice();
@@ -613,7 +597,7 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
 
   function resetFlowNavigationProjection(): void {
     restoreNavigationPending = false;
-    flow.restore(null);
+    flow.resetForNewRound();
     flow.resetConditionState();
     flowPresentation.resetNavigation();
     state.setFlowReachableSteps(null);
@@ -679,7 +663,7 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
       }
     }).finally(() => {
       if (!isCurrent(profileRestoreIntent)) return;
-      options.restoreSaved02State();
+      options.restoreSaved02State({ preserveResult: profileFlowRecoveryStatus === "flow" });
       // SPEC 046 状态词表：画像下没有 Flow 时，本轮若仍未结束（含已暂停）由
       // legacy 单平台现场接管，不得留在并行模式——这里问的是问题 B，不是判活。
       if (profileFlowRecoveryStatus === "empty" && hasUnfinishedRound(state)) parallelMode.value = false;

@@ -139,12 +139,12 @@ describe("ParallelPlatformProgress", () => {
     });
 
     await row(wrapper, "boss").get('[data-testid="pause-scrape"]').trigger("click");
-    expect(wrapper.emitted("action")).toEqual([["boss", "pause-scrape"]] as never);
+    expect(wrapper.emitted("action")).toEqual([["boss", "pause-scrape", "run-boss"]] as never);
 
     await row(wrapper, "zhilian").get('[data-testid="continue-scrape"]').trigger("click");
     expect(wrapper.emitted("action")).toEqual([
-      ["boss", "pause-scrape"],
-      ["zhilian", "continue-scrape"],
+      ["boss", "pause-scrape", "run-boss"],
+      ["zhilian", "continue-scrape", "run-zhilian"],
     ] as never);
     wrapper.unmount();
   });
@@ -157,7 +157,7 @@ describe("ParallelPlatformProgress", () => {
     });
 
     await row(wrapper, "zhilian").get('[data-testid="parallel-track-zhilian-finish-save"]').trigger("click");
-    expect(wrapper.emitted("finish")).toEqual([["scrape-zhilian"]] as never);
+    expect(wrapper.emitted("finish")).toEqual([["scrape-zhilian", "zhilian", "scrape"]] as never);
     expect(wrapper.emitted("action")).toBeUndefined();
     wrapper.unmount();
   });
@@ -174,7 +174,7 @@ describe("ParallelPlatformProgress", () => {
 
     expect(row(wrapper, "boss").get('[data-testid="parallel-track-boss-cancel"]').text()).toContain("终止本轨");
     await row(wrapper, "boss").get('[data-testid="parallel-track-boss-cancel"]').trigger("click");
-    expect(wrapper.emitted("action")).toEqual([["boss", "cancel"]] as never);
+    expect(wrapper.emitted("action")).toEqual([["boss", "cancel", "run-boss"]] as never);
     wrapper.unmount();
   });
 
@@ -251,8 +251,8 @@ describe("ParallelPlatformProgress", () => {
 
     await finish.trigger("click");
     await cancel.trigger("click");
-    expect(wrapper.emitted("finish")).toEqual([["run-boss"]] as never);
-    expect(wrapper.emitted("action")).toEqual([["boss", "cancel"]] as never);
+    expect(wrapper.emitted("finish")).toEqual([["run-boss", "boss", "scrape"]] as never);
+    expect(wrapper.emitted("action")).toEqual([["boss", "cancel", "run-boss"]] as never);
     wrapper.unmount();
   });
 

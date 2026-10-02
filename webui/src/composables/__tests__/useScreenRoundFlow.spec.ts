@@ -83,6 +83,38 @@ beforeEach(() => {
   apiRequestMock.mockReset();
 });
 
+it.each(["pause", "finish"] as const)("046 A04: %s batch choice stays bound to the clicked instance", async (kind) => {
+  const deps = makeDeps();
+  deps.refs.screenSnapshot.value = { status: "running", progress: { stage: "ai_fine" } };
+  const targetSnapshot = ref({ status: "running", progress: { stage: "fetch_jd", jd_batch: { current: 2, total: 5 } } });
+  const execute = vi.fn(async () => {});
+  const flow = useScreenRoundFlow(deps);
+  await flow.requestInstanceAction(kind, { runId: "target-run", snapshot: () => targetSnapshot.value, execute });
+  expect(flow.pauseDialogOpen.value).toBe(true);
+  expect(flow.pauseBatchInfo.value).toEqual({ current: 2, total: 5 });
+  expect(execute).not.toHaveBeenCalled();
+  await flow.confirmPauseChoice("graceful");
+  expect(execute).toHaveBeenCalledExactlyOnceWith("graceful");
+  expect(deps.api.finishPausedTask).not.toHaveBeenCalled();
+  expect(apiRequestMock).not.toHaveBeenCalled();
+});
+
+it("046 A04: instance choice closes when that batch ends, ignoring sibling updates", async () => {
+  const deps = makeDeps();
+  const targetSnapshot = ref<any>({ status: "running", progress: { stage: "fetch_jd", jd_batch: { current: 2, total: 5 } } });
+  const execute = vi.fn(async () => {});
+  const flow = useScreenRoundFlow(deps);
+  await flow.requestInstanceAction("pause", { runId: "target-run", snapshot: () => targetSnapshot.value, execute });
+  deps.refs.screenSnapshot.value = { status: "completed" };
+  await flushPromises();
+  expect(flow.pauseDialogOpen.value).toBe(true);
+  targetSnapshot.value = { status: "completed", progress: {} };
+  await flushPromises();
+  expect(flow.pauseDialogOpen.value).toBe(false);
+  await flow.confirmPauseChoice("immediate");
+  expect(execute).not.toHaveBeenCalled();
+});
+
 describe("useScreenRoundFlow", () => {
   it("restores the full round context and confirms the profile", () => {
     const { refs, api } = makeDeps();
@@ -427,6 +459,30 @@ describe("useScreenRoundFlow", () => {
 
     expect(result).toBe(false);
     expect(api.resetWorkflow).toHaveBeenCalled();
+  });
+
+  it("046: a closed Flow owns cleanup despite stale paused legacy snapshots", async () => {
+    const { refs, api } = makeDeps();
+    refs.scrapeSnapshot.value = { status: "paused" };
+    refs.pausedRunId.value = "old-owned-run";
+    const flow = useScreenRoundFlow({
+      refs: { ...refs, flowOwnership: ref(true), flowActive: ref(false) }, api,
+    });
+
+    expect(await flow.confirmNewRound()).toBe(true);
+    expect(api.resetWorkflow).toHaveBeenCalledOnce();
+    expect(api.notify).not.toHaveBeenCalled();
+  });
+
+  it("046: a paused legacy run still blocks reset without Flow ownership", async () => {
+    const { refs, api } = makeDeps();
+    refs.scrapeSnapshot.value = { status: "paused" };
+    const flow = useScreenRoundFlow({
+      refs: { ...refs, flowOwnership: ref(false), flowActive: ref(false) }, api,
+    });
+
+    expect(await flow.confirmNewRound()).toBe(false);
+    expect(api.resetWorkflow).not.toHaveBeenCalled();
   });
 
   it.each([

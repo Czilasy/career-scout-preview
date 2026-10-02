@@ -49,6 +49,14 @@ import {
   type ScrapePrimaryAction,
 } from "../screenFlow";
 
+export type FinishTaskResponse = CleanupActionResponse & {
+  result?: PipelineResult;
+  snapshot_run_id?: string;
+  scrape_task_id?: string;
+  platform?: Platform;
+  waited_for_batch?: boolean;
+};
+
 type CleanupActionResponse = {
   ok?: boolean;
   error?: string;
@@ -1051,18 +1059,23 @@ async function continueAiScreen(platform?: Platform) {
 // 切片7：统一取消 paused 任务（FR-024）。
 
 
-async function finishPausedTask(runId: string, options?: { waitForBatch?: boolean }) {
-  if (!runId || finishSaveBusy.value || cancelBusy.value || scrapeActionBusy.value) return;
+async function finishPausedTask(runId: string, options?: {
+  waitForBatch?: boolean;
+  instance?: { busy: Ref<boolean>; onSaved: (data: FinishTaskResponse) => Promise<void> };
+}) {
+  const instance = options?.instance;
+  const busy = instance?.busy || finishSaveBusy;
+  if (!runId || busy.value || (!instance && (cancelBusy.value || scrapeActionBusy.value))) return;
   const waitForBatch = Boolean(options?.waitForBatch);
   // 等批次收尾时保持轮询：用户能看到当前批还在跑，不是卡死；
   // 立即保存则先停轮询，避免旧状态在保存完成后覆盖新快照。
-  if (!waitForBatch && pollTimer.value) {
+  if (!instance && !waitForBatch && pollTimer.value) {
     window.clearTimeout(pollTimer.value);
     pollTimer.value = undefined;
   }
-  finishSaveBusy.value = true;
+  busy.value = true;
   try {
-    if (waitForBatch) {
+    if (!instance && waitForBatch) {
       const waitingMessage = "结束保存：正在等当前批次收尾后保存…";
       if (screenSnapshot.value) {
         screenSnapshot.value = {
@@ -1077,19 +1090,18 @@ async function finishPausedTask(runId: string, options?: { waitForBatch?: boolea
         };
       }
     }
-    const data = await apiRequest<{
-      result?: PipelineResult;
-      snapshot_run_id?: string;
-      scrape_task_id?: string;
-      platform?: Platform;
-      waited_for_batch?: boolean;
-    } & CleanupActionResponse>(
+    const data = await apiRequest<FinishTaskResponse>(
       `/api/task/finish/${encodeURIComponent(runId)}`,
       waitForBatch
         ? { method: "POST", json: { wait_for_batch: true } }
         : { method: "POST" },
     );
     const cleanupError = cleanupFailureMessage(data, "finish");
+    if (instance) {
+      await instance.onSaved(data);
+      deps.notify(cleanupError || "任务已结束，已完成结果已保存", cleanupError ? "error" : "success");
+      return;
+    }
     scrapeBusy.value = false;
     screenBusy.value = false;
     recrawlBusy.value = false;
@@ -1158,7 +1170,7 @@ async function finishPausedTask(runId: string, options?: { waitForBatch?: boolea
     deps.notify(errorMessage(error, "结束任务失败"), "error");
   }
   finally {
-    finishSaveBusy.value = false;
+    busy.value = false;
   }
 }
 

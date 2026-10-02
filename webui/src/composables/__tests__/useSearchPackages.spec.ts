@@ -219,6 +219,26 @@ describe("useSearchPackages 保存（US1）", () => {
     expect(second.api.currentPackageId.value).toBe("pkg-2");
   });
 
+  it("automatic package identity recovery preserves an already restored edited round draft", async () => {
+    const context = { profileId: ref("profile-edited-round"), roundKey: ref("round-1"), analysisKey: ref(0) };
+    const first = setupWithContext(context);
+    apiRequestMock.mockResolvedValueOnce(packageBody());
+    await first.api.selectPackage("pkg-1");
+    apiRequestMock.mockResolvedValueOnce(packageBody());
+    const restored = setupWithContext(context, {
+      analysisReady: ref(true), keywords: ref([{ word: "AI开发助理", recommended: false }]),
+      selectedKeywords: ref(["AI开发助理"]), cityText: ref("东莞"),
+    });
+    await flushPromises();
+    expect(restored.api.currentPackageId.value).toBe("pkg-1");
+    expect(restored.refs.selectedKeywords.value).toEqual(["AI开发助理"]);
+    expect(restored.refs.cityText.value).toBe("东莞");
+    expect(restored.hooks.persistDraft).not.toHaveBeenCalled();
+    apiRequestMock.mockResolvedValueOnce(packageBody());
+    await restored.api.selectPackage("pkg-1");
+    expect(restored.refs.cityText.value).toBe(packageBody().city.text);
+  });
+
   it("重挂载配置包 GET 失败或不完整时不恢复身份，保存改走 POST", async () => {
     const context = { profileId: ref("profile-restore-fail"), roundKey: ref("round-1"), analysisKey: ref(0) };
     const first = setupWithContext(context);

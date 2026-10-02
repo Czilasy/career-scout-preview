@@ -84,7 +84,8 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
     _whitebox_ref = None
     if _whitebox is not None:
         try:
-            _whitebox_ref = _whitebox.begin('screening', task_id, {
+            begin_evidence = _whitebox.resume if resume_from_run_id == task_id else _whitebox.begin
+            _whitebox_ref = begin_evidence('screening', task_id, {
                 'stages': ['ai_rough', 'jd_detail', 'ai_fine'],
                 'units': [
                     {'unit_key': 'ai_rough', 'unit_kind': 'ai_stage', 'stage': 'ai_rough', 'required': True},

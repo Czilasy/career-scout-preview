@@ -22,6 +22,42 @@ class WhiteboxIntegrationTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_resumed_ai_completion_uses_fresh_attempt_after_pause(self):
+        owner = "ai-paused-resume"
+        stages = ("ai_rough", "jd_detail", "ai_fine")
+        plan = {"stages": list(stages), "units": [
+            {"unit_key": key, "unit_kind": "ai_stage", "stage": key, "required": True}
+            for key in stages
+        ]}
+        ref = self.service.begin("screening", owner, plan)
+
+        def record(key, event_type, payload, *, stage=None):
+            self.service.record_for_owner("screening", owner, {
+                "idempotency_key": f"{event_type}:{key}", "event_type": event_type,
+                "occurred_at": "2026-10-02", "stage": stage or key,
+                "unit_kind": "ai_stage", "unit_key": key, "attempt_no": 1,
+                "required_evidence": True, "payload": payload,
+            })
+
+        completed = {"scope_complete": True, "returned_total_count": 10,
+                     "unit_unique_count": 10, "stop_reason": "target_reached"}
+        record("ai_rough", "scope_completed", completed)
+        record("ai_fine", "unit_incomplete", {"stop_reason": "user_paused"}, stage="ai_screen")
+        self.service.finalize(ref, lifecycle_end="operator_stop")
+        self.service.resume("screening", owner, plan)
+        record("jd_detail", "scope_completed", completed)
+        record("ai_fine", "scope_completed", completed)
+        result = self.service.finalize(ref)
+        self.assertEqual(result["conclusion"], "succeeded")
+        self.assertTrue(result["evidence_complete"])
+        units = self.store.list_whitebox_units(ref.id)
+        self.assertTrue(any(unit["unit_key"] == "ai_rough" and unit["attempt_no"] == 1
+                            and unit["status"] == "succeeded" for unit in units))
+        self.assertTrue(any(unit["unit_key"] == "ai_fine" and unit["attempt_no"] > 1
+                            and unit["status"] == "succeeded" for unit in units))
+        self.assertTrue(any(event["event_type"] == "unit_incomplete"
+                            for event in self.store.list_whitebox_events(ref.id)))
+
     def test_callers_cannot_request_success_and_report_shares_revision(self):
         ref = self.service.begin("scrape", "run-1", {
             "stages": ["scrape_list"], "units": [{"unit_key": "a", "required": True}]

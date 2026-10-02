@@ -9,6 +9,30 @@ import type { ConditionSnapshotV2 } from "../../types";
 import { ref } from "vue";
 
 describe("useDiscoveryParallelFlow", () => {
+  it("recognizes a single-platform Flow's scrape ownership too", () => {
+    const state = useDiscoveryParallelFlow({ profileId: "profile-owned" });
+    state.restore({ id: "single", profile_id: "profile-owned", selection: "zhilian", tracks: [
+      { id: "z", flow_id: "single", platform: "zhilian", status: "running", stage: "ai", scrape_run_id: "single-scrape" },
+    ] });
+    expect(state.isFlowOwnedScrapeTask("single-scrape")).toBe(true);
+    expect(state.isFlowOwnedScrapeTask("other-scrape")).toBe(false);
+  });
+  it("refreshes Flow ownership and targets only the current unfinished stage for new-round cancellation", async () => {
+    const request = vi.fn(async () => ({ flow: {
+      id: "flow-cancel-plan", profile_id: "profile-1", selection: "all", status: "running",
+      tracks: [
+        { id: "b", platform: "boss", status: "failed", stage: "scrape", scrape_run_id: "failed-scrape" },
+        { id: "z", platform: "zhilian", status: "running", stage: "ai", scrape_run_id: "completed-scrape", screen_run_id: "active-screen" },
+      ],
+    } }));
+    const state = useDiscoveryParallelFlow({ profileId: "profile-1", request: request as never });
+    const plan = await state.getFlowTaskCancellationPlan();
+    expect(request).toHaveBeenCalledWith("/api/flows/current?profile_id=profile-1");
+    expect(plan).toEqual({
+      ownedIds: ["failed-scrape", "completed-scrape", "active-screen"], targetIds: ["active-screen"], stale: false,
+    });
+    state.clearPolling();
+  });
   it("keeps platform final drafts independent and maps unified fields separately", () => {
     const flow = useDiscoveryParallelFlow({ profileId: "profile-1" });
     flow.setPlatformFilters("boss", { salary: ["406"] });

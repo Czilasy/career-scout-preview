@@ -156,6 +156,7 @@ def register_flow_routes(app, ctx):
                 platform=platform,
                 profile_id=profile_id,
                 action=action,
+                **({"expected_run_id": body["expected_run_id"]} if "expected_run_id" in body else {}),
             )
         except FlowResumeError as exc:
             return _error(

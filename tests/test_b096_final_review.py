@@ -176,6 +176,45 @@ class B096FinalWorkerReviewTests(unittest.TestCase):
         self.assertEqual(track["status"], "failed")
         self.assertIsNone(track["result_run_id"])
 
+    def test_same_run_resume_reopens_paused_evidence_and_keeps_audit(self):
+        from webui.whitebox import WhiteboxService
+
+        ctx, _flow, scrape_id, ai_id = self._context(jobs=[{"job_id": "job-1"}])
+        self.store.get_whitebox_run = TaskStore.get_whitebox_run.__get__(self.store)
+        self.store.create_screening_run(ai_id, profile_id=self.profile_id)
+        self.store.update_screening_run(ai_id, status="running")
+        plan = {
+            "stages": ["ai_rough", "jd_detail", "ai_fine"],
+            "units": [
+                {"unit_key": stage, "unit_kind": "ai_stage", "stage": stage, "required": True}
+                for stage in ("ai_rough", "jd_detail", "ai_fine")
+            ],
+        }
+        service = WhiteboxService(self.store)
+        ref = service.begin("screening", ai_id, plan, parent_owner_id=scrape_id)
+        service.record(ref, {
+            "idempotency_key": "pause-before-resume", "event_type": "unit_incomplete",
+            "occurred_at": "2026-10-02", "required_evidence": True,
+            "stage": "ai_screen", "unit_kind": "ai_stage", "unit_key": "ai_fine",
+            "payload": {"stop_reason": "user_paused"},
+        })
+        service.finalize(ref, lifecycle_end="operator_stop")
+        observed = []
+
+        def observe_resumed_evidence(*_args, **_kwargs):
+            observed.append(self.store.get_whitebox_run("screening", ai_id))
+            return None
+
+        with mock.patch("webui.ai.is_ai_available", return_value=True), mock.patch(
+            "webui.runners.ai_screen_task.run_rough_stage", side_effect=observe_resumed_evidence,
+        ):
+            run_ai_screen_task(ctx, ai_id, {}, "profile", scrape_id, resume_from_run_id=ai_id)
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0]["lifecycle_status"], "running")
+        self.assertIsNone(observed[0]["conclusion"])
+        events = self.store.list_whitebox_events(ref.id)
+        self.assertTrue(any(event["idempotency_key"] == "pause-before-resume" for event in events))
+
     def test_zero_jobs_closes_track_instead_of_leaving_running(self):
         ctx, flow, scrape_id, ai_id = self._context(jobs=[{"job_id": "job-1"}], integrity="empty")
         stage_patch, whitebox_patch, ai_patch = self._patch_worker_stages(integrity="empty")
@@ -264,6 +303,14 @@ class B096V2StructuralGuardTests(unittest.TestCase):
         "specs/046-parallel-platform-flow/v2/tasks.md",
         "tests/test_b096_flow_api.py",
         "tests/test_b096_final_review.py",
+        "webui/runners/ai_screen_task.py",
+        "webui/whitebox.py",
+        "webui/pipeline_guard.py",
+        "tests/test_pipeline_guard.py",
+        "webui/src/composables/useDiscoveryWorkflow.ts",
+        "webui/src/composables/__tests__/useDiscoveryWorkflow.spec.ts",
+        "webui/src/composables/useDiscoveryFlowCoordinator.ts",
+        "tests/test_whitebox_integration.py",
         "tests/test_b096_flow_history.py",
         "tests/test_search_packages.py",
         "tests/webui_store/test_store_migrations.py",
@@ -505,8 +552,21 @@ class B096V2StructuralGuardTests(unittest.TestCase):
             if path not in protected
             and path not in self.V2_ALLOWED_PATHS
             and path not in self.E2E_FOLLOWUP_ALLOWED_PATHS
+            and path not in self.INSTANCE_REPAIR_ALLOWED_PATHS
         )
         self.assertEqual(unexpected, [])
+
+    INSTANCE_REPAIR_ALLOWED_PATHS = frozenset({
+        # 2026-10-02 接手明确授权：046 V2 Plan 精确范围，历史哈希原样保留。
+        "webui/flow_task_actions.py",
+        "webui/src/composables/useDiscoveryInstanceActions.ts",
+        "webui/src/composables/__tests__/useDiscoveryInstanceActions.spec.ts",
+        "tests/test_b096_instance_actions.py",
+        "webui/src/screenFlow.ts",
+        "webui/src/__tests__/screenFlow.spec.ts",
+        "webui/src/composables/__tests__/useDiscoveryExecution.spec.ts",
+        "webui/src/composables/__tests__/useScreenRoundFlow.spec.ts",
+    })
 
     def test_e2e_followup_allowlist_is_exact(self):
         self.assertEqual(
@@ -560,8 +620,10 @@ class B096V2StructuralGuardTests(unittest.TestCase):
         self.assertIn('emit("action"', source)
         self.assertRegex(source, r"emit\(['\"]finish['\"]")
         self.assertIn('defineEmits(["action", "finish"])', source)
-        self.assertIn('@action="parallelFlow.operateTrack"', view)
-        self.assertIn("@finish=\"finishPausedTask\"", view)
+        self.assertIn('@action="instanceActions.operate"', view)
+        self.assertIn('@finish="instanceActions.finish"', view)
+        self.assertIn("finish: execution.finishPausedTask", view)
+        self.assertIn("round: roundFlow", view)
         # 轨道级收尾复用单平台同一条 run 级路径，不新增端点。
         self.assertNotIn("/api/flows/", source)
 

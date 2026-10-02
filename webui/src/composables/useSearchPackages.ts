@@ -341,8 +341,12 @@ export function useSearchPackages(
       }
       const snapshot = snapshotRefs();
       try {
-        applyDraft(packageDraft(validated));
-        hooks.persistDraft();
+        // 自动接回配置来源时，已恢复的本轮草稿包含用户后续编辑。
+        // 显式 selectPackage 仍按配置内容完整回填。
+        if (!refs.analysisReady?.value) {
+          applyDraft(packageDraft(validated));
+          hooks.persistDraft();
+        }
         currentPackageId.value = validated.id;
         currentPackageName.value = validated.name;
         persistCurrentIdentity();

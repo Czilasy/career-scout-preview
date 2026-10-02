@@ -29,14 +29,19 @@ const closeEl = ref<HTMLButtonElement | null>(null);
 const panelEl = ref<HTMLElement | null>(null);
 let previousFocus: HTMLElement | null = null;
 
-const activePlatform = ref<"boss" | "zhilian">("boss");
+const activePlatform = ref<"aggregate" | "boss" | "zhilian">("aggregate");
 // Flow 卡片视图只承载有 durable flow 身份的真实流程；后端会把每一条旧结果轮
 // 合成为 legacy Flow（flowItems 因此恒非空），legacy 轮必须继续走平铺轮次列表，
 // 否则 043 的「删除轮次」「查看运行日志」与计数明细会在界面上整块消失。
-const flowCardItems = computed(() => (props.flowItems || []).filter((flow) => flow.legacy !== true));
-// 真实流程已经拥有结果轮的轮次不再重复铺一份平铺行。
+const realFlowItems = computed(() => (props.flowItems || []).filter((flow) => flow.legacy !== true));
+const aggregateFlowItems = computed(() => realFlowItems.value.filter((flow) => flow.selection === "all"));
+const singlePlatformFlowItems = computed(() => realFlowItems.value.filter((flow) => flow.selection !== "all"));
+const flowCardItems = computed(() => activePlatform.value === "aggregate"
+  ? aggregateFlowItems.value
+  : singlePlatformFlowItems.value.filter((flow) => flow.selection === activePlatform.value));
+// 单平台流程保留已有流程卡；组合流程的各平台结果可在对应平台页独立查看。
 const flowOwnedRunIds = computed(() => new Set(
-  flowCardItems.value
+  singlePlatformFlowItems.value
     .flatMap((flow) => (flow.tracks || []).map((track) => flowTrackRunId(track)))
     .filter(Boolean),
 ));
@@ -44,9 +49,15 @@ const roundItems = computed(() => (props.items || []).filter((item) => !flowOwne
 const bossItems = computed(() => roundItems.value.filter((item) => item.platform === "boss"));
 const zhilianItems = computed(() => roundItems.value.filter((item) => item.platform === "zhilian"));
 const platformCounts = computed(() => ({
-  boss: bossItems.value.length,
-  zhilian: zhilianItems.value.length,
+  aggregate: aggregateFlowItems.value.length,
+  boss: bossItems.value.length + singlePlatformFlowItems.value.filter((flow) => flow.selection === "boss").length,
+  zhilian: zhilianItems.value.length + singlePlatformFlowItems.value.filter((flow) => flow.selection === "zhilian").length,
 }));
+const roundItemsById = computed(() => new Map(props.items.map((item) => [item.run_id, item])));
+
+function flowTrackHistoryItem(track: FlowHistoryTrack): HistoryRoundItem | undefined {
+  return roundItemsById.value.get(flowTrackRunId(track));
+}
 
 function flowTrackRunId(track: FlowHistoryTrack): string {
   // Only a persisted result snapshot can answer the history-detail request.
@@ -99,6 +110,8 @@ function flowResultBearingStatus(status: unknown, hasResultRound: boolean, jobCo
 // Flow 内层平台块与平铺轮次行共用同一套删除/日志事件：载荷仍是这一轮的
 // 轮次身份（run id + 抓取任务 id），不新增第二套历史动作入口。
 function flowRoundItem(track: FlowHistoryTrack): HistoryRoundItem {
+  const historyItem = flowTrackHistoryItem(track);
+  if (historyItem) return historyItem;
   const jobs = Array.isArray(track.jobs) ? track.jobs.length : 0;
   const dropped = Array.isArray(track.dropped) ? track.dropped.length : 0;
   return {
@@ -179,15 +192,6 @@ watch(() => props.open, (open) => {
   }
 }, { immediate: true });
 
-watch(roundItems, () => {
-  const hasBoss = bossItems.value.length > 0;
-  const hasZhilian = zhilianItems.value.length > 0;
-  const currentHasItems = activePlatform.value === "boss" ? hasBoss : hasZhilian;
-  if (!currentHasItems && (hasBoss || hasZhilian)) {
-    activePlatform.value = hasBoss ? "boss" : "zhilian";
-  }
-}, { immediate: true });
-
 onBeforeUnmount(() => {
   if (props.open) previousFocus?.focus();
 });
@@ -231,8 +235,7 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
         <header class="history-drawer-header">
           <div class="history-drawer-heading">
             <h2 id="history-drawer-title" tabindex="-1">历史轮次</h2>
-            <p v-if="flowCardItems.length" class="history-drawer-total">共 {{ flowCardItems.length }} 个流程</p>
-            <p v-if="roundItems.length" class="history-drawer-total">共 {{ roundItems.length }} 轮</p>
+            <p class="history-drawer-total">共 {{ platformCounts[activePlatform] }} {{ activePlatform === 'aggregate' ? '个流程' : '轮' }}</p>
           </div>
           <button
             ref="closeEl"
@@ -246,14 +249,32 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
           </button>
         </header>
 
+        <div class="history-drawer-navigation">
+          <div class="history-platform-tabs" role="tablist" aria-label="按流程与平台查看历史轮次">
+            <button
+              v-for="platform in (['aggregate', 'boss', 'zhilian'] as const)"
+              :key="platform"
+              type="button"
+              role="tab"
+              :aria-selected="activePlatform === platform"
+              :class="['history-platform-tab', { active: activePlatform === platform }]"
+              :data-testid="`history-platform-tab-${platform}`"
+              @click="activePlatform = platform"
+            >
+              <span>{{ platform === 'aggregate' ? '聚合' : platformLabel(platform) }}</span>
+              <span class="history-platform-count">{{ platformCounts[platform] }}</span>
+            </button>
+          </div>
+        </div>
+
         <div class="history-drawer-body">
           <div v-if="loading" class="history-drawer-state" data-testid="history-loading">正在加载历史轮次…</div>
           <div v-else-if="error" class="history-drawer-state history-drawer-error" role="alert" data-testid="history-error">
             <p>{{ error }}</p>
             <button class="button secondary" type="button" @click="emit('close')">关闭</button>
           </div>
-          <div v-else-if="!roundItems.length && !flowCardItems.length" class="history-drawer-state" data-testid="history-empty">
-            暂无历史轮次
+          <div v-else-if="!platformCounts[activePlatform]" class="history-drawer-state" data-testid="history-empty">
+            {{ activePlatform === 'aggregate' ? '暂无聚合流程' : `暂无${platformLabel(activePlatform)}历史轮次` }}
           </div>
           <template v-else>
             <template v-if="flowCardItems.length">
@@ -307,30 +328,35 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
                         </button>
                       </span>
                     </div>
-                    <div v-else class="history-flow-track-line">
-                      <button
-                        v-if="flowTrackRunId(track)"
-                        class="history-flow-track-button"
-                        type="button"
-                        @click="emit('open-round', flowTrackRunId(track))"
-                      >
-                        <span>{{ platformLabel(track.platform) }}</span>
-                        <span data-testid="history-flow-track-status">{{ flowTrackStatus(track) }}</span>
-                        <span>岗位 {{ Array.isArray(track.jobs) ? track.jobs.length : 0 }}</span>
-                        <span v-if="track.message" class="history-flow-track-message">{{ track.message }}</span>
-                      </button>
-                      <div v-else class="history-flow-track-button history-flow-track-button--static">
-                        <span>{{ platformLabel(track.platform) }}</span>
-                        <span data-testid="history-flow-track-status">{{ flowTrackStatus(track) }}</span>
-                        <span>岗位 {{ Array.isArray(track.jobs) ? track.jobs.length : 0 }}</span>
-                        <span v-if="track.message" class="history-flow-track-message">{{ track.message }}</span>
-                      </div>
+                    <div
+                      v-else
+                      :class="['history-round-row', 'history-flow-track-line', { 'history-flow-track-line--static': !flowTrackRunId(track) }]"
+                      :role="flowTrackRunId(track) ? 'button' : undefined"
+                      :tabindex="flowTrackRunId(track) ? 0 : undefined"
+                      @click="flowTrackRunId(track) && emit('open-round', flowTrackRunId(track))"
+                      @keydown="flowTrackRunId(track) && onRoundRowKeydown($event, flowRoundItem(track))"
+                    >
+                      <span class="history-round-head history-flow-platform">{{ platformLabel(track.platform) }}</span>
+                      <span class="history-round-status" data-testid="history-flow-track-status">{{ flowTrackStatus(track) }}</span>
+                      <span class="history-round-total" data-testid="history-round-total">
+                        共 {{ flowTrackHistoryItem(track)?.total_scraped ?? flowTrackJobCount(track) }} 个岗位
+                      </span>
+                      <span v-if="flowTrackHistoryItem(track)" class="history-round-meta" data-testid="history-round-meta">
+                        <span v-for="part in countParts(flowRoundItem(track))" :key="part.label" class="history-metric" :data-tone="part.tone">
+                          <span class="history-metric-dot" aria-hidden="true"></span>
+                          <span>{{ part.label }} {{ part.value }}</span>
+                        </span>
+                      </span>
+                      <span v-if="flowTrackHistoryItem(track)?.keyword_summary" class="history-round-keyword">
+                        {{ flowTrackHistoryItem(track)?.keyword_summary }}
+                      </span>
+                      <span v-if="track.message" class="history-flow-track-message">{{ track.message }}</span>
                       <!-- 三个入口各自按自己的依据判定：详情只认结果轮、日志认该
                            轨道的抓取任务线、删除只在确实还有可删轮次时给出。结果轮
                            被删后日志仍可看，也不再有删不掉的幽灵行。 -->
                       <span
                         v-if="track.scrape_run_id || flowTrackRunId(track)"
-                        class="history-flow-track-actions"
+                        class="history-row-actions history-flow-track-actions"
                         @click.stop
                       >
                         <button
@@ -360,27 +386,7 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
               </article>
             </template>
 
-            <template v-if="roundItems.length">
-              <div
-                class="history-platform-tabs"
-                role="tablist"
-                aria-label="按平台查看历史轮次"
-              >
-                <button
-                  v-for="platform in (['boss', 'zhilian'] as const)"
-                  :key="platform"
-                  type="button"
-                  role="tab"
-                  :aria-selected="activePlatform === platform"
-                  :class="['history-platform-tab', { active: activePlatform === platform }]"
-                  :data-testid="`history-platform-tab-${platform}`"
-                  @click="activePlatform = platform"
-                >
-                  <span>{{ platformLabel(platform) }}</span>
-                  <span class="history-platform-count">{{ platformCounts[platform] }}</span>
-                </button>
-              </div>
-
+            <template v-if="activePlatform !== 'aggregate' && roundItems.length">
               <section
                 v-for="platform in (['boss', 'zhilian'] as const)"
                 :key="platform"
@@ -546,6 +552,11 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
   overflow-x: hidden;
 }
 
+.history-drawer-navigation {
+  flex: 0 0 auto;
+  padding: 12px 16px 0;
+}
+
 .history-drawer-state {
   padding: 32px 8px;
   color: var(--text-soft);
@@ -557,11 +568,11 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
 }
 
 .history-platform-tabs {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   align-self: flex-start;
   gap: 2px;
-  margin: 0 0 10px;
+  margin: 0;
   padding: 2px;
   border: 1px solid var(--hair);
   border-radius: 8px;
@@ -572,9 +583,12 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
   appearance: none;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-width: 0;
   gap: 6px;
   min-height: 34px;
-  padding: 4px 14px;
+  padding: 4px 8px;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -638,75 +652,57 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
 
 .history-flow-card {
   display: grid;
-  gap: 8px;
+  gap: 0;
   margin: 0 0 10px;
-  padding: 10px;
+  padding: 10px 12px 0;
   border: 1px solid var(--hair);
-  border-radius: 9px;
-  background: var(--panel-2);
+  border-radius: 8px;
+  background: var(--panel);
 }
 
 .history-flow-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  color: var(--ink-2);
+  gap: 4px 8px;
+  padding-bottom: 10px;
+  color: var(--text-soft);
   font-size: 0.84rem;
 }
 
+.history-flow-time {
+  grid-column: 1;
+}
+
+.history-flow-head > .history-round-status {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  color: var(--ink-1);
+}
+
 .history-flow-track {
-  min-width: 0;
-}
-
-/* Flow 内层的确认层跟着这一层的高度自然铺开，不像整行轮次那样浮在上面。 */
-.history-flow-track .history-delete-confirm {
   position: relative;
-  inset: auto;
-  margin: 2px 0;
+  min-width: 0;
+  min-height: 92px;
+  border-top: 1px solid var(--hair);
 }
 
-.history-flow-track-line {
-  display: flex;
-  align-items: stretch;
-  gap: 6px;
+.history-flow-platform {
+  color: var(--text-soft);
+  font-size: 0.84rem;
+  font-weight: 600;
 }
 
 .history-flow-track-actions {
   display: flex;
-  flex: 0 0 auto;
   align-items: center;
   gap: 2px;
 }
 
-.history-flow-track-button {
-  display: grid;
-  grid-template-columns: auto auto 1fr;
-  gap: 7px;
-  width: 100%;
-  min-width: 0;
-  padding: 8px 9px;
-  border: 1px solid var(--hair);
-  border-radius: 7px;
-  background: var(--panel);
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.history-flow-track-button--static {
-  cursor: default;
-}
-
-.history-flow-track-button:hover {
-  border-color: var(--brand-edge);
-}
-
 .history-flow-track-message {
-  grid-column: 1 / -1;
-  color: var(--unsure-deep);
+  color: var(--text-soft);
   font-size: 0.78rem;
+  line-height: 1.5;
 }
 
 .history-round-row {
@@ -730,6 +726,18 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
 
 .history-round-row:hover {
   border-color: var(--brand-edge);
+}
+
+.history-round-row.history-flow-track-line {
+  margin: 0;
+  padding: 10px 80px 12px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.history-round-row.history-flow-track-line--static {
+  cursor: default;
 }
 
 /* 行本身可用键盘打开，焦点落点必须看得见（与平台页签同一档焦点环）。 */

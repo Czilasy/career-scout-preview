@@ -4,6 +4,7 @@ import {
   STAGE_IN_FLIGHT_STATUSES,
   TRACK_PROBLEM_STATUSES,
   TRACK_STOPPED_STATUSES,
+  TERMINAL_TRACK_STATUSES,
   UNREADABLE_STAGE_STATUS,
 } from "../discovery";
 import { deriveTrackActionBar, type SharedPrimaryAction } from "../screenFlow";
@@ -151,6 +152,7 @@ function stageStatusOf(
     return trackStatus || snapshotStatus;
   }
   if (!carriesLineState) return snapshotStatus || UNREADABLE_STAGE_STATUS;
+  if (snapshotStatus === "paused" && TERMINAL_TRACK_STATUSES.includes(trackStatus)) return trackStatus;
   if (STAGE_IN_FLIGHT_STATUSES.includes(snapshotStatus) && !ACTIVE_TRACK_STATUSES.includes(trackStatus)) {
     return trackStatus;
   }
@@ -320,6 +322,16 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
     return true;
   }
 
+  function restoreProgressOrder(id: string, kind: FlowProgressKind): Map<string, number> {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(`career-scout-flow-order:${id}:${kind}`) || "null");
+      if (Array.isArray(saved) && saved.every((key) => typeof key === "string")) {
+        return new Map(saved.map((key, index) => [key, index]));
+      }
+    } catch { /* 无可用页面存档时，仍按真实任务时间恢复。 */ }
+    return new Map();
+  }
+
   function stateFor(id: string): RuntimeState {
     if (!runtime[id]) runtime[id] = {
       hydrated: false,
@@ -328,8 +340,8 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
       unlocked: new Set(["search"]),
       seenResults: new Set(),
       seenResultProjections: new Set(),
-      scrapeOrderIndex: new Map(),
-      screenOrderIndex: new Map(),
+      scrapeOrderIndex: restoreProgressOrder(id, "scrape"),
+      screenOrderIndex: restoreProgressOrder(id, "screen"),
     };
     return runtime[id];
   }
@@ -481,8 +493,10 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
       const finishRunId = entry.runId
         || (kind === "screen" ? String(entry.track.scrape_run_id || "") : "");
       const actionBar = deriveTrackActionBar({
+        operable: ownsLineState,
+        terminal: TERMINAL_TRACK_STATUSES.includes(trackStatus),
         stage: kind,
-        status: trackStatus,
+        status: stageStatus,
         runId: entry.runId,
         finishRunId,
       });
@@ -525,6 +539,9 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
     for (const entry of pending) {
       orderIndex.set(entry.trackId, nextOrder++);
     }
+    try {
+      sessionStorage.setItem(`career-scout-flow-order:${flowId.value}:${kind}`, JSON.stringify([...orderIndex.keys()]));
+    } catch { /* 存档不可用不阻断进度、操作与结果。 */ }
     fetched.forEach((entry) => { entry.order = orderIndex.get(entry.trackId)!; });
     fetched.sort((left, right) => left.order - right.order);
     return fetched.map(({ order: _order, index: _index, ...item }) => item);

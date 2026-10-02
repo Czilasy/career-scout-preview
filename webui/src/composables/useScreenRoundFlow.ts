@@ -46,6 +46,8 @@ export interface ScreenRoundFlowDeps {
     navigateStep: (step: string) => string;
     /** B096：并行 Flow 活动 Track 占用整轮入口。 */
     flowActive?: Ref<boolean>;
+    /** Flow 归属在终结后仍存在；清理由其权威任务计划负责。 */
+    flowOwnership?: Ref<boolean>;
     currentRoundStatus: Ref<string>;
     resultPlatformFilter: Ref<"all" | Platform>;
     uncertainCount: Ref<number>;
@@ -134,6 +136,13 @@ async function readTaskState(runId: string, profileId?: string): Promise<TaskSna
   }
 }
 
+export interface InstanceActionTarget {
+  runId: string;
+  snapshot: () => TaskSnapshot | null | undefined;
+  execute: (mode: "immediate" | "graceful") => Promise<void>;
+  isCurrent?: () => boolean;
+}
+
 export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   const roundContext = ref<RoundContext | null>(null);
   const roundContexts = ref<Partial<Record<Platform, RoundContext | null>>>({});
@@ -146,6 +155,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   const pauseBatchInfo = ref<{ current: number; total: number } | null>(null);
   const pauseDialogKind = ref<"pause" | "finish">("pause");
   const pauseDialogSource = ref<"screen" | "recrawl">("screen");
+  const instanceChoice = ref<InstanceActionTarget | null>(null);
 
   const screenStatus = computed(() => {
     const ctx = roundContext.value;
@@ -202,6 +212,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
 
   const screenAction = computed<ScreenPrimaryAction>(() => {
     const action = deriveScreenPrimaryAction({
+      resumable: roundContext.value?.resumable === true,
       screenStatus: screenStatus.value,
       recrawlStatus: recrawlStatus.value,
       hasScreenRun: hasScreenRun.value,
@@ -308,8 +319,12 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     const snapshot = source === "recrawl"
       ? deps.refs.recrawlSnapshot.value
       : deps.refs.screenSnapshot.value;
+    return snapshotInJdBatch(snapshot);
+  }
+
+  function snapshotInJdBatch(snapshot: TaskSnapshot | null | undefined): boolean {
     const status = String(snapshot?.status || "");
-    if (["paused", "failed", "cancelled", "interrupted"].includes(status)) return false;
+    if (!["running", "queued", "pausing"].includes(status)) return false;
     const progress = snapshot?.progress as Record<string, unknown> | undefined;
     if (String(progress?.stage) !== "fetch_jd") return false;
     const batch = progress?.jd_batch;
@@ -336,13 +351,31 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
 
   function closePauseDialog(): void {
     pauseDialogOpen.value = false;
+    instanceChoice.value = null;
+  }
+
+  async function requestInstanceAction(kind: "pause" | "finish", target: InstanceActionTarget): Promise<void> {
+    if (pauseDialogOpen.value || target.isCurrent?.() === false) return;
+    if (!snapshotInJdBatch(target.snapshot())) {
+      await target.execute(kind === "finish" ? "immediate" : "graceful");
+      return;
+    }
+    instanceChoice.value = target;
+    pauseDialogKind.value = kind;
+    const batch = target.snapshot()?.progress?.jd_batch as { current?: number; total?: number } | undefined;
+    pauseBatchInfo.value = { current: Number(batch?.current || 0), total: Number(batch?.total || 0) };
+    pauseDialogOpen.value = true;
   }
 
   // 弹窗打开期间任务状态变化（批次完成/任务已暂停等）→ 自动关闭（竞态边界）
   watch(
-    [() => deps.refs.screenSnapshot.value, () => deps.refs.recrawlSnapshot.value],
+    [() => deps.refs.screenSnapshot.value, () => deps.refs.recrawlSnapshot.value,
+      () => instanceChoice.value?.snapshot(), () => instanceChoice.value?.isCurrent?.()],
     () => {
-      if (pauseDialogOpen.value && !inJdBatch(pauseDialogSource.value)) closePauseDialog();
+      if (!pauseDialogOpen.value) return;
+      const target = instanceChoice.value;
+      if (target ? (!snapshotInJdBatch(target.snapshot()) || target.isCurrent?.() === false)
+        : !inJdBatch(pauseDialogSource.value)) closePauseDialog();
     },
     { deep: true },
   );
@@ -460,9 +493,15 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   }
 
   async function confirmPauseChoice(mode: "immediate" | "graceful"): Promise<void> {
+    if (!pauseDialogOpen.value) return;
+    const target = instanceChoice.value;
     const kind = pauseDialogKind.value;
     const source = pauseDialogSource.value;
     closePauseDialog();
+    if (target) {
+      if (target.isCurrent?.() !== false) await target.execute(mode);
+      return;
+    }
     if (kind === "finish") {
       const finishRunId = source === "recrawl"
         ? (deps.refs.recrawlTaskId.value || deps.refs.pausedRunId.value)
@@ -738,7 +777,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   }
 
   async function confirmNewRound(): Promise<boolean> {
-    const flowOwned = Boolean(deps.refs.flowActive?.value);
+    const flowOwned = Boolean(deps.refs.flowOwnership?.value ?? deps.refs.flowActive?.value);
     // 035（真机问题②，FR-011）：未结束任务存在（含抓取运行中/暂停/中断）时，
     // 一律跳回该任务的真实进度页（抓取→02、筛选/重抓→03），不 reset、不取消、不弹窗。
     // 守卫先于 resumable 计算——历史模式 04 页入口同样被此覆盖。
@@ -806,6 +845,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     pauseScreen,
     doPause,
     confirmPauseChoice,
+    requestInstanceAction,
     closePauseDialog,
     pauseDialogOpen,
     pauseBatchInfo,

@@ -1,14 +1,65 @@
 # Implementation Plan: 多平台主流程分轨合流与统一条件映射（B096 V2）
 
-**Branch**: `codex/feature/b096-parallel-platform-flow` | **Date**: 2026-09-27 | **Spec**: [spec.md](./spec.md)
+**Branch**: `feature/parallel-platform-flow` | **Date**: 2026-09-27；2026-10-02 澄清 | **Spec**: [spec.md](./spec.md)
 
 **Input**: `specs/046-parallel-platform-flow/v2/spec.md` 与冻结映射 `contracts/filter-mapping.md`
 
 ## Summary
 
+### 当前执行方式（2026-10-02）
+
+- 当前交付状态：本轮源码修复与正式分轨合流主流程证据已收敛，交用户验收。最新前端1548条、构建与范围/尺寸检查通过；后端最终3506条的两项历史保护/卫生失败保留，未以修改基线或提交绕过。无后端相关改动不重复全量；实际运行、只读副本与未验证边界详见Tasks最终记录。
+- 用户最新确认：继续完成整个分轨合流 V2，当前仅验收源码，EXE 不需要验证。本条覆盖下文历史源码/EXE 双门禁中的 EXE 要求；正式双轨非空、两种完成顺序、实例保存/暂停批次及合流阅读现场仍按既有验收执行，不因局部修复完成而宣称整个 V2 完成。
+- 现有实现是核查起点，不从空白重新执行 V2。先按当前代码区分已符合、仍偏离与未验证项，再只修实际差距。
+- 同一套业务逻辑接收独立实例上下文；单平台使用一份，“全部”使用两份。组合模块可以管理 Flow/Track 关系和页面合流，不得复制筛选、生命周期或动作判定。
+- 进度复用 `TaskProgress.vue`，动作复用 `ScreenRoundActions.vue` 及其共享派生逻辑；组合壳只排列实例、绑定对应上下文、转发操作。仅复用外观不算完成。
+- 页面导航与结果合流可有组合协调逻辑，但平台执行、单条线的状态含义、按钮可用性与终态处理须使用共同业务入口。
+- 前一轮仅修改 V2 文档并只读核查；本次接手已获目标内实施授权，以本节下方精确修复边界为准。历史边界不得覆盖用户本次授权，提交、推送、合并和发布仍禁止。
+- 原尺寸、测试及真实源码/EXE 门禁保留。下文“新增”“当前行数”“实施前”等描述属于 2026-09-27 初始计划，不能当作今天尚未完成的任务或实时测量。
+
+### 2026-10-02 接手修复边界（当前生效）
+
+最新真实双轨返修（先红测再实施）：R017 自动恢复常用配置重新覆盖用户在该配置基础上修改的本轮草稿（1×1 回退5×2），且共享 Workflow 在完成后返回02/03时清掉会话。精确允许 `webui/src/composables/useSearchPackages.ts` 及既有测试，仅自动恢复包身份时保留已经恢复的可用草稿，用户显式选择配置仍原样应用；允许现有 Workflow/测试保留完成轮的返回页与草稿。R018 首次观察轨道顺序仅存在内存，刷新改按续跑时间重排；允许现有 FlowPresentation/测试将已观察顺序作为按Flow隔离的页面现场保存，任务/结果事实仍取后台。上述共享文件不引入第二套平台业务、不改变后台、数据库或外部配置；范围门禁仅增精确路径，不改保护哈希。验收为正式原现场重新设置短草稿后刷新02/03保持、不同Flow顺序隔离及双轨结果阅读现场回归。
+
+用户本轮已明确授权 V2-A01–A04 的代码与直接回归修复，覆盖前一轮仅文档边界；沿用现有分支，禁止提交、推送、合并、发布及正式数据修补。以下精确清单覆盖历史禁写条目中本轮直接相关的部分，其余历史边界保留。
+
+- 允许产品文件：`webui/src/composables/useDiscoveryExecution.ts`、`useScreenRoundFlow.ts`、`useDiscoveryParallelFlow.ts`、`useDiscoveryFlowPresentation.ts`、`webui/src/screenFlow.ts`、`webui/src/components/ParallelPlatformProgress.vue`、`webui/src/views/DiscoveryView.vue`、`webui/flow_api.py`、`flow_service.py`、`flow_task_coordinator.py`。
+- 允许新增：`webui/src/composables/useDiscoveryInstanceActions.ts`（实例身份、忙态、调用及合流协调）；`webui/flow_task_actions.py`（共用能力校验与既有 run 动作接线）；对应前端测试及 `tests/test_b096_instance_actions.py`。
+- 直接共享边界补充：`webui/src/discovery.ts` 只登记唯一轨道终态词表；`webui/src/views/__tests__/DiscoveryRecovery.spec.ts` 属通知/结果合流直接回归（无需改产品恢复架构）。
+- 真实运行后的直接合流返修：允许 `webui/src/composables/useDiscoveryResults.ts` 及其既有测试；共用 preservePresentation 合并按身份保留位置、采用最新判定、移除已淘汰的旧待确认对象；Flow 结果不得按先到平台改写共同草稿。只修 FR-014/015 的结果事实与阅读现场，不改筛选策略或数据库。
+- 新轮直接回归返修：允许 `webui/src/composables/useDiscoveryTasks.ts`、`discoveryDeps.ts` 及既有测试；组合层先刷新权威 Flow，提供已归属 run 与当前未终结操作目标，共用新轮清理只取消这些目标，不向完成阶段发取消。保留 legacy 混合投影严格门禁；不改 `store_flow_state.py`，不修补正式 search_runs 历史状态。
+- 允许测试：上述共享模块既有测试、`webui/src/__tests__/screenFlow.spec.ts`、`webui/src/views/__tests__/DiscoveryView.spec.ts`、`tests/test_b096_flow_api.py`、`tests/test_b096_flow_service.py`、`tests/test_b096_final_review.py`（只增本輪精确路径名单，不改历史哈希、数量或断言）。
+- 允许文档：046 INDEX、V2 Plan/Tasks/Spec/数据模型/页面契约/Quickstart、宪法（只登记新模块）、README/CHANGELOG（仅本轮用户可感知修复）。
+- 禁止：`design/**`、V1、V3、所有 `store_flow*.py`（本轮不需修改，不触发拆分）、平台树枝、runner、筛选算法、数据结构/迁移、发布配置、版本文件、main 工作目录与正式数据。
+- 引用方向：view → 实例协调 → 共享执行/批次选择与既有 API；阶段投影 → 共享动作派生；Flow API → service → 动作能力/既有 run 入口 → store。组合层只刷新共同 Flow 和合流结果，不写单轨结果到全局现场。
+- 验收用例：一轨保存另一轨仍运行；旧抓取卡无后续 AI 操作；恢复失败仅沿既有可恢复门禁；批次弹窗固定实例/run 且立即/等批参数一致；过期点击不操作新 run；合流保持分类/排序/阅读现场；两种顺序、返回/刷新/冷启动/新轮与单平台回归。
+- 开发命令：`npm test -- <直接相关测试路径>`（webui）；`uv run python -m unittest tests.test_b096_instance_actions tests.test_b096_flow_api tests.test_b096_flow_service tests.test_task_pause_support`。最终全量只在本轮聚焦收敛后运行一次，真实源码、副本冷启动和 EXE 分别报告。
+
+### 初始实施方案（历史，保留追溯）
+
+2026-10-02 现状核查已记录在 `tasks.md`：核心 worker、继续入口及进度/动作组件已有复用，保留；剩余重点为实例级结束保存、阶段与操作目标对齐、失败动作门禁一致、批次选择复用。后续按该文件 V2-A01–A04 的顺序聚焦修复，不按下面初始方案重新建设全部能力。涉及历史禁写模块的路径目前仅为修复候选，不自动扩展写入授权。
+
 在 V1 已完成的 Flow/Track、双平台执行、独立操作、历史和结果归属之上做增量修复，不重建后台流程。前端新增两个深模块：一处维护“全部”六类条件及确定性平台映射，一处把持久化 Track 事实投影成页面解锁、自动前进、真实任务进度和结果加入事件。现有 `ParallelPlatformProgress.vue` 降为原 `TaskProgress.vue` 的纵向编排壳；现有结果加载增加“同轮合流时保留阅读现场”模式。常用配置增加版本化条件快照；运行历史复用 `flow_tracks.confirmed_filters_snapshot` 保存 V2 快照信封，不新增 Flow 表结构。
 
 ## Technical Context
+
+### 2026-10-02 继续真实验收
+
+- R016 第二次定位：新副本完成轮可到04，正式旧浏览器刷新仍锁04；共享 `restoreSaved02State` 在 Flow/结果水合之后再次把旧快照的 `resultLoaded=false` 和结果载荷写回。精确补充 `webui/src/composables/useDiscoveryWorkflow.ts` 及既有测试、`useDiscoveryFlowCoordinator.ts` 和已允许 ParallelFlow：共享草稿恢复接受“保留权威结果”上下文，Flow 恢复后仅还原草稿/用户落点，不覆盖当前结果；无 Flow 仍保持 legacy 语义。引用为 Flow 恢复 → 共享 Workflow 恢复，结果事实继续由既有 Results 维护；不改 State、后台或现场存储结构。针对缓存覆盖当前结果写红测，再测正式原现场刷新和新单轨自动完成。
+
+- R016 正式短任务 completed/succeeded 六分钟稳定、Flow done 且已有结果，页面却停在 03/04 disabled。实际从“单独抓取”启动，auto_screen=false，但权威 Flow 已运行 AI；前端交接仍以旧自动筛选标记判定是否接回。精确允许现有 `useDiscoveryTasks.ts`、其既有测试、`DiscoveryView.spec.ts` 修复单轨 Flow 的共享交接，必要时仅补 `useDiscoveryFlowCoordinator.ts` 的同 Flow 状态变化订阅及既有视图测试；不修改后端、筛选策略、State 或接口。先写针对该真实条件的失败用例，实例操作及全局 legacy 自动筛选路径保持原门禁。引用仍为 Tasks → 已有 Flow 水合/restoreRunningTask/结果加载；不提交第二个 AI 任务。验收为真实“单独抓取”已有 AI 接回、完成后04可见，刷新/冷启动读取同一结果。
+
+- R015 运行证据更正：完成 AI 在 05:29:47 已 finalized succeeded，遗留 JD 批次在 05:33:19/39 继续写 stall/fallback/unit_failed；正式库与冷启动副本事件相同，不是启动恢复写坏。精确允许 `webui/pipeline_guard.py`（430 行）和 `tests/test_pipeline_guard.py`、最终范围测试路径名单；共享监控在杀进程、记录失败或暂停前核对对应任务的内存与持久状态，已暂停或已终结批次退出监控。引用方向仍为各 worker → 共享 guard → 既有状态查询/白箱；不修改超限 pipeline_exec_details、store、归约器、正式历史记录。失败用例覆盖完成后遗留批次、stall 后任务终结、持久终态与旧内存冲突；原活体失联暂停/重试保持。新真实任务及新副本冷启动重新取证，旧受污染 run 不修补。
+
+- 用户再次明确“开始吧”；继续 T055–T057 的未验证项，已有通过自动化不机械重跑。
+- 本轮先只增量维护 V2 Plan/Tasks 的实际证据；通过正式网页使用既有画像、账号与条件执行，浏览器恢复也仅调用应用自带入口。副本仅只读备份正式库并在副本设置 test。
+- 若出现产品缺陷，先定位、写失败用例，再在上方既有精确允许范围内修复；禁止绕过状态门禁、操作外部平台或修补正式库。现有平台树枝、store、版本与发布文件仍禁止修改。
+- 未通过的主流程、冷启动和 EXE 分开报告；环境缺失或无法确认平台状态不能算通过。
+- 正式新轮追加失败：Flow 两轨 stopped，但共享动作入口以 flowActive 判断“属于 Flow”，于是终结后误用旧暂停现场阻断新轮。仅在既有 `useScreenRoundFlow.ts` 接收 Flow 归属投影、`DiscoveryView.vue` 薄接线及对应既有测试修复；保持单平台 legacy 暂停守卫与共享取消/归档门禁，不修改超限 State/store 文件。失败用例覆盖终结 Flow 的旧暂停投影和无 Flow 的真实暂停。
+- 单平台直接回归追加失败：真实单轨 Flow 后端已起 AI，而前端归属谓词只认可 all，加上首次启动未水合 Flow，旧自动筛选重复提交并显示失败。仅在既有 ParallelFlow 归属谓词、Tasks 完成抓取交接、discoveryDeps/View 接线及其既有测试修复；交接先刷新 Flow、单轨复用 restoreRunningTask 接回已有 worker。组合展示保持原路径，legacy 无 Flow 仍走原启动；不修改 worker/API/store，不新建筛选实现。
+- 暂停继续直接回归追加失败：正式任务立即暂停、继续后数据库 succeeded，而公开白箱仍 interrupted，页面停在 03。此次精确允许 `webui/runners/ai_screen_task.py`（实测 639 行）仅调整同 run 续跑的白箱初始化，复用既有 `WhiteboxService.resume`；允许 `tests/test_b096_final_review.py` 增失败用例及路径名单。此项覆盖上方 runner 禁写的这一处，其余 runner、白箱/store 实现、平台树枝及正式数据仍禁止修改。引用方向为既有继续 API → 共享 AI worker → 既有白箱 resume；不忽略完整性结论、不另造恢复逻辑。验收：旧暂停结论在续跑开始重置、审计事件保留、严格终态门禁保留；正式 UI 立即暂停→继续→结果页。
+
+- R014 第二次真实复测：暂停/继续均 HTTP 200，续跑结束却 partial；旧暂停事件被复投影到同一尝试。精确补充允许 `webui/whitebox.py`（501 行）与 `tests/test_whitebox_integration.py`：共享 resume 为未完成单元建立新尝试，既有 record_for_owner 绑定当前尝试；不改阶段算法、store、规则归约器或终态门禁。引用为 worker → 共享白箱 → 既有 store API，抓取和 AI 一并直接回归。失败用例覆盖旧审计/已完成单元保留、新尝试正确完成。
 
 **Language/Version**: Python 3.10+；TypeScript 5.9；Vue 3.5
 **Primary Dependencies**: Flask 3.x、SQLite、Vue 3、Vite 8、Vitest 4、pywebview 6
@@ -134,7 +185,7 @@ DiscoveryView
   ├─> useDiscoveryParallelFlow ─> API
   ├─> useDiscoveryFlowPresentation ─> task-state API / injected result refresh
   ├─> OneClickScreenDialog ─> parallelFilterMapping
-  └─> ParallelPlatformProgress ─> TaskProgress
+  └─> ParallelPlatformProgress ─> TaskProgress / ScreenRoundActions
 
 flow_api ─> FlowService ─> existing Flow store
 search_packages_api ─> SearchPackageService ─> StoreSearchPackagesMixin

@@ -24,6 +24,8 @@ export type ScrapePrimaryAction =
 export type SharedPrimaryAction = ScreenPrimaryAction | ScrapePrimaryAction;
 
 export interface ScreenRoundState {
+  /** 既有 round_context 的可恢复性证据；不能仅凭 failed 推断可继续。 */
+  resumable?: boolean;
   /** AI 筛选 run 状态：running/queued/paused/failed/interrupted/partial/succeeded/scraped_only。 */
   screenStatus: string;
   /** 重抓 run 状态：running/queued/paused/failed/interrupted/none。 */
@@ -104,7 +106,7 @@ export function deriveScreenPrimaryAction(
   if (status === "running" || status === "queued") {
     return { kind: "pause", label: "暂停筛选" };
   }
-  if (status === "paused" || status === "failed") {
+  if (status === "paused" || (status === "failed" && state.resumable === true)) {
     return { kind: "continue", label: "继续 AI 筛选" };
   }
   if (status === "partial" || status === "succeeded") {
@@ -157,6 +159,10 @@ export function canFinishRunByStatus(runId: string, status: string): boolean {
 }
 
 export interface TrackActionBarFacts {
+  /** 当前阶段与后端实际操作目标一致；旧阶段不能操作后续 run。 */
+  operable?: boolean;
+  /** 轨道终态门禁与后端一致，失败已有结果可读但不能再次收尾。 */
+  terminal?: boolean;
   /** 这一行代表哪一段：抓取段用抓取口径，AI 段用筛选口径。 */
   stage: "scrape" | "screen";
   /** 这条线自己的状态（不是别段的快照）。 */
@@ -184,6 +190,9 @@ export interface TrackActionBar {
  */
 export function deriveTrackActionBar(facts: TrackActionBarFacts): TrackActionBar {
   const cancelLabel = TRACK_CANCEL_LABEL;
+  if (facts.operable === false || facts.terminal || facts.status === "failed") {
+    return { action: { kind: "none" }, showFinishSave: false, showCancel: false, cancelLabel };
+  }
   const finishRunId = facts.finishRunId ?? facts.runId;
   if (facts.stage === "scrape") {
     // 轨道本身是可操作主体（Flow 轨道行），不要求它已经拿到 run 身份：

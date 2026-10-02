@@ -90,7 +90,7 @@ export interface SearchDeps {
 }
 
 export interface ExecutionDeps {
-  /** True only when the current all-platform Flow owns this scrape task. */
+  /** True only when the current Flow owns this scrape task. */
   isFlowOwnedScrapeTask?: (taskId: string) => boolean;
   startScrape: (options?: OneClickLaunch) => Promise<void>;
   pauseScrape: () => Promise<void>;
@@ -104,10 +104,14 @@ export interface ExecutionDeps {
 }
 
 export interface TasksDeps {
-  /** True only when the current all-platform Flow owns this scrape task. */
+  /** True only when the current Flow owns this scrape task. */
   isFlowOwnedScrapeTask?: (taskId: string) => boolean;
+  /** Refresh authoritative ownership before handing off a newly completed scrape. */
+  refreshFlowOwnership?: () => Promise<{ selection: "all" | Platform } | null>;
   /** Durable run ids owned by the current Flow, including runs absent locally. */
   getFlowTaskIds?: () => string[];
+  /** Fresh instance ownership and current unfinished stage targets, without legacy guesses. */
+  getFlowTaskCancellationPlan?: () => Promise<{ ownedIds: string[]; targetIds: string[]; stale: boolean } | null>;
   abandonRound: () => Promise<void>;
   cancelActiveTasksForNewRound: () => Promise<boolean>;
   mergeRecrawlUpdates: (updates: Record<string, unknown>) => void;
@@ -211,7 +215,9 @@ export type ExecutionNeeds = Pick<
 export type TasksNeeds = Pick<
   DiscoveryDeps,
   | "isFlowOwnedScrapeTask"
+  | "refreshFlowOwnership"
   | "getFlowTaskIds"
+  | "getFlowTaskCancellationPlan"
   | "cancelScrape"
   | "clearFinishedState"
   | "emit"

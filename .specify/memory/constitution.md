@@ -236,6 +236,8 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/src/components/JobLifecycleDialog.vue` — 047 岗位轨迹弹窗组件；接收既有岗位/画像并转发关闭与反馈事件
 - `webui/flow_api.py` — B096 Flow/Track HTTP 路由：创建、读取、单线操作与流程结果边界
 - `webui/flow_service.py` — B096 Flow/Track 协调：新轮门禁、平台可用性、状态推进、提交补偿与失败留痕
+- `webui/flow_task_actions.py` — Flow 动作 run 身份校验与既有任务暂停入口接线
+- `webui/src/composables/useDiscoveryInstanceActions.ts` — 实例动作身份/忙态绑定与共同 Flow 结果合流协调，复用共享批次选择和结束保存
 - `webui/store_flow.py` — B096 Flow store 门面：组装声明式 mixin，不承载业务实现
 - `webui/store_flow_core.py` — B096 Flow store 共享常量、ID/状态/行转换辅助
 - `webui/store_flow_claims.py` — B096 Flow/Track 创建、claim、迁移、运行线状态与绑定

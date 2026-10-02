@@ -5,7 +5,7 @@ import {
   crossPlatformDedupeEnabled,
   type OneClickFilterGroup,
 } from "../components/OneClickScreenDialog.vue";
-import { ACTIVE_TRACK_STATUSES, buildSearchScriptParams, platformLabel } from "../discovery";
+import { ACTIVE_TRACK_STATUSES, TERMINAL_TRACK_STATUSES, buildSearchScriptParams, platformLabel } from "../discovery";
 import {
   applyUnifiedToPlatforms,
   applyUnifiedFieldToPlatforms,
@@ -267,6 +267,35 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let refreshGeneration = 0;
   let prepareGeneration = 0;
+  const dismissedFlowIds = new Map<string, string>();
+
+  function isDismissedFlow(candidate: ParallelFlowState | null): boolean {
+    if (!candidate) return false;
+    const profileId = currentProfileId();
+    if (!dismissedFlowIds.has(profileId)) {
+      let dismissedId = "";
+      try {
+        dismissedId = sessionStorage.getItem(`career-scout-dismissed-flow:${profileId}`) || "";
+      } catch { /* Keep the new-round boundary in memory when storage is unavailable. */ }
+      dismissedFlowIds.set(profileId, dismissedId);
+    }
+    return candidate.id === dismissedFlowIds.get(profileId);
+  }
+
+  function resetForNewRound(): void {
+    const profileId = currentProfileId();
+    const previousFlowId = flow.value?.id;
+    if (profileId && previousFlowId) {
+      dismissedFlowIds.set(profileId, previousFlowId);
+      try {
+        sessionStorage.setItem(`career-scout-dismissed-flow:${profileId}`, previousFlowId);
+      } catch { /* The in-memory boundary still prevents old Flow reattachment. */ }
+    }
+    refreshGeneration += 1;
+    prepareGeneration += 1;
+    flowResultsCache.clear();
+    restore(null);
+  }
 
   const tracks = computed(() => ({
     boss: flow.value?.tracks.find((track) => track.platform === "boss") || null,
@@ -279,9 +308,21 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     return Boolean(
       taskId
       && current?.profile_id === currentProfileId()
-      && current.selection === "all"
       && current.tracks.some((track) => track.scrape_run_id === taskId),
     );
+  }
+
+  async function getFlowTaskCancellationPlan() {
+    await refresh();
+    const current = flow.value;
+    if (!current && !stale.value) return null;
+    const ownedIds = (current?.tracks || []).flatMap(track =>
+      [track.scrape_run_id, track.screen_run_id].filter((id): id is string => Boolean(id)));
+    const targetIds = (current?.tracks || [])
+      .filter(track => !TERMINAL_TRACK_STATUSES.includes(track.status))
+      .map(track => track.screen_run_id || track.scrape_run_id || "")
+      .filter(Boolean);
+    return { ownedIds, targetIds, stale: stale.value };
   }
 
   const hasUnfinishedRound = computed(() => hasUnfinishedParallelRound(flow.value));
@@ -491,7 +532,7 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
         || options.isCurrent && !options.isCurrent()) return flow.value;
       // 能力由接口成功响应确认；flow 是否存在只表示当前是否有可恢复流程。
       available.value = true;
-      const restoredFlow = response.flow || null;
+      const restoredFlow = isDismissedFlow(response.flow || null) ? null : response.flow || null;
       flow.value = restoredFlow;
       await hydrateTrackSnapshots();
       if (generation !== refreshGeneration || !isCurrentProfile(profileId, profile.generation)
@@ -679,7 +720,7 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     }
   }
 
-  async function operate(platform: Platform, action: "pause" | "resume" | "stop") {
+  async function operate(platform: Platform, action: "pause" | "resume" | "stop", target?: { runId: string; mode?: "immediate" | "graceful" }) {
     if (!flow.value) throw new Error("当前没有流程");
     const profileId = currentProfileId();
     if (!profileId) throw new Error("当前画像不可用");
@@ -694,7 +735,7 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
         `/api/flows/${encodeURIComponent(flow.value.id)}/tracks/${platform}/${action}`,
         {
           method: "POST",
-          json: { profile_id: profileId },
+          json: { profile_id: profileId, ...(target ? { expected_run_id: target.runId, mode: target.mode || "graceful" } : {}) },
         },
       );
       flow.value = response.flow;
@@ -737,6 +778,7 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
       if (next && (!Array.isArray(next.tracks) || next.tracks.some((track) => !track || typeof track !== "object"))) {
         throw new Error("流程恢复失败：流程轨道数据无效");
       }
+      if (isDismissedFlow(next)) next = null;
       flow.value = next;
       if (next?.selection === "all") {
         let restoredSnapshot = false;
@@ -813,6 +855,8 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     operate,
     operateTrack,
     isFlowOwnedScrapeTask,
+    getFlowTaskCancellationPlan,
+    resetForNewRound,
     restore,
   };
 }
@@ -828,7 +872,7 @@ interface ParallelFlowRecoveryDeps {
   loadFilterLabels: () => unknown;
   loadCityCatalog: () => unknown;
   restoreRunningTask: () => Promise<unknown>;
-  restoreSaved02State: () => unknown;
+  restoreSaved02State: (options?: { preserveResult?: boolean }) => unknown;
   maybeAutoStartNewRound: () => unknown;
   scrapeBusy: Ref<boolean>;
   screenBusy: Ref<boolean>;
@@ -887,7 +931,7 @@ export function registerDiscoveryParallelRecovery(deps: ParallelFlowRecoveryDeps
         }
       } finally {
         if (!isCurrentRecovery()) return;
-        deps.restoreSaved02State();
+        deps.restoreSaved02State({ preserveResult: status === "flow" });
         // Only an authoritative current Flow=null result opens the legacy
         // recovery/new-round path. Error and stale responses stay read-only.
         if (status === "empty" && isCurrentRecovery()

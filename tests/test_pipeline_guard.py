@@ -210,6 +210,53 @@ class PipelineGuardCoreTests(unittest.TestCase):
 
     # ---- US3 事件日志 ----
 
+    def test_inactive_owner_retires_leftover_batch_without_failure(self):
+        self.guard.close()
+        for status in ("completed", "paused", "failed", "cancelled"):
+            with self.subTest(status=status):
+                self.ctx.tasks["t1"] = {"status": status}
+                self.guard.begin_batch("b1", task_id="t1")
+                with mock.patch("webui.pipeline_guard.time.monotonic", return_value=time.monotonic() + 10):
+                    self.guard.scan_once()
+                    self.guard.scan_once()
+                self.assertTrue(self.guard.batch_state("b1")["terminal"])
+                self.assertEqual(self.ctx.tasks["t1"]["status"], status)
+                self.assertEqual(self.ctx.write_run_calls, [])
+                self.assertEqual(self.ctx.pause_failures, [])
+
+    def test_owner_completed_after_stall_does_not_get_fallback_pause(self):
+        self.guard.close()
+        self.ctx.tasks["t1"] = {"status": "running"}
+        self.guard.begin_batch("b1", task_id="t1")
+        with mock.patch("webui.pipeline_guard.time.monotonic", return_value=time.monotonic() + 10):
+            self.guard.scan_once()
+        self.ctx.tasks["t1"]["status"] = "completed"
+        with mock.patch("webui.pipeline_guard.time.monotonic", return_value=time.monotonic() + 20):
+            self.guard.scan_once()
+        self.assertEqual(self.ctx.tasks["t1"]["status"], "completed")
+        self.assertEqual(self.ctx.write_run_calls, [])
+
+    def test_durable_completed_owner_preserves_whitebox_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "webui.db")
+            service = WhiteboxService(store, emergency_path=Path(tmp) / "emergency.jsonl")
+            service.begin("screening", "t1", {"units": [{
+                "unit_key": "jd_detail", "unit_kind": "ai_stage", "stage": "jd_detail",
+            }]})
+            self.ctx.tasks["t1"] = {"status": "running"}
+            guard = _make_guard(self.ctx, store=store, whitebox=service)
+            guard.close()
+            guard.begin_batch("old-jd", task_id="t1")
+            with mock.patch.object(store, "get_screening_run", return_value={"status": "succeeded"}), mock.patch(
+                "webui.pipeline_guard.time.monotonic", return_value=time.monotonic() + 10,
+            ):
+                guard.scan_once()
+                guard.scan_once()
+            run = store.get_whitebox_run("screening", "t1")
+            self.assertEqual(store.list_whitebox_events(run["id"]), [])
+            self.assertEqual(self.ctx.write_run_calls, [])
+            self.assertEqual(self.ctx.pause_failures, [])
+
     def test_stall_retry_giveup_events_written_to_log(self):
         from webui.logging_setup import configure_logging
         with tempfile.TemporaryDirectory() as tmp:

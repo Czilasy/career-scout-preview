@@ -90,6 +90,34 @@ const interruptedScreenResponse = {
   round_context: null,
 };
 
+it("046 A01: instance finish preserves sibling state and delivers only to its instance callback", async () => {
+  apiRequestMock.mockReset();
+  const response = { ok: true, platform: "zhilian", result: { jobs: [], total_scraped: 2 } };
+  apiRequestMock.mockResolvedValue(response);
+  const state = makeState({
+    scrapeTaskId: ref("sibling-scrape"), scrapeBusy: ref(true),
+    screenTaskId: ref("sibling-screen"), screenBusy: ref(true),
+    screenSnapshot: ref({ status: "running", progress: { current: 7 }, logs: [] }),
+    autoScreenArmed: ref(true),
+  });
+  const snapshot = state.screenSnapshot.value;
+  const deps = makeDeps();
+  const busy = ref(false);
+  const onSaved = vi.fn(async () => {});
+  const execution = useDiscoveryExecution(state, deps);
+  await execution.finishPausedTask("instance-screen", { instance: { busy, onSaved } });
+  expect(onSaved).toHaveBeenCalledWith(response);
+  expect(busy.value).toBe(false);
+  expect(state.scrapeBusy.value).toBe(true);
+  expect(state.screenBusy.value).toBe(true);
+  expect(state.screenSnapshot.value).toBe(snapshot);
+  expect(state.autoScreenArmed.value).toBe(true);
+  expect(state.finishedPartial.value).toBe(false);
+  expect(deps.clearWorkflowState).not.toHaveBeenCalled();
+  expect(deps.persistFinishedState).not.toHaveBeenCalled();
+  expect(deps.setPipelineResult).not.toHaveBeenCalled();
+});
+
 describe("useDiscoveryExecution.restoreRunningTask（026 B078）", () => {
   beforeEach(() => {
     apiRequestMock.mockReset();
