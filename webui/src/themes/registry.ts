@@ -9,6 +9,7 @@
 // ===========================================================================
 
 import "./kaleido/kaleido.css";
+import "./kaleido/instruments.css";
 
 export type ThemeId = "light" | "dark" | "kaleido";
 
