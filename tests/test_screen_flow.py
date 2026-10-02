@@ -444,5 +444,189 @@ class LoadResumeVerdictsTests(unittest.TestCase):
         self.assertEqual(set(verdicts), {"a", "b"})
 
 
+class DomainVerdictGuardTests(unittest.TestCase):
+    """B094 T005：判定恢复守卫——自身提前返回、同源回退与版本摘要。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = TaskStore(pathlib.Path(self.temp.name) / "state" / "webui.db")
+        _make_parent(self.store)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    @staticmethod
+    def _selection(label):
+        from webui import ai_domain_policy as domain_policy
+        return domain_policy.selection_from_snapshot(
+            snapshot=None, platform="boss", current_labels=[label],
+        )
+
+    def _seed(self, run_id, *, metadata=None, verdicts=None, checkpoint=None,
+              filters=None):
+        _make_ai_run(
+            self.store, run_id, status="failed",
+            filters=filters if filters is not None else FILTERS,
+        )
+        if metadata is not None:
+            from webui import ai_domain_policy as domain_policy
+            params = dict(self.store.get_screening_run(run_id)["execution_params"])
+            params.update(domain_policy.run_metadata(metadata))
+            with self.store._connection() as conn:
+                conn.execute(
+                    "UPDATE screening_runs SET execution_params_json = ? WHERE id = ?",
+                    (json.dumps(params, ensure_ascii=False), run_id),
+                )
+        if checkpoint is not None:
+            self.store.save_checkpoint(run_id, "ai_rough", checkpoint)
+        if verdicts:
+            self.store.save_screening_verdicts(run_id, verdicts)
+        return run_id
+
+    def test_unversioned_domain_candidate_is_skipped(self):
+        self._seed("old-run", filters=dict(FILTERS, industry=["1001"]))
+        self.assertIsNone(find_resumable_screen_run(
+            self.store, "scrape-1", dict(FILTERS, industry=["1001"]),
+            "3年Python后端", FACTS, domain_selection=self._selection("互联网"),
+        ))
+
+    def test_different_domain_semantics_is_skipped(self):
+        self._seed(
+            "internet-run", filters=dict(FILTERS, industry=["1001"]),
+            metadata=self._selection("互联网"),
+        )
+        self.assertIsNone(find_resumable_screen_run(
+            self.store, "scrape-1", dict(FILTERS, industry=["1001"]),
+            "3年Python后端", FACTS, domain_selection=self._selection("游戏"),
+        ))
+
+    def test_same_version_and_semantics_is_resumable(self):
+        self._seed(
+            "internet-run", filters=dict(FILTERS, industry=["1001"]),
+            metadata=self._selection("互联网"),
+        )
+        run = find_resumable_screen_run(
+            self.store, "scrape-1", dict(FILTERS, industry=["1001"]),
+            "3年Python后端", FACTS, domain_selection=self._selection("互联网"),
+        )
+        self.assertIsNotNone(run)
+        self.assertEqual(run["id"], "internet-run")
+
+    def test_no_domain_selection_keeps_legacy_resume(self):
+        self._seed("plain-run")
+        run = find_resumable_screen_run(
+            self.store, "scrape-1", FILTERS, "3年Python后端", FACTS,
+        )
+        self.assertIsNotNone(run)
+        self.assertEqual(run["id"], "plain-run")
+
+    def _load(self, run_id, selection):
+        return load_resume_verdicts_with_fallback(
+            self.store, run_id, "boss", "scrape-1", FILTERS,
+            "3年Python后端", profile_facts=FACTS, domain_selection=selection,
+        )
+
+    def test_own_verdicts_blocked_before_early_return(self):
+        """旧语义 run 即便断点已被自身判定覆盖，也不得把旧判定交回。"""
+        run_id = self._seed(
+            "stale", metadata=self._selection("游戏"),
+            verdicts={"a": {"verdict": "kept", "reason": ""}},
+            checkpoint=["a"],
+        )
+        self.assertEqual(self._load(run_id, self._selection("互联网")), {})
+
+    def test_same_semantics_returns_own_verdicts(self):
+        run_id = self._seed(
+            "current", metadata=self._selection("互联网"),
+            verdicts={"a": {"verdict": "kept", "reason": ""}},
+            checkpoint=["a"],
+        )
+        self.assertEqual(
+            set(self._load(run_id, self._selection("互联网"))), {"a"}
+        )
+
+    def test_chain_fallback_checks_every_candidate(self):
+        self._seed(
+            "chain-stale",
+            verdicts={"b": {"verdict": "dropped", "reason": "行业不符"}},
+        )
+        current = self._seed(
+            "current", metadata=self._selection("互联网"),
+            verdicts={"a": {"verdict": "kept", "reason": ""}},
+            checkpoint=["a", "b"],
+        )
+        merged = self._load(current, self._selection("互联网"))
+        self.assertEqual(set(merged), {"a"})
+
+    def test_missing_context_does_not_assume_old_domain_verdicts(self):
+        """调用方没传领域上下文时，未版本化的旧领域判定仍不得默认可复用。"""
+        run_id = self._seed(
+            "legacy-domain-run", filters=dict(FILTERS, industry=["1001"]),
+            verdicts={"a": {"verdict": "kept", "reason": ""}},
+            checkpoint=["a"],
+        )
+        self.assertEqual(load_resume_verdicts_with_fallback(
+            self.store, run_id, "boss", "scrape-1",
+            dict(FILTERS, industry=["1001"]), "3年Python后端",
+            profile_facts=FACTS,
+        ), {})
+
+
+class MaterialJdModeTests(unittest.TestCase):
+    """B094 T007：JD 资料模式合并文件与结果表，默认续跑行为不变。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = TaskStore(pathlib.Path(self.temp.name) / "state" / "webui.db")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _rows(self, run_id, rows):
+        with self.store._connection() as conn:
+            for index, (pid, jd, dropped) in enumerate(rows):
+                conn.execute(
+                    "INSERT INTO screening_results "
+                    "(id, run_id, platform, platform_job_id, verdict, created_at, "
+                    "is_dropped, jd) VALUES (?, ?, 'boss', ?, '', "
+                    "'2026-10-02T00:00:00', ?, ?)",
+                    (f"{run_id}-{index}", run_id, pid, int(dropped), jd),
+                )
+
+    def test_material_mode_merges_file_and_result_table(self):
+        run_id = "mixed"
+        self.store.create_screening_run(run_id, source_count=1)
+        self._rows(run_id, [("pid-1", "结果表保留行", 0), ("pid-2", "结果表剔除行", 1)])
+        path = pathlib.Path(self.temp.name) / "jd.json"
+        path.write_text(json.dumps({"pid-1": "文件原文"}), encoding="utf-8")
+        self.assertEqual(
+            load_resume_jd(self.store, str(path), run_id),
+            {"pid-1": "文件原文"},
+        )
+        self.assertEqual(
+            load_resume_jd(self.store, str(path), run_id, include_dropped=True),
+            {"pid-1": "文件原文", "pid-2": "结果表剔除行"},
+        )
+
+    def test_material_mode_without_file_reads_result_table(self):
+        run_id = "no-file"
+        self.store.create_screening_run(run_id, source_count=1)
+        self._rows(run_id, [("pid-1", "只有结果表有", 1)])
+        missing = str(pathlib.Path(self.temp.name) / "missing.json")
+        self.assertEqual(
+            load_resume_jd(self.store, missing, run_id, include_dropped=True),
+            {"pid-1": "只有结果表有"},
+        )
+        self.assertEqual(load_resume_jd(self.store, missing, run_id), {})
+
+    def test_corrupted_file_still_fails_in_material_mode(self):
+        run_id = "broken"
+        self.store.create_screening_run(run_id, source_count=1)
+        path = pathlib.Path(self.temp.name) / "broken.json"
+        path.write_text("{not json", encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            load_resume_jd(self.store, str(path), run_id, include_dropped=True)
+
+
 if __name__ == "__main__":
     unittest.main()

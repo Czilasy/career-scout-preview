@@ -216,6 +216,16 @@ _TAXONOMY_CODES: dict[str, dict[str, Any]] = {
         user_message="内部状态或持久化错误", impact="systemic",
         resume_condition="需人工排查日志",
     ),
+    # B094：领域判定口径变化。不阻断续跑语义、不自动重试原判定，
+    # 只要求从现有筛选入口重新判断；已抓岗位资料保留。
+    "screening_policy_incompatible": _entry(
+        "screening_policy_incompatible", "internal",
+        user_message=(
+            "岗位判断口径已更新，旧的判断结果不再沿用；"
+            "请从筛选入口重新判断，已抓到的岗位资料会保留"
+        ),
+        resume_condition="从筛选入口重新发起一次筛选即可，无需重抓岗位",
+    ),
 }
 
 
@@ -305,6 +315,11 @@ _PLATFORM_CODES: dict[str, dict[str, Any]] = {
     )
 }
 
+
+_PLATFORM_CODES["filter_snapshot_incompatible"] = _entry(
+    "filter_snapshot_incompatible", "platform",
+    user_message="筛选条件快照损坏或与任务不一致，请重新发起筛选",
+)
 
 _FEEDBACK_CODES: dict[str, dict[str, Any]] = {
     code: _entry(code, "api", user_message=code)

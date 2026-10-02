@@ -19,6 +19,7 @@ from webui.runners.ai_screen_jd import run_jd_stage
 from webui.runners.ai_screen_fine import run_fine_stage
 from webui.ai_screen_failure import mark_flow_failure as _mark_flow_failure
 from webui.ai_screen_failure import persist_ai_worker_failure as _persist_ai_worker_failure
+from webui.ai_domain_context import DomainContextError, ScreeningPolicyIncompatibleError, load_resume_progress as _load_resume_progress, prepare_domain_run as _prepare_domain_run
 from webui.flow_task_state import FlowStateClosureError
 
 def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_task_id, resume_from_run_id='', profile_facts=None, execution_config=None, cross_platform_dedupe=True):
@@ -240,6 +241,7 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
                 t['error'] = ctx.msg_user_stopped_screen
                 ctx.release_worker_resume_claims(t)
         ctx.schedule_pipeline_task_cleanup(task_id)
+    finalized = False
     try:
         with ctx.lock:
             source_task = ctx.tasks.get(scrape_task_id)
@@ -289,9 +291,9 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         frozen_profile_key = task.get('profile_key') or source_params.get('profile_key')
         frozen_browser_account = task.get('browser_account') or source_params.get('browser_account')
         ai_task_input_digest = task.get('task_input_digest') or source_params.get('task_input_digest') or (source_run or {}).get('task_input_digest')
+        domain_context = _prepare_domain_run(ctx, scrape_task_id=scrape_task_id, platform=frozen_platform, screening_fields=screening_fields, resume_from_run_id=resume_from_run_id, profile_id=task.get('profile_id'))
         from webui.execution_config import ExecutionConfigSnapshot, FrozenTaskScope
         try:
-            finalized = False
             defer_partial_status = False
             if execution_config is None:
                 execution_config = ExecutionConfigSnapshot.from_dict(source_params['execution_config'])
@@ -304,7 +306,7 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         if source_result.get('hard_stop'):
             _hs_code = source_result.get('hard_stop_code') or 'source_blocked'
             _completed_combos = source_result.get('completed_combos') or []
-            ctx.store.create_screening_run(task_id, frozen_filters=screening_fields, source_count=len(source_result.get('jobs') or []), profile_id=str(task.get('profile_id') or '') or None, execution_params={'scrape_task_id': scrape_task_id, 'profile_summary': profile_summary or '', 'profile_facts': profile_facts, 'browser_account': frozen_browser_account or ctx.account_for_run(), 'active_account_at_freeze': str(task.get('active_account_at_freeze') or '') or ctx.account_for_run(), 'execution_config': execution_config.to_dict(), 'frozen_scope': frozen_scope.to_dict(), 'platform': frozen_platform, 'flow_id': frozen_flow_id, 'track_id': frozen_track_id, 'cdp_port': frozen_cdp_port, 'profile_key': frozen_profile_key, 'task_input_digest': ai_task_input_digest, 'cross_platform_dedupe': cross_platform_dedupe}, backend_version=ctx.backend_version)
+            ctx.store.create_screening_run(task_id, frozen_filters=screening_fields, source_count=len(source_result.get('jobs') or []), profile_id=str(task.get('profile_id') or '') or None, execution_params={'scrape_task_id': scrape_task_id, 'profile_summary': profile_summary or '', 'profile_facts': profile_facts, 'browser_account': frozen_browser_account or ctx.account_for_run(), 'active_account_at_freeze': str(task.get('active_account_at_freeze') or '') or ctx.account_for_run(), 'execution_config': execution_config.to_dict(), 'frozen_scope': frozen_scope.to_dict(), 'platform': frozen_platform, 'flow_id': frozen_flow_id, 'track_id': frozen_track_id, 'cdp_port': frozen_cdp_port, 'profile_key': frozen_profile_key, 'task_input_digest': ai_task_input_digest, 'cross_platform_dedupe': cross_platform_dedupe, **(domain_context.metadata())}, backend_version=ctx.backend_version)
             ctx.store.save_filter_snapshot(task_id, platform=frozen_platform, task_input_digest=ai_task_input_digest)
             ctx.write_run(task_id, status='running', current_stage='scrape')
             ctx.write_run(task_id, status='paused', error_code=_hs_code, current_stage='scrape')
@@ -327,7 +329,7 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         if not raw_jobs:
             raise RuntimeError('empty_scrape_result')
         if resume_from_run_id != task_id:
-            ctx.store.create_screening_run(task_id, frozen_filters=screening_fields, source_count=len(raw_jobs), profile_id=str(task.get('profile_id') or '') or None, execution_params={'scrape_task_id': scrape_task_id, 'profile_summary': profile_summary, 'profile_facts': profile_facts, 'browser_account': frozen_browser_account or ctx.account_for_run(), 'active_account_at_freeze': str(task.get('active_account_at_freeze') or '') or ctx.account_for_run(), 'execution_config': execution_config.to_dict(), 'frozen_scope': frozen_scope.to_dict(), 'platform': frozen_platform, 'flow_id': frozen_flow_id, 'track_id': frozen_track_id, 'cdp_port': frozen_cdp_port, 'profile_key': frozen_profile_key, 'task_input_digest': ai_task_input_digest, 'cross_platform_dedupe': cross_platform_dedupe}, backend_version=ctx.backend_version)
+            ctx.store.create_screening_run(task_id, frozen_filters=screening_fields, source_count=len(raw_jobs), profile_id=str(task.get('profile_id') or '') or None, execution_params={'scrape_task_id': scrape_task_id, 'profile_summary': profile_summary, 'profile_facts': profile_facts, 'browser_account': frozen_browser_account or ctx.account_for_run(), 'active_account_at_freeze': str(task.get('active_account_at_freeze') or '') or ctx.account_for_run(), 'execution_config': execution_config.to_dict(), 'frozen_scope': frozen_scope.to_dict(), 'platform': frozen_platform, 'flow_id': frozen_flow_id, 'track_id': frozen_track_id, 'cdp_port': frozen_cdp_port, 'profile_key': frozen_profile_key, 'task_input_digest': ai_task_input_digest, 'cross_platform_dedupe': cross_platform_dedupe, **(domain_context.metadata())}, backend_version=ctx.backend_version)
             ctx.store.save_filter_snapshot(task_id, platform=frozen_platform, task_input_digest=ai_task_input_digest)
             ctx.write_run(task_id, status='running', current_stage='ai_rough')
         else:
@@ -352,21 +354,10 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
                     "Flow AI run %s could not take its Track (%s)",
                     task_id, type(exc).__name__,
                 )
-        resume_verdicts = {}
-        resume_jd = {}
-        if resume_from_run_id:
-            from webui.screen_flow import load_resume_jd, load_resume_verdicts_with_fallback
-            resume_verdicts = load_resume_verdicts_with_fallback(ctx.store, resume_from_run_id, frozen_platform, scrape_task_id, screening_fields, profile_summary, profile_facts=profile_facts)
-            old_jd_path = ctx.jd_checkpoint_path(ctx.app.config['RESULT_DIR'], resume_from_run_id)
-            resume_jd = ctx.load_jd_checkpoint(old_jd_path)
-            resume_jd = load_resume_jd(ctx.store, old_jd_path, resume_from_run_id)
-            if resume_from_run_id != task_id:
-                ctx.remove_jd_checkpoint(old_jd_path)
-            if resume_verdicts or resume_jd:
-                emit(stage='resume', message=f'接着上次进度：已有 {len(resume_verdicts)} 条判定、{len(resume_jd)} 条 JD，跳过重复工作')
-        resume_fine_verdicts = {}
-        if resume_from_run_id:
-            resume_fine_verdicts, _ = _split_resume_verdicts(resume_verdicts)
+        resume_verdicts, resume_jd = _load_resume_progress(ctx, task_id=task_id, resume_from_run_id=resume_from_run_id, platform=frozen_platform, scrape_task_id=scrape_task_id, screening_fields=screening_fields, profile_summary=profile_summary, profile_facts=profile_facts, selection=domain_context.selection)
+        resume_fine_verdicts = _split_resume_verdicts(resume_verdicts)[0] if resume_from_run_id else {}
+        if resume_verdicts or resume_jd:
+            emit(stage='resume', message=f'接着上次进度：已有 {len(resume_verdicts)} 条判定、{len(resume_jd)} 条 JD，跳过重复工作')
         # Spec041：去重判定源按当前画像取轮，别的画像的历史轮不参与；老任务无画像时保持旧口径。
         _dedupe = apply_to_screening_input(
             ctx.store, raw_jobs, frozen_platform, profile_summary,
@@ -386,7 +377,7 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         if not ai_service.is_ai_available(settings, cred_ref, api_key) or not endpoint:
             raise ai_service.AISecurityError(ai_service.ERROR_NOT_CONFIGURED)
         criteria = dict(screening_fields or {})
-        criteria['profile_summary'] = profile_summary or ''
+        criteria.update({'profile_summary': profile_summary or '', **domain_context.criteria_state()})
         if _stop_requested():
             _handle_user_stop()
             return
@@ -396,7 +387,7 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         survivors, dropped = rough_outcome
         enriched = [dict(job) for job in survivors]
         jd_path = ctx.jd_checkpoint_path(ctx.app.config['RESULT_DIR'], task_id)
-        jd_outcome = run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path, frozen_platform, frozen_cdp_port, frozen_profile_key, frozen_browser_account, execution_config, stop_event, emit, _stop_requested, _handle_user_stop, save_jd_checkpoint=ctx.save_jd_checkpoint)
+        jd_outcome = run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path, frozen_platform, frozen_cdp_port, frozen_profile_key, frozen_browser_account, execution_config, stop_event, emit, _stop_requested, _handle_user_stop, save_jd_checkpoint=ctx.save_jd_checkpoint, domain_context=(None if resume_from_run_id == task_id else domain_context))
         if jd_outcome is None:
             return
         jd_map, jd_failures = jd_outcome
@@ -545,6 +536,16 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
         ctx.schedule_pipeline_task_cleanup(task_id)
         ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
         ctx.remove_jd_checkpoint(jd_path)
+    except (DomainContextError, ScreeningPolicyIncompatibleError) as exc:
+        # 先完成失败补偿，证据记录异常不能阻止终态落库或释放占位。
+        _persist_ai_worker_failure(ctx, task_id, scrape_task_id, exc.error_code, str(exc))
+        try:
+            _wb_record('unit_failed', 'ai_screen', 'ai_screen', {'error_code': exc.error_code}, severity='error')
+            _wb_finish('failed')
+        except Exception as marker_exc:
+            from webui.logging_setup import get_logger
+            get_logger(__name__).warning("Domain failure evidence finalization failed: %s", type(marker_exc).__name__)
+        return
     except FlowStateClosureError:
         # The Flow coordinator has already attempted the atomic durable
         # closure.  Preserve the safe, observable error for the caller rather

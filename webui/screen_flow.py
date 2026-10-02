@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
+from webui import ai_domain_policy as domain_policy
 from webui.scrape_only import merge_round_script_params
 
 RESUMABLE_STATUSES = ("paused", "failed", "interrupted", "partial")
@@ -45,15 +47,62 @@ def _normalize_cities(value):
     return []
 
 
+def read_domain_selection(store, scrape_task_id, screening_fields, *,
+                          platform=None, profile_id=None):
+    """只读派生当前领域语义；候选查找与 worker 共用，不依赖 API/context。"""
+    from webui.ai_platform_adapter import resolve_platform_ai_adapter
+    from webui.flow_task_coordinator import resolve_flow_binding
+
+    source = store.get_screening_run(scrape_task_id) or {}
+    params = source.get("execution_params") or {}
+    binding = resolve_flow_binding(SimpleNamespace(store=store), scrape_task_id)
+    bound = binding or {}
+    platform = str(platform or bound.get("platform") or params.get("platform")
+                   or source.get("platform") or "").strip().lower()
+    if bound.get("platform") and platform != bound["platform"]:
+        raise domain_policy.DomainSnapshotError("source platform conflicts with task")
+    bound_profile = bound.get("profile_id")
+    if profile_id and bound_profile and str(profile_id) != str(bound_profile):
+        raise domain_policy.DomainSnapshotError("source profile conflicts with task")
+    adapter = resolve_platform_ai_adapter(platform)
+    labels = adapter.domain_selection({"industry": (screening_fields or {}).get("industry")}).labels
+    snapshot = None
+    if bound.get("flow_id") and bound.get("track_id"):
+        flow = store.get_flow(bound["flow_id"], profile_id=bound_profile or profile_id)
+        track = next((row for row in (flow or {}).get("tracks") or []
+                      if str(row.get("platform") or "") == platform), None)
+        if track is None or str(track.get("id")) != str(bound["track_id"]):
+            raise domain_policy.DomainSnapshotError("source Track identity conflicts")
+        snapshot = track.get("confirmed_filters_snapshot")
+        if snapshot is not None and not isinstance(snapshot, dict):
+            raise domain_policy.DomainSnapshotError("condition snapshot must be an object")
+    selection = domain_policy.selection_from_snapshot(
+        snapshot=snapshot, platform=platform, current_labels=labels,
+    )
+    return selection, binding
+
+
 def find_resumable_screen_run(
-    store, scrape_task_id, screening_fields, profile_summary, profile_facts
+    store, scrape_task_id, screening_fields, profile_summary, profile_facts,
+    *, domain_selection=None,
 ):
     """按优先级找同一来源可续跑的 AI 筛选 run。
 
     顺序：paused → failed → interrupted(restart/user_finished) → partial。
     只有已冻结筛选条件全量一致（含 028 第 7 类，全字典相等比对）、画像、
     画像事实全部一致才返回。
+    ``domain_selection``：B094 内部可选参数。领域规则版本或领域语义摘要不一致
+    的候选直接跳过，让既有入口按新规则新建筛选；不先返回旧候选再让 runner
+    反复失败，也不把不兼容缓存默认为可用。
     """
+    if domain_selection is None and domain_policy.industry_selected_in_fields(screening_fields):
+        from webui.flow_task_coordinator import FlowTaskOperationError, MissingPlatformIdentityError
+        try:
+            domain_selection, _binding = read_domain_selection(store, scrape_task_id, screening_fields)
+        except (domain_policy.DomainSnapshotError, FlowTaskOperationError,
+                MissingPlatformIdentityError, KeyError, ValueError):
+            # 不选择候选、不降级为不限；worker 会以登记分类持久化快照失败。
+            return None
     candidates = store.latest_screen_runs_for_source(
         scrape_task_id, statuses=RESUMABLE_STATUSES,
     )
@@ -68,6 +117,10 @@ def find_resumable_screen_run(
         if str(params.get("profile_summary") or "") != str(profile_summary or ""):
             continue
         if not _same_facts(params.get("profile_facts"), profile_facts):
+            continue
+        if not domain_policy.is_verdict_state_compatible(
+            params, selection=domain_selection, screening_fields=screening_fields,
+        ):
             continue
         return run
     return None
@@ -95,8 +148,13 @@ def build_round_script_params(store, run, screening_fields, platform):
     )
 
 
-def load_resume_jd(store, jd_checkpoint_path, run_id):
-    """续跑 JD 断点优先；文件缺失或为空时从 screening_results 回退。"""
+def load_resume_jd(store, jd_checkpoint_path, run_id, include_dropped=False):
+    """续跑 JD 断点优先；文件缺失或为空时从 screening_results 回退。
+
+    ``include_dropped=True`` 是 B094 的只读资料模式：断点文件与结果表合并，
+    同一候选以文件原文为准，旧剔除标记不限制客观资料。默认参数保持既有
+    续跑行为（只读非剔除行）。
+    """
     try:
         with open(jd_checkpoint_path, encoding="utf-8") as handle:
             data = json.load(handle)
@@ -109,14 +167,24 @@ def load_resume_jd(store, jd_checkpoint_path, run_id):
     resume_jd = {
         str(k): str(v) for k, v in data.items() if isinstance(v, str) and v.strip()
     }
-    if resume_jd:
-        return resume_jd
-    return store.load_screening_jd_map(run_id)
+    if not include_dropped:
+        if resume_jd:
+            return resume_jd
+        return store.load_screening_jd_map(run_id)
+    table = store.load_screening_jd_map(run_id, include_dropped=True) or {}
+    if not isinstance(table, dict):
+        return dict(resume_jd)
+    merged = {
+        str(k): str(v) for k, v in table.items()
+        if isinstance(v, str) and v.strip()
+    }
+    merged.update(resume_jd)
+    return merged
 
 
 def load_resume_verdicts_with_fallback(
     store, run_id, platform, scrape_task_id, screening_fields, profile_summary,
-    profile_facts=None,
+    profile_facts=None, *, domain_selection=None,
 ):
     """续跑判定优先读 run 自身；粗筛 checkpoint 比判定多时从同源链合并。
 
@@ -125,7 +193,17 @@ def load_resume_verdicts_with_fallback(
     回退只合并同来源、同条件、同画像、同画像事实的 run（排除自身），按
     created_at 从旧到新合并、新的覆盖旧的，避免续跑整批重跑或幸存者塌缩。
     ``platform`` 仅保持既有签名兼容，合并不再依赖结果快照。
+    ``domain_selection``：B094 内部可选参数。自身判定在提前返回之前先过
+    规则兼容守卫，同源回退逐条检查版本与领域语义摘要；调用方没传该信息时，
+    带领域选择的旧判定同样不得默认为可复用。
     """
+    own_run = store.get_screening_run(run_id) or {}
+    own_params = own_run.get("execution_params") or {}
+    if not domain_policy.is_verdict_state_compatible(
+        own_params, selection=domain_selection,
+        screening_fields=own_run.get("frozen_filters") or screening_fields,
+    ):
+        return {}
     verdicts = store.load_screening_verdicts(run_id)
     checkpoint_ids = list(store.load_checkpoint(run_id, "ai_rough") or [])
     # 020 US6：覆盖比较取代数量比较——精筛判定计入总数后"数量够"不代表
@@ -142,6 +220,10 @@ def load_resume_verdicts_with_fallback(
         if str(params.get("profile_summary") or "") != str(profile_summary or ""):
             continue
         if not _same_facts(params.get("profile_facts"), profile_facts):
+            continue
+        if not domain_policy.is_verdict_state_compatible(
+            params, selection=domain_selection, screening_fields=screening_fields,
+        ):
             continue
         merged.update(store.load_screening_verdicts(str(run.get("id") or "")))
     if not merged:

@@ -384,10 +384,10 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(run["processed_count"], 0)
 
     def test_resumed_ai_screen_persists_inherited_jd_before_early_pause(self):
-        """新 run 继承旧 JD 断点后，Chrome 未就绪暂停也必须把继承 JD 落盘。"""
+        """部分 JD 仍需抓取：浏览器阻断前必须持久化已继承资料。"""
         scrape_task_id = "resume-jd-early-pause-source"
         interrupted_run_id = "resume-jd-early-pause-run"
-        jobs = [{"job_id": "job-1", "title": "后端工程师"}]
+        jobs = [{"job_id": "job-1", "title": "后端工程师"}, {"job_id": "job-2", "title": "后端工程师"}]
         self._install_scrape_source(scrape_task_id, jobs)
         self.store.create_screening_run(
             interrupted_run_id,
@@ -410,7 +410,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
 
         with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
                 mock.patch("webui.ai.screen_jobs", return_value={
-                    "kept": ["job-1"], "dropped": [],
+                    "kept": ["job-1", "job-2"], "dropped": [],
                 }), \
                 mock.patch(
                     "webui.pipeline_exec.ensure_chrome_ready",

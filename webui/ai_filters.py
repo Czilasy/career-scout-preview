@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from scripts import boss_cdp_raw as boss
 from webui import recruiter_activity
+from webui import ai_domain_policy as domain_policy
 from webui.core import salary_monthly_bounds
 from webui.ai_platform_adapter import (
     _COMBINED_EXPERIENCE_CODES,
@@ -114,8 +115,46 @@ def _is_unrestricted_code(platform, field, code):
     return resolve_platform_ai_adapter(platform).is_unrestricted(field, code)
 
 
-def _screen_hard_fields_text(platform):
-    return resolve_platform_ai_adapter(platform).screen_hard_fields_text()
+def _screen_hard_fields_text(platform, *, domain_active=False):
+    return resolve_platform_ai_adapter(platform).screen_hard_fields_text(domain_active=domain_active)
+
+
+def domain_selection_for_criteria(criteria, platform):
+    return resolve_platform_ai_adapter(platform).domain_selection(criteria)
+
+
+def has_rough_drop_evidence(job, criteria, reason, platform=None):
+    """粗筛硬字段理由必须由已选条件及列表事实支撑，画像不能新增条件。"""
+    if "实习" in reason and "全职" in reason:
+        return ("实习" in str(job.get("title") or "")
+                and "全职" in str((criteria or {}).get("profile_summary") or ""))
+    labels = {**_FILTER_FIELD_LABELS, "salary": "薪资", "domain": "领域"}
+    mentioned = {field for field, label in labels.items() if label in reason}
+    if not mentioned:
+        return False
+    field, _ = _job_criteria_hard_mismatch(job, criteria, platform=platform)
+    return bool(field and field in mentioned)
+
+
+def fine_result_contradicts_selection(result, criteria, platform=None):
+    """拒绝理由不得虚构已选区间；薪资已由前置硬核对负责。"""
+    if not isinstance(result, dict) or result.get("match") is not False:
+        return False
+    if any(flag.get("level") == "high" for flag in result.get("flags") or [] if isinstance(flag, dict)):
+        return False
+    reason = str(result.get("reason") or "")
+    if "薪资" in reason and any(word in reason for word in ("低于", "超出")):
+        return True
+    if not any(word in reason for word in ("已选", "所选", "筛选")):
+        return False
+    platform = _resolve_platform(platform)
+    for field, label in _FILTER_FIELD_LABELS.items():
+        if field == "industry" or label not in reason:
+            continue
+        selected = _criteria_codes_for_platform((criteria or {}).get(field), platform, field)
+        if not any(not _is_unrestricted_code(platform, field, code) for code in selected):
+            return True
+    return False
 
 
 def _screen_input_note(platform):
@@ -127,9 +166,9 @@ def _screen_fields(job, platform=None):
     return resolve_platform_ai_adapter(platform, job).screen_fields(job)
 
 
-def _detail_fields(job, platform=None):
+def _detail_fields(job, platform=None, *, domain_active=False):
     """Return the adapter-owned detail fields for the shared match flow."""
-    return resolve_platform_ai_adapter(platform, job).detail_fields(job)
+    return resolve_platform_ai_adapter(platform, job).detail_fields(job, domain_active=domain_active)
 
 
 
@@ -266,12 +305,19 @@ def _criteria_codes(values, mapping):
 
 
 def _job_criteria_hard_mismatch(job, criteria, platform=None):
-    """已选筛选字段与岗位明确值冲突时返回 (field, reason)，未知/未选字段不误杀。"""
+    """已选筛选字段与岗位明确值冲突时返回 (field, reason)，未知/未选字段不误杀。
+
+    B094：行业分类不参与硬剔除。领域相关性交给粗筛/精筛按岗位工作、产品和
+    公司实际主营业务综合判断，行业码不相交或缺失都不构成排除依据；其余字段
+    仍按原规则处理。
+    """
     if not isinstance(criteria, dict):
         return None, ""
     adapter = resolve_platform_ai_adapter(platform, job)
     platform = adapter.key
     for field in adapter.filter_fields:
+        if field == domain_policy.INDUSTRY_FIELD:
+            continue
         selected = adapter.criteria_codes(criteria.get(field), field)
         if not selected:
             continue

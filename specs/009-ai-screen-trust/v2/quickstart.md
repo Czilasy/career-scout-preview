@@ -1,6 +1,6 @@
 # Quickstart: B094 验证指南
 
-以下步骤仅供后续获准实施时执行。本轮止于 Tasks，未运行测试、构建、服务、真实账号或模型调用。
+本指南用于已获授权的实施与验证。当前进展及实际测试证据以 tasks.md 的最新返修记录为准；指南中的场景和命令不代表已全部通过。
 
 ## 1. 前置条件与范围
 
@@ -15,7 +15,7 @@
 新增测试文件完成后，在仓库根目录运行：
 
 ```powershell
-uv run python -m unittest tests.ai.test_ai_domain_context tests.ai.test_ai_domain_recall tests.ai.test_ai_platform_filters tests.test_ai_prompts tests.test_screen_flow tests.test_error_registry tests.test_b096_production_flow
+uv run python -m unittest tests.ai.test_ai_domain_repair tests.ai.test_ai_domain_context tests.ai.test_ai_domain_recall tests.ai.test_ai_platform_filters tests.test_ai_prompts tests.test_screen_flow tests.test_error_registry tests.test_b096_production_flow
 ```
 
 先观察对应新行为失败，再实现并聚焦重跑；若既有完整模块包含超出本次改动的用例，可进一步指定失败测试名。直接相邻自动化流程回归：

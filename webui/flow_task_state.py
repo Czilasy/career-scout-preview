@@ -56,6 +56,9 @@ _PUBLIC_CODES = frozenset(FLOW_ERROR_MESSAGES) | frozenset({
     "source_unreachable",
     "whitebox_incomplete",
     "internal_error",
+    # B094：领域规则不兼容的分类必须原样穿过，才能把登记说明带到对外字段。
+    "screening_policy_incompatible",
+    "filter_snapshot_incompatible",
 })
 
 

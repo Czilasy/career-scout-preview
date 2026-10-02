@@ -208,5 +208,109 @@ class B096ProductionFlowPathTests(unittest.TestCase):
             self.assertEqual(current["platform"], platform)
 
 
+class ScreeningPolicyIncompatibleClosureTests(unittest.TestCase):
+    """B094 T005：不兼容说明必须经公开失败入口在 run/task/Track 三处一致可见。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="b094-closure-")
+        self.store = TaskStore(pathlib.Path(self.temp.name) / "state" / "webui.db")
+        self.profile_id = "b094-closure-profile"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO candidate_profiles "
+                "(id, name, confirmed_fields_json, ai_preference_json, created_at, updated_at) "
+                "VALUES (?, 'b094', '{}', '{}', '2026-10-02', '2026-10-02')",
+                (self.profile_id,),
+            )
+        self.flow = self.store.create_flow(
+            profile_id=self.profile_id, selection="boss",
+            start_key="b094-closure", confirmed_filters={"boss": {}},
+        )
+        track = self.flow["tracks"][0]
+        self.source_id = "b094-closure-source"
+        self.ai_id = "b094-closure-ai"
+        self.store.create_screening_run(
+            self.source_id, profile_id=self.profile_id,
+            execution_params={"platform": "boss", "flow_id": self.flow["id"],
+                              "track_id": track["id"]},
+        )
+        self.store.create_scrape_search_run(
+            self.source_id, self.profile_id, platform="boss",
+            flow_id=self.flow["id"], track_id=track["id"],
+        )
+        self.store.update_screening_run(self.source_id, status="running")
+        self.store.create_screening_run(
+            self.ai_id, profile_id=self.profile_id,
+            execution_params={"platform": "boss", "flow_id": self.flow["id"],
+                              "track_id": track["id"],
+                              "scrape_task_id": self.source_id},
+        )
+        self.store.update_screening_run(self.ai_id, status="running")
+        self.store.update_flow_track(
+            self.flow["id"], "boss", profile_id=self.profile_id,
+            status="running", stage="ai", scrape_run_id=self.source_id,
+            screen_run_id=self.ai_id,
+        )
+        self.tasks = {self.ai_id: {"kind": "ai_screen", "status": "running", "error": ""}}
+        self.ctx = SimpleNamespace(
+            store=self.store,
+            tasks=self.tasks,
+            lock=threading.RLock(),
+            write_run=lambda run_id, **kw: self.store.update_screening_run(run_id, **kw),
+            clear_auto_screen=lambda _run_id: None,
+            schedule_pipeline_task_cleanup=lambda _run_id: None,
+            release_worker_resume_claims=lambda _task: None,
+            account_for_run=lambda *_args: "a",
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _read_back(self):
+        from webui.error_registry import FAILED_CODE_LABELS
+        from webui.ai_screen_failure import persist_ai_worker_failure
+
+        persist_ai_worker_failure(
+            self.ctx, self.ai_id, self.source_id,
+            "screening_policy_incompatible", "原始异常正文不得外泄",
+            platform="boss",
+        )
+        run = self.store.get_screening_run(self.ai_id) or {}
+        track = next(
+            item for item in self.store.get_flow(
+                self.flow["id"], profile_id=self.profile_id
+            )["tracks"] if item["platform"] == "boss"
+        )
+        expected = FAILED_CODE_LABELS["screening_policy_incompatible"]
+        return run, track, expected
+
+    def test_registered_message_reaches_every_public_field(self):
+        run, track, expected = self._read_back()
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["error_code"], "screening_policy_incompatible")
+        self.assertEqual(run["error_reason"], expected)
+        self.assertEqual(self.tasks[self.ai_id]["error"], expected)
+        self.assertEqual(track["status"], "failed")
+        self.assertEqual(track["reason"], expected)
+
+    def test_message_survives_refresh_and_does_not_leak_exception(self):
+        _run, _track, expected = self._read_back()
+        reread = self.store.get_screening_run(self.ai_id) or {}
+        track = next(
+            item for item in self.store.get_flow(
+                self.flow["id"], profile_id=self.profile_id
+            )["tracks"] if item["platform"] == "boss"
+        )
+        self.assertEqual(reread["error_reason"], expected)
+        self.assertEqual(track["reason"], expected)
+        self.assertNotIn("原始异常正文不得外泄", reread["error_reason"])
+
+    def test_incompatible_run_is_not_offered_as_resumable_block(self):
+        from webui.error_registry import RECOVERABLE_SYSTEMIC_BLOCK_CODES
+        run, _track, _expected = self._read_back()
+        self.assertEqual(run["status"], "failed")
+        self.assertNotIn(run["error_code"], RECOVERABLE_SYSTEMIC_BLOCK_CODES)
+
+
 if __name__ == "__main__":
     unittest.main()

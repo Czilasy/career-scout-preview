@@ -270,5 +270,81 @@ class BossExperienceFieldAdapterTests(unittest.TestCase):
         self.assertIn("经验", reason)
 
 
+class DomainFieldAdaptationTests(unittest.TestCase):
+    """B094 T018：行业退出硬剔除清单，已获取事实仍按平台适配传给模型。"""
+
+    def test_industry_code_mismatch_is_no_longer_a_hard_drop(self):
+        from webui.ai_filters import _job_criteria_hard_mismatch
+
+        boss_job = {
+            "platform": "boss", "job_id": "b1", "title": "AI 产品销售",
+            "company_industry": "教育培训", "job_labels": "1-3年 | 本科",
+        }
+        field, reason = _job_criteria_hard_mismatch(
+            boss_job, {"industry": ["1004"]}, platform="boss",
+        )
+        self.assertIsNone(field, reason)
+
+        zhilian_job = {
+            "platform": "zhilian", "job_id": "z1", "title": "AI 产品经理",
+            "industryName": "电子商务",
+        }
+        field, reason = _job_criteria_hard_mismatch(
+            zhilian_job, {"industry": ["1800000000"]}, platform="zhilian",
+        )
+        self.assertIsNone(field, reason)
+
+    def test_other_hard_fields_still_drop_on_both_platforms(self):
+        from webui.ai_filters import _job_criteria_hard_mismatch
+
+        boss_job = {
+            "platform": "boss", "job_id": "b1", "title": "AI 产品销售",
+            "company_industry": "教育培训", "job_labels": "5-10年 | 硕士",
+            "company_scale": "10000人以上",
+        }
+        field, _reason = _job_criteria_hard_mismatch(
+            boss_job, {"experience": ["104"], "industry": ["1004"]}, platform="boss",
+        )
+        self.assertEqual(field, "experience")
+        field, _reason = _job_criteria_hard_mismatch(
+            boss_job, {"degree": ["5"], "industry": ["1004"]}, platform="boss",
+        )
+        self.assertEqual(field, "degree")
+
+    def test_hard_fields_text_excludes_industry_on_both_platforms(self):
+        from webui.ai_filters import _screen_hard_fields_text
+
+        for platform in ("boss", "zhilian"):
+            with self.subTest(platform=platform):
+                self.assertNotIn(
+                    "行业", _screen_hard_fields_text(platform, domain_active=True))
+
+    def test_detail_fields_carry_list_company_and_industry(self):
+        from webui.ai_platform_adapter import resolve_platform_ai_adapter
+
+        boss = resolve_platform_ai_adapter("boss").detail_fields({
+            "platform": "boss", "title": "行政专员", "company": "示例科技",
+            "company_industry": "计算机服务",
+        }, domain_active=True)
+        self.assertEqual(boss.get("company"), "示例科技")
+        self.assertEqual(boss.get("industry"), "计算机服务")
+
+        zhilian = resolve_platform_ai_adapter("zhilian").detail_fields({
+            "platform": "zhilian", "company": "智联示例公司",
+            "industryName": "互联网/AI/软件/IT服务",
+        }, domain_active=True)
+        self.assertEqual(zhilian.get("company"), "智联示例公司")
+        self.assertEqual(
+            zhilian.get("industry"), "互联网/AI/软件/IT服务")
+
+    def test_criteria_description_marks_industry_as_domain_clue(self):
+        from webui.ai_filters import _build_criteria_description
+
+        description = _build_criteria_description(
+            {"industry": ["1001"]}, "boss")
+        self.assertIn("领域线索", description)
+        self.assertIn("互联网", description)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,8 +16,15 @@ _logger = get_logger(__name__)
 def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                  frozen_platform, frozen_cdp_port, frozen_profile_key,
                  frozen_browser_account, execution_config, stop_event,
-                 emit, stop_requested, handle_user_stop, save_jd_checkpoint):
-    """Stage 中段：分段抓 JD。返回 (jd_map, jd_failures)；终止路径返回 None。"""
+                 emit, stop_requested, handle_user_stop, save_jd_checkpoint,
+                 domain_context=None):
+    """Stage 中段：分段抓 JD。返回 (jd_map, jd_failures)；终止路径返回 None。
+
+    ``domain_context``：B094 领域上下文。生效时先只读补齐同源 JD 资料，再按
+    幸存岗位计算真正缺项——资料齐全不启动本阶段浏览器，部分缺失只抓缺项；
+    岗位身份、来源完整性、暂停与风控检查一律不豁免。
+    """
+    from webui.ai_domain_context import extend_jd_materials
     from webui.pipeline_exec import (
         close_debug_chrome,
         ensure_chrome_ready,
@@ -25,7 +32,15 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
         fetch_job_details,
     )
 
-    jd_map = dict(resume_jd)
+    jd_map = extend_jd_materials(
+        ctx, resume_jd, domain_context, current_run_id=task_id,
+        job_ids=[str(job.get("job_id") or "") for job in survivors],
+    )
+    todo_jd = [j for j in survivors
+               if str(j.get("job_id", "")) not in jd_map]
+    if jd_map and not todo_jd:
+        # 资料齐全、跳过浏览器时，精筛暂停前必须有本轮持久化副本。
+        save_jd_checkpoint(jd_path, jd_map)
     jd_failures: dict[str, dict[str, str]] = {}
     # 022：卡死防护（app_support 创建并挂 ctx；无 guard 时行为与旧版一致）
     guard = getattr(ctx, "pipeline_guard", None)
@@ -102,7 +117,7 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
         if str(jd or "").strip():
             _clear_resolved_jd_pending(str(job_id))
 
-    if survivors:
+    if todo_jd:
         emit(stage="ensure_chrome", message="启动调试浏览器，准备抓取 JD…")
         # 030：抓 JD 前把浏览器身份重绑到任务冻结账号——粗筛阶段耗时较长，
         # 期间全局活动目录可能被其它请求改写，此处重绑消除污染窗口
@@ -306,8 +321,6 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                 "R2 账号池或轮询断点与任务不一致，无法安全恢复"
             )
 
-        todo_jd = [j for j in survivors
-                   if str(j.get("job_id", "")) not in jd_map]
         emit(stage="fetch_jd", current=len(jd_map), total=len(survivors),
              message=f"抓取 JD（{len(jd_map)}/{len(survivors)}）…")
         DETAIL_CHUNK = max(1, int(execution_config.detail_batch_size))

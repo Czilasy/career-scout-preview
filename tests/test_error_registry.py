@@ -157,6 +157,50 @@ class ErrorRegistryTests(unittest.TestCase):
             self.assertEqual(
                 taxonomy_reason("not_a_real_code"), "内部状态或持久化错误")
 
+    def test_screening_policy_incompatible_is_registered_and_platform_free(self):
+        """B094 T005：规则不兼容有唯一登记分类，不被泛化也不误判为风控。"""
+        from webui.error_registry import (
+            FAILED_CODE_LABELS,
+            REGISTRY,
+            RECOVERABLE_SYSTEMIC_BLOCK_CODES,
+            SYSTEMIC_BLOCK_CODES,
+            resolve_code,
+        )
+        entry = REGISTRY["screening_policy_incompatible"]
+        self.assertIn("screening_policy_incompatible", ERROR_CODES)
+        self.assertEqual(entry["category"], "internal")
+        # 不是账号/风控类阻断：不得被推导成可续跑的 systemic block。
+        self.assertFalse(entry["blocking"])
+        self.assertFalse(entry["retryable"])
+        self.assertNotIn("screening_policy_incompatible", SYSTEMIC_BLOCK_CODES)
+        self.assertNotIn(
+            "screening_policy_incompatible", RECOVERABLE_SYSTEMIC_BLOCK_CODES)
+        self.assertEqual(resolve_code("screening_policy_incompatible"),
+                         "screening_policy_incompatible")
+        message = FAILED_CODE_LABELS["screening_policy_incompatible"]
+        self.assertTrue(message)
+        for token in ("重新判断", "资料"):
+            self.assertIn(token, message)
+        # 树干口径：说明里不出现平台名称。
+        for token in ("boss", "BOSS", "智联", "zhilian", "ZHILIAN"):
+            self.assertNotIn(token, message)
+
+    def test_screening_policy_incompatible_survives_public_layers(self):
+        """分类必须穿过失败入口白名单，不能被降级成 internal_error。"""
+        from webui.ai_screen_failure import _PUBLIC_FAILURE_CODES
+        from webui.flow_task_state import _safe_code
+        self.assertIn("screening_policy_incompatible", _PUBLIC_FAILURE_CODES)
+        self.assertEqual(
+            _safe_code("screening_policy_incompatible"),
+            "screening_policy_incompatible")
+
+    def test_screening_policy_incompatible_message_comes_from_registry(self):
+        from webui.pipeline_exec_status import user_visible_failure_reason
+        from webui.error_registry import FAILED_CODE_LABELS
+        self.assertEqual(
+            user_visible_failure_reason("screening_policy_incompatible", "", "boss"),
+            FAILED_CODE_LABELS["screening_policy_incompatible"])
+
     def test_frontend_mirror_matches_registry(self):
         text = FRONTEND_MIRROR.read_text(encoding="utf-8")
         array_match = re.search(r"ERROR_CODES\s*=\s*\[(.*?)\]\s*as const", text, re.S)

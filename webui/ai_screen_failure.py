@@ -17,6 +17,9 @@ _PUBLIC_FAILURE_CODES = {
     "flow_result_incomplete",
     "flow_result_empty",
     "flow_result_save_failed",
+    # B094：领域判定口径变化，保留登记分类不被泛化成 internal_error。
+    "screening_policy_incompatible",
+    "filter_snapshot_incompatible",
 }
 
 

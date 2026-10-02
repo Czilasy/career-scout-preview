@@ -110,7 +110,7 @@ class BuildMatchSystemPromptTests(unittest.TestCase):
             self.assertIn(field, prompt)
 
     def test_hard_rules_keep(self):
-        """六类硬条件与高危 flag 照常硬约束。"""
+        """无领域选择时六类硬条件与高危 flag 保持旧口径。"""
         prompt = self._prompt()
         self.assertIn("六类字段", prompt)
         self.assertIn("疑似骗局", prompt)
@@ -150,11 +150,147 @@ class BuildMatchSystemPromptTests(unittest.TestCase):
         self.assertIn(
             "已确认的筛选条件（薪资/经验/学历/规模/融资/行业）是硬约束", prompt,
         )
+        self.assertNotIn("行业分类不是硬约束", prompt)
         self.assertIn("flags 为必填字段，无命中输出空数组", prompt)
         self.assertIn(
             "不得把 AI 已识别出的方向冲突、硬性不满足只写进 caveats 后仍判 match",
             prompt,
         )
+
+
+class DomainConstraintAssemblyTests(unittest.TestCase):
+    """B094 T018：粗筛与精筛共用一套领域约束，无选择时保持旧契约。"""
+
+    @staticmethod
+    def _selection(*labels):
+        from webui import ai_domain_policy as domain_policy
+        return domain_policy.DomainSelection(
+            labels=labels, source_kind=domain_policy.SOURCE_ORIGINAL_GROUP,
+        )
+
+    def _match_prompt(self, selection=None):
+        from webui.ai_prompts import build_domain_constraint
+        return build_match_system_prompt(
+            criteria_desc="期望行业（领域线索，不按分类剔除）：互联网",
+            profile_summary="3年Python后端",
+            facts_desc="（无）",
+            features_prompt_text="岗位靠谱特征清单",
+            hard_fields_text="薪资/经验/学历/规模/融资",
+            domain_text=build_domain_constraint(selection),
+        )
+
+    def test_domain_block_covers_work_product_business_and_generic_roles(self):
+        prompt = self._match_prompt(self._selection("互联网/AI/软件/IT服务"))
+        for fragment in (
+            "互联网/AI/软件/IT服务", "工作内容", "产品", "主营业务",
+            "行政", "通用职能", "偶然提到关键词", "办公工具", "不得编造",
+        ):
+            self.assertIn(fragment, prompt)
+
+    def test_domain_block_states_union_and_no_exemption(self):
+        prompt = self._match_prompt(
+            self._selection("互联网/AI/软件/IT服务", "游戏/数字文娱"))
+        self.assertIn("互联网/AI/软件/IT服务", prompt)
+        self.assertIn("游戏/数字文娱", prompt)
+        self.assertIn("任一领域相关即满足领域条件", prompt)
+        self.assertIn("领域相关不豁免任何其它条件", prompt)
+
+    def test_empty_domain_argument_matches_default_assembly(self):
+        plain = self._match_prompt(None)
+        baseline = build_match_system_prompt(
+            criteria_desc="期望行业（领域线索，不按分类剔除）：互联网",
+            profile_summary="3年Python后端",
+            facts_desc="（无）",
+            features_prompt_text="岗位靠谱特征清单",
+            hard_fields_text="薪资/经验/学历/规模/融资",
+        )
+        self.assertEqual(plain, baseline)
+        self.assertNotIn("【领域条件】", plain)
+
+    def test_screen_prompt_reuses_the_same_domain_block(self):
+        from webui.ai_prompts import build_domain_constraint, build_screen_system_prompt
+        block = build_domain_constraint(self._selection("互联网/AI/软件/IT服务"))
+        prompt = build_screen_system_prompt(
+            criteria_desc="（无明确标准，宽松判断）",
+            hard_fields_text="薪资/经验/学历/规模/融资",
+            input_note="",
+            domain_text=block,
+        )
+        self.assertIn(block, prompt)
+        self.assertIn("岗位名称或类别", prompt)
+        self.assertIn("拿不准一律保留", prompt)
+
+    def test_screen_prompt_without_selection_keeps_legacy_rules(self):
+        from webui.ai_prompts import build_screen_system_prompt
+        prompt = build_screen_system_prompt(
+            criteria_desc="（无明确标准，宽松判断）",
+            hard_fields_text="薪资/经验/学历/规模/融资",
+            input_note="",
+        )
+        self.assertNotIn("【领域条件】", prompt)
+        self.assertIn(
+            "已选择的筛选字段是硬约束：岗位标签明确列出的薪资/经验/学历/规模/融资",
+            prompt)
+
+
+class DomainRoughNoteTests(unittest.TestCase):
+    """真实验收返修：粗筛输入里没有公司与业务事实，领域条件只能防误排。
+
+    粗筛若把「是否属于所选领域」当成一项要证明的条件，就会在只看到标题和薪资时
+    写下「领域不相关」，并把画像期望当新增硬条件——两者都违反冻结需求。
+    """
+
+    @staticmethod
+    def _selection(*labels):
+        from webui import ai_domain_policy as domain_policy
+        return domain_policy.DomainSelection(
+            labels=labels, source_kind=domain_policy.SOURCE_ORIGINAL_GROUP,
+        )
+
+    def _rough_prompt(self, selection=None):
+        from webui.ai_prompts import build_domain_rough_note, build_screen_system_prompt
+        return build_screen_system_prompt(
+            criteria_desc="期望行业（领域线索，不按分类剔除）：互联网",
+            hard_fields_text="薪资/经验/学历/规模/融资",
+            input_note="",
+            domain_text=build_domain_rough_note(selection),
+        )
+
+    def test_rough_note_keeps_labels_and_forbids_domain_based_drops(self):
+        prompt = self._rough_prompt(
+            self._selection("互联网/AI/软件/IT服务", "游戏/数字文娱"))
+        self.assertIn("互联网/AI/软件/IT服务", prompt)
+        self.assertIn("游戏/数字文娱", prompt)
+        self.assertIn("不得以「领域不相关」为理由剔除", prompt)
+        self.assertIn("留到取得职位描述后进行", prompt)
+
+    def test_rough_note_does_not_license_new_hard_conditions(self):
+        prompt = self._rough_prompt(self._selection("互联网/AI/软件/IT服务"))
+        for fragment in (
+            "领域相关不豁免任何其它条件",
+            "求职画像与靠谱判定仍按原规则生效",
+            "主营业务",
+        ):
+            self.assertNotIn(fragment, prompt)
+        self.assertIn("候选人画像只用于放宽，不能用来新增硬条件", prompt)
+
+    def test_fine_stage_still_carries_full_domain_criteria(self):
+        from webui.ai_prompts import build_domain_constraint
+        block = build_domain_constraint(self._selection("互联网/AI/软件/IT服务"))
+        self.assertIn("主营业务", block)
+        self.assertIn("领域相关不豁免任何其它条件", block)
+
+    def test_existing_internet_option_includes_ai_and_software_work(self):
+        from webui.ai_prompts import build_domain_constraint
+        block = build_domain_constraint(self._selection("互联网", "游戏"))
+        self.assertIn("现有互联网选项包含 AI、软件、IT 服务", block)
+        self.assertIn("不能抵消岗位工作或产品的直接关联证据", block)
+        self.assertIn("公司名称和行业分类不是实际主营业务证据", block)
+        self.assertIn("不能把无法证明相关写成不相关", block)
+        self.assertIn("不要求同时相关", block)
+
+    def test_rough_note_empty_without_selection(self):
+        self.assertEqual(self._rough_prompt(None), self._rough_prompt())
 
 
 if __name__ == "__main__":

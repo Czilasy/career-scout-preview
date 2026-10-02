@@ -120,6 +120,8 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/ai_platform_adapter.py` — AI 平台字段与筛选 schema 归一化适配器；仅承载 BOSS/智联映射，供 `ai_filters.py`/`ai_screening.py` 单向调用，不持有流程状态机
 - `webui/ai_filters.py` — AI 筛选条件构建与确认不匹配判定助手（021 B7 T022）
 - `webui/ai_screening.py` — AI 粗筛 screen_jobs 与 JD 精筛 match_jds（021 B7 T022）
+- `webui/ai_domain_policy.py` — B094 垂直领域匹配纯规则：行业组选项语义、多选取并集、规则版本与判定兼容判据；不含平台名、编码与 store 访问
+- `webui/ai_domain_context.py` — B094 领域上下文服务：经公开绑定/Flow 读取本轮来源 Track 派生领域选择，只读复用同源 JD 资料，并在恢复前阻断旧判定口径；不写终态
 - `webui/ai_resume.py` — AI 简历解析、统一字段校验与偏好更新（021 B7 T022）
 - `webui/profile_summary.py` — 固定五段求职画像摘要归一化与可靠画像事实补充（B062 用户画像优化）
 - `webui/pipeline_exec.py` — pipeline 执行域门面：re-export 全部既有符号，CDP 活动目录经门面镜像同步（021 B7 T023）
@@ -291,4 +293,4 @@ webui/src/
 
 本宪法高于临时实现偏好；与 Codex 全局提示词或根目录 `AGENTS.md` 冲突时，以更高层规则的验证节奏为准，本宪法只能细化命令与范围，不得额外制造重复全量。修订必须更新版本号并同步模板与项目规则。违反文件边界或验证门禁的改动必须先修复再交付。
 
-**Version**: 1.4.0 | **Ratified**: 2026-08-10 | **Last Amended**: 2026-09-14
+**Version**: 1.4.0 | **Ratified**: 2026-08-10 | **Last Amended**: 2026-10-02

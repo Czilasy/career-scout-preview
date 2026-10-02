@@ -9,7 +9,13 @@ from webui.error_registry import ERROR_INVALID, ERROR_SERVER, ERROR_TRUNCATED, S
 from webui.flag_features import build_features_prompt_text, clean_flags, decide_flags
 from webui.screening_jd_gate import has_usable_jd, missing_jd_verdict
 from webui.profile_facts import build_profile_facts_description
-from webui.ai_prompts import build_match_system_prompt
+from webui.ai_prompts import (
+    build_domain_constraint,
+    build_domain_rough_note,
+    build_match_system_prompt,
+    build_match_retry_messages,
+    build_screen_system_prompt,
+)
 from webui.ai_client import FINE_BATCH_TIMEOUT, _AI_CHECKPOINT_FAILED
 from webui.ai_errors import (
     AICheckpointError,
@@ -35,6 +41,9 @@ from webui.ai_filters import (
     _screen_fields,
     _screen_hard_fields_text,
     _screen_input_note,
+    domain_selection_for_criteria,
+    has_rough_drop_evidence,
+    fine_result_contradicts_selection,
 )
 from webui import recruiter_activity
 from webui.logging_setup import get_logger
@@ -142,33 +151,13 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
     if not jobs:
         return {"kept": kept, "dropped": dropped, "verdicts": verdicts, **_ai_integrity_meta(fallback_state)}
     criteria_desc = _build_criteria_description(criteria, resolved_platform)
-    hard_fields_text = _screen_hard_fields_text(resolved_platform)
-    system_prompt = (
-        "你是求职初筛助手。只按候选人已确认的筛选字段，剔除【明显】不符的岗位。\n"
-        f"{criteria_desc}\n\n"
-        "判断规则（务必按常理，不要死板）：\n"
-        "- 字段为空或未列出 = 不限，不得按该维度剔除；候选人画像只用于放宽，不能用来新增硬条件\n"
-        "- 学历：已选学历为硬约束，岗位标签明确要求高于已选学历（如已选大专/本科而岗位硕士/博士）即剔除；未标学历保留\n"
-        "- 求职类型：仅当岗位标题明确写'实习'且候选人画像明确写'全职'时，视为明显不符合；拿不准一律保留\n"
-        "- 城市不判断（抓取阶段已保证城市）\n"
-        "- 薪资：筛选区间为硬规则，岗位薪资与已选区间无重叠（高于或低于）即排除；'元/天'的实习计价综合判断\n"
-        "- 经验：已选经验为硬约束，岗位标签明确经验下界高于已选范围（如已选1-3年而岗位3-5年）即剔除；未标经验保留\n"
-        f"- 已选择的筛选字段是硬约束：岗位标签明确列出的{hard_fields_text}与已选条件冲突时，必须剔除；未选择或岗位未标明的字段不剔除\n"
-        "- 岗位名称或类别（如客服、讲师、销售、内容制作、运营等）不得单独作为剔除理由\n"
-        "- 求职画像放宽：候选人画像中明确表达放宽的维度（如\"东莞、深圳都可以\"\"不限\"\"接受兼职\"等）以画像表述为准放宽对应判断\n"
-        "- 只排除【明显】不符合的；拿不准一律保留（宁可多留，不可错杀）\n\n"
-        f"输入格式：每行一个岗位，``序号. 标题 | 薪资 | 城市 | 学历 | 规模``{_screen_input_note(resolved_platform)}。\n"
-        "输出格式：只列出【要剔除】的岗位序号与理由，未列出的默认保留。严格输出JSON：\n"
-        '{"dropped":[{"i":3,"reason":"经验5-10年>候选1-3年"},...]}\n'
-        "i 为岗位序号。\n"
-        "reason 必须具体，仅当字段已确认时使用「字段名+岗位值+比较符+候选人值」格式，禁止笼统表述。\n"
-        "示例（仅当对应字段已确认时使用）：\n"
-        '  经验已确认且岗位下界高于候选人上界：reason="经验5-10年>候选1-3年"\n'
-        '  学历已确认且岗位要求高于候选人：reason="学历硕士>候选本科"\n'
-        '  求职类型已确认且岗位为实习/全职冲突：reason="实习岗≠全职"\n'
-        '  薪资已确认且岗位薪资明显低于期望：reason="薪资3-5K<期望8-10K"\n'
-        "禁止使用「经验过高」「不符合」「不匹配」等笼统词汇。\n"
-        "reason 限25字内。若无任何剔除，输出 {\"dropped\":[]}。"
+    domain_selection = domain_selection_for_criteria(criteria, resolved_platform)
+    hard_fields_text = _screen_hard_fields_text(resolved_platform, domain_active=domain_selection.has_selection)
+    system_prompt = build_screen_system_prompt(
+        criteria_desc=criteria_desc,
+        hard_fields_text=hard_fields_text,
+        input_note=_screen_input_note(resolved_platform),
+        domain_text=build_domain_rough_note(domain_selection),
     )
     batches = []
     for start in range(0, len(jobs_to_process), batch_size):
@@ -229,6 +218,9 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         for idx, job in enumerate(batch):
             jid = str(job.get("job_id", ""))
             r = by_i.get(idx)
+            if r and not has_rough_drop_evidence(job, criteria, str(r.get("reason") or ""), resolved_platform):
+                _logger.info("Ignored unsupported rough hard conflict task=%s index=%s", correlation_id, idx)
+                r = None
             if r:
                 reason = str(r.get("reason", "")).strip()
                 b_dropped.append({
@@ -446,12 +438,17 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         )
     criteria_desc = criteria_desc or "（无明确标准，宽松判断）"
     facts_desc = build_profile_facts_description(profile_facts)
+    # B094：领域生效时精筛传完整可用 JD（业务证据可能在正文后段），
+    # 无领域选择保持既有 1500 字输入行为不变。
+    domain_selection = domain_selection_for_criteria(criteria, resolved_platform)
+    domain_active = domain_selection.has_selection
     system_prompt = build_match_system_prompt(
         criteria_desc=criteria_desc,
         profile_summary=summary,
         facts_desc=facts_desc,
         features_prompt_text=build_features_prompt_text(),
-        hard_fields_text=_screen_hard_fields_text(resolved_platform),
+        hard_fields_text=_screen_hard_fields_text(resolved_platform, domain_active=domain_active),
+        domain_text=build_domain_constraint(domain_selection),
     )
     def _match_one_batch(batch, _invalid_retried=False):
         """单批精筛，返回 {jid: verdict}。
@@ -462,20 +459,22 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         """
         batch_desc = []
         for idx, job in enumerate(batch):
+            jd_text = str(job.get("jd", ""))
             item = {
                 "i": idx,
                 "title": job.get("title", ""),
                 "salary": job.get("salary", ""),
                 "location": job.get("location", ""),
                 "tags": job.get("tags") or job.get("job_labels") or job.get("tags_list") or "",
-                "jd": str(job.get("jd", ""))[:1500],
+                "jd": jd_text if domain_active else jd_text[:1500],
             }
-            item.update(_detail_fields(job, resolved_platform))
+            item.update(_detail_fields(job, resolved_platform, domain_active=domain_active))
             batch_desc.append(item)
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(batch_desc, ensure_ascii=False)},
         ]
+        messages = build_match_retry_messages(messages, criteria_desc=criteria_desc) if _invalid_retried else messages
         fail_reason = ""
         _t0 = time.time()
         _req_error_code = None
@@ -534,16 +533,19 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 _emit_final_terminal(job, idx, "uncertain")
                 continue
             r = by_i.get(idx)
-            if not isinstance(r, dict) or not isinstance(r.get("match"), bool):
-                if missing_retry_budget[0] > 0:
-                    missing_retry_budget[0] -= 1
+            invalid_selection = fine_result_contradicts_selection(r, criteria, resolved_platform)
+            if invalid_selection:
+                _logger.info("Invalid fine selection claim task=%s index=%s", correlation_id, idx)
+            if not isinstance(r, dict) or not isinstance(r.get("match"), bool) or invalid_selection:
+                if (not _invalid_retried if invalid_selection else missing_retry_budget[0] > 0):
+                    missing_retry_budget[0] -= int(not invalid_selection)
                     _emit_retry_event(measurement_callback, "fine", 0)
-                    retried = _match_one_batch([job])
+                    retried = _match_one_batch([job], _invalid_retried=invalid_selection)
                     batch_verdicts.update(retried)
                     continue
                 batch_verdicts[jid] = {
                     "verdict": "uncertain",
-                    "reason": "AI 未返回该岗位判定，待人工确认",
+                    "reason": "AI 判定与已选条件矛盾，待人工确认" if invalid_selection else "AI 未返回该岗位判定，待人工确认",
                 }
                 _emit_final_terminal(job, idx, "uncertain")
                 continue

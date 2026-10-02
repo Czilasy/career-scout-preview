@@ -1686,18 +1686,18 @@ class AIMeasurementEventTests(unittest.TestCase):
         """端到端粗筛保留项仍会进入精筛，只有 dropped 才是最终终态。"""
         from webui import ai
         events = []
-        jobs = [{"job_id": f"j{i}", "title": "T", "salary": "10K",
+        jobs = [{"job_id": f"j{i}", "title": "软件开发实习生", "salary": "10K",
                  "location": "上海"} for i in range(5)]
 
         def capture(event_type, **fields):
             events.append({"event_type": event_type, **fields})
 
         def fake_call_ai(messages, url, api_key, **kw):
-            return {"dropped": [{"i": 0, "reason": "城市不符"}]}
+            return {"dropped": [{"i": 0, "reason": "实习岗≠全职"}]}
 
         with patch("webui.ai.call_ai", side_effect=fake_call_ai):
             ai.screen_jobs(
-                jobs, {"profile_summary": "画像"}, "https://x", "key",
+                jobs, {"profile_summary": "只找全职"}, "https://x", "key",
                 batch_size=2, concurrency=1, measurement_callback=capture,
                 emit_kept_terminal=False,
             )

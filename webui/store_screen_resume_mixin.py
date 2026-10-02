@@ -10,16 +10,19 @@ from __future__ import annotations
 class StoreScreenResumeMixin:
     """AI 筛选续跑相关的 screening_runs 数据访问，挂载到 TaskStore。"""
 
-    def load_screening_jd_map(self, run_id):
-        """从 screening_results 读取非 dropped 行的 JD 内容。
+    def load_screening_jd_map(self, run_id, include_dropped=False):
+        """从 screening_results 读取 JD 内容。
 
         键优先取 ``platform_job_id``，缺失时回退 ``job_id``；供 JD 断点
         文件缺失时从结果表回退，避免续跑重复抓取 JD。
+        ``include_dropped=True`` 是只读资料模式，返回该 run 全部有效 JD，
+        不受旧剔除标记限制；默认 ``False`` 保持既有续跑行为。
         """
+        clause = "" if include_dropped else "AND is_dropped = 0 "
         with self._connection() as conn:
             rows = conn.execute(
                 "SELECT platform_job_id, job_id, jd FROM screening_results "
-                "WHERE run_id = ? AND is_dropped = 0 "
+                "WHERE run_id = ? " + clause +
                 "AND jd IS NOT NULL AND TRIM(jd) != ''",
                 (str(run_id),),
             ).fetchall()

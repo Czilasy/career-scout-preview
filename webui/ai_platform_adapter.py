@@ -69,8 +69,24 @@ class PlatformAiAdapter:
     def is_unrestricted(self, field: str, code: object) -> bool:
         return str(code) == "0"
 
-    def screen_hard_fields_text(self) -> str:
-        return "薪资/经验/学历/规模/融资/行业"
+    def domain_selection(self, criteria):
+        """旧调用按实际平台标签解释；已有内部口径（含显式空选择）优先。"""
+        from webui import ai_domain_policy as policy
+
+        if policy.CRITERIA_DOMAIN_KEY in (criteria or {}):
+            return policy.selection_from_criteria(criteria)
+        labels = []
+        for value in (criteria or {}).get("industry") or []:
+            code = self.value_code(value, "industry")
+            if code and not self.is_unrestricted("industry", code):
+                label = self.value_label(code, "industry")
+                if label and label not in labels:
+                    labels.append(label)
+        return policy.DomainSelection(tuple(labels), policy.SOURCE_LEGACY_PLATFORM) if labels else policy.empty_selection()
+
+    def screen_hard_fields_text(self, *, domain_active=False) -> str:
+        # B094：行业不在这份清单里——它不是硬剔除字段，只作领域线索交给语义判断。
+        return "薪资/经验/学历/规模/融资" if domain_active else "薪资/经验/学历/规模/融资/行业"
 
     def screen_input_note(self) -> str:
         return ""
@@ -81,8 +97,14 @@ class PlatformAiAdapter:
             job.get("company_scale", "") or "",
         )
 
-    def detail_fields(self, job: dict) -> dict[str, str]:
-        return {}
+    def detail_fields(self, job: dict, *, domain_active=False) -> dict[str, str]:
+        """精筛携带的已有列表事实：公司与分类只作背景，不证明主营业务。"""
+        if not domain_active:
+            return {}
+        return {
+            "company": str(job.get("company") or "").strip(),
+            "industry": str(job.get("company_industry") or "").strip(),
+        }
 
     def degree_code_label(self, code: object) -> str:
         for label, mapped in boss.DEGREE_MAP.items():
@@ -104,7 +126,7 @@ class PlatformAiAdapter:
         fields = (
             ("salary", boss.SALARY_MAP, "期望薪资"),
             ("experience", boss.EXPERIENCE_MAP, "经验要求"),
-            ("industry", boss.INDUSTRY_MAP, "期望行业"),
+            ("industry", boss.INDUSTRY_MAP, "期望行业（领域线索，不按分类剔除）"),
             ("scale", boss.SCALE_MAP, "期望公司规模"),
             ("stage", boss.STAGE_MAP, "期望融资阶段"),
         )
@@ -263,8 +285,9 @@ class ZhilianAiAdapter(PlatformAiAdapter):
     def is_unrestricted(self, field: str, code: object) -> bool:
         return str(code) in self._UNRESTRICTED_CODES.get(field, frozenset())
 
-    def screen_hard_fields_text(self) -> str:
-        return "薪资/经验/学历/规模/行业/公司性质"
+    def screen_hard_fields_text(self, *, domain_active=False) -> str:
+        # B094：行业只作领域线索，不在这份硬剔除清单里。
+        return "薪资/经验/学历/规模/公司性质" if domain_active else "薪资/经验/学历/规模/行业/公司性质"
 
     def screen_input_note(self) -> str:
         return "；当前平台还会提供行业和公司性质"
@@ -278,15 +301,25 @@ class ZhilianAiAdapter(PlatformAiAdapter):
             self.job_field_text(job, "company_nature"),
         )
 
-    def detail_fields(self, job: dict) -> dict[str, str]:
+    def detail_fields(self, job: dict, *, domain_active=False) -> dict[str, str]:
         degree, experience, scale, industry, nature = self.screen_fields(job)
         return {
             "experience": experience,
             "degree": degree,
+            **({"company": self.company_name(job)} if domain_active else {}),
             "company_scale": scale,
             "industry": industry,
             "company_nature": nature,
         }
+
+    def company_name(self, job: dict) -> str:
+        """列表阶段已有的公司名称，只作背景事实。"""
+        extra = job.get("extra") if isinstance(job.get("extra"), dict) else {}
+        for key in ("company", "company_name", "companyName"):
+            value = job.get(key) or extra.get(key)
+            if str(value or "").strip():
+                return str(value).strip()
+        return ""
 
     def degree_code_label(self, code: object) -> str:
         return self.value_label(code, "degree")
@@ -304,7 +337,8 @@ class ZhilianAiAdapter(PlatformAiAdapter):
             ))
         for key, label in (
             ("salary", "期望薪资"), ("experience", "经验要求"),
-            ("industry", "期望行业"), ("scale", "期望公司规模"),
+            ("industry", "期望行业（领域线索，不按分类剔除）"),
+            ("scale", "期望公司规模"),
             ("company_nature", "公司性质"),
         ):
             names = self.criteria_labels(criteria.get(key), key)
