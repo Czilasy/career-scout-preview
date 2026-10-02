@@ -18,6 +18,61 @@ function makeState(overrides: Partial<DiscoveryState> = {}): DiscoveryState {
   return Object.assign(state, overrides);
 }
 
+describe("顶部步骤按本轮真实完成状态显示对勾", () => {
+  it("仅加载未筛选结果不表示 AI 完成", () => {
+    const state = makeState();
+    state.resultLoaded.value = true;
+    state.currentRoundStatus.value = "scraped_only";
+    expect(state.completedSteps.value).not.toContain("screen");
+  });
+
+  it.each(["running", "paused", "failed", "interrupted", "stopped"])("AI %s 时已有结果也不给筛选打勾", (status) => {
+    const state = makeState();
+    state.resultLoaded.value = true;
+    state.currentRoundStatus.value = "screened";
+    state.screenSnapshot.value = { status, progress: {}, logs: [] };
+    expect(state.completedSteps.value).not.toContain("screen");
+  });
+
+  it("草稿清理不抹去真实抓取完成快照的对勾", () => {
+    const state = makeState();
+    state.scrapeCompleted.value = false;
+    state.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    expect(state.completedSteps.value).toContain("search");
+  });
+
+  it("已查看本轮结果后第四步显示对勾，换画像后全部清空", () => {
+    const state = makeState();
+    state.resultLoaded.value = true;
+    state.pipelineResult.value = { jobs: [], dropped: [] };
+    state.resultsPageSeen.value = true;
+    expect(state.completedSteps.value).toContain("results");
+    state.resetForProfileSwitch();
+    expect(state.completedSteps.value).toEqual([]);
+  });
+
+  it("历史页不借用当前轮的完成标记", () => {
+    const state = makeState();
+    state.analysisReady.value = true;
+    state.scrapeCompleted.value = true;
+    state.resultLoaded.value = true;
+    state.historyRound.value = { runId: "old", platform: "boss", status: "scraped_only", jobCount: 0 };
+    expect(state.completedSteps.value).toEqual([]);
+  });
+
+  it("Flow 阶段投影优先于遗留标记，换轮清空", () => {
+    const state = makeState();
+    state.scrapeCompleted.value = true;
+    state.resultLoaded.value = true;
+    state.currentRoundStatus.value = "screened";
+    state.setFlowReachableSteps(["upload", "search", "screen", "results"], "flow");
+    state.setFlowCompletedSteps(["search"]);
+    expect(state.completedSteps.value).toEqual(["search"]);
+    state.resetForProfileSwitch();
+    expect(state.completedSteps.value).toEqual([]);
+  });
+});
+
 describe("useDiscoveryState.unfinishedRoundStep（035 真实进度页派生）", () => {
   it("① 仅抓取活（scrapeBusy）→ search（02）", () => {
     const state = makeState({ scrapeBusy: ref(true) });

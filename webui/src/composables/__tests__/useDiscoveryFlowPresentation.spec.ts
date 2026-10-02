@@ -63,6 +63,42 @@ function setup(tracks: FlowPresentationTrack[], deps: FlowPresentationDeps = {},
   return { flow, activeStep, presentation };
 }
 
+it("顶部完成状态等待本轮每条轨道，页面解锁不代表整步完成", async () => {
+  const { flow, presentation } = setup([
+    track({ id: "b", stage: "complete", status: "done", screen_run_id: "screen-a", result_run_id: "result-a" }),
+    track({ id: "z", platform: "zhilian", scrape_run_id: "scrape-z", status: "queued" }),
+  ], {
+    fetchTaskState: async (id) => ({ status: id === "scrape-z" ? "queued" : id === "screen-z" ? "running" : "completed", progress: {}, logs: [] }),
+  });
+  await presentation.refresh();
+  expect(presentation.unlockedSteps.value).toContain("results");
+  expect(presentation).toHaveProperty("completedStages.value", []);
+  flow.value!.tracks[1] = track({ id: "z", platform: "zhilian", scrape_run_id: "scrape-z", screen_run_id: "screen-z", stage: "ai" });
+  await presentation.refresh();
+  expect(presentation).toHaveProperty("completedStages.value", []);
+});
+
+it("全部抓取完成但仍有 AI 运行时只完成抓取步骤", async () => {
+  const { presentation } = setup([
+    track({ id: "b", stage: "complete", status: "done", screen_run_id: "screen-a" }),
+    track({ id: "z", platform: "zhilian", scrape_run_id: "scrape-z", screen_run_id: "screen-z", stage: "ai" }),
+  ], {
+    fetchTaskState: async (id) => ({ status: id === "screen-z" ? "running" : "completed", progress: {}, logs: [] }),
+  });
+  await presentation.refresh();
+  expect(presentation).toHaveProperty("completedStages.value", ["search"]);
+});
+
+it("完成状态刷新可恢复，但新 Flow 不沿用旧轨道快照", async () => {
+  const { flow, presentation } = setup([track({ stage: "complete", status: "done", screen_run_id: "screen-a" })], {
+    fetchTaskState: async () => ({ status: "completed", progress: {}, logs: [] }),
+  });
+  await presentation.refresh();
+  expect(presentation).toHaveProperty("completedStages.value", ["search", "screen"]);
+  flow.value = { id: "next", tracks: [track({ scrape_run_id: "new-scrape", status: "queued" })] };
+  expect(presentation).toHaveProperty("completedStages.value", []);
+});
+
 it("046 A02: completed scrape has no action targeting the later running AI", async () => {
   const { presentation } = setup([track({ stage: "ai", status: "running", screen_run_id: "screen-a" })], {
     fetchTaskState: async (runId) => ({ status: runId === "scrape-a" ? "completed" : "running", progress: {}, logs: [] }),

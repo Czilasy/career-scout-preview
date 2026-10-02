@@ -14,6 +14,7 @@ import {
   projectResumeSuggestionToSchema,
   shouldConfirmNationalScope,
   TRACK_PROBLEM_STATUSES,
+  STAGE_COMPLETED_STATUSES,
 } from "../discovery";
 import type {
   AdvancedSettingsState,
@@ -308,6 +309,8 @@ const flowReachWatermark = ref<Set<StepId>>(new Set<StepId>());
 const flowReachWatermarkOwner = ref("");
 // Flow 归属：投影在场即为真。null（离开「全部」、Flow 不再由本页持有）即交回 legacy 分支。
 const flowNavigationOwned = ref(false);
+// 对勾只接收当前 Flow 的真实阶段投影，与页面可达性分开。
+const flowCompletedSteps = ref<StepId[] | null>(null);
 const navigationManualHold = ref(false);
 // B096：并行 Flow 的活动 Track 是页面级占用事实，不属于任一平台草稿。
 // 由协调器把 parallelFlow.hasUnfinishedRound 投影进来，所有轮次范围守卫共用。
@@ -1038,6 +1041,7 @@ function reconcileActiveStep(this: NavigationOwner | undefined, step?: string): 
 
 function resetNavigation(this: NavigationOwner | undefined): void {
   flowReachableSteps.value = null;
+  flowCompletedSteps.value = null;
   // 换轮 / 换画像：上一轮的入口不带给新一轮，水位与归属一并清空。
   flowNavigationOwned.value = false;
   clearFlowReachWatermark();
@@ -1056,11 +1060,30 @@ function capsuleNavigationMeta(stuckAt: "scrape" | "screen" | "none" = "none") {
 }
 
 
+function setFlowCompletedSteps(steps: StepId[] | null): void {
+  flowCompletedSteps.value = steps;
+}
+
 const completedSteps = computed<StepId[]>(() => {
+  if (historyMode.value) return [];
   const completed: StepId[] = [];
   if (analysisReady.value) completed.push("upload");
-  if (scrapeCompleted.value) completed.push("search");
-  if (resultLoaded.value) completed.push("screen");
+  if (flowCompletedSteps.value !== null || flowNavigationOwned.value) {
+    completed.push(...(flowCompletedSteps.value || []));
+  } else {
+    // 有任务快照时以本段状态为准；无快照的旧轮才使用已恢复的结果事实。
+    const scrapeStatus = scrapeSnapshot.value?.status;
+    const screenStatus = screenSnapshot.value?.status;
+    if (!scrapeBusy.value && (scrapeStatus
+      ? STAGE_COMPLETED_STATUSES.includes(scrapeStatus)
+      : scrapeCompleted.value || resultLoaded.value)) completed.push("search");
+    if (!screenBusy.value && !recrawlBusy.value && !pausedRunId.value && !isScrapedOnly.value
+      && (screenStatus ? STAGE_COMPLETED_STATUSES.includes(screenStatus)
+        : resultLoaded.value && currentRoundStatus.value === "screened" && !finishedPartial.value)) {
+      completed.push("screen");
+    }
+  }
+  if (resultLoaded.value && pipelineResult.value && resultsPageSeen.value) completed.push("results");
   return completed;
 });
 
@@ -1735,6 +1758,7 @@ return {
   scopeLockReason,
   enabledSteps,
   completedSteps,
+  setFlowCompletedSteps,
   currentCopy,
   cityList,
   effectiveSearchCities,

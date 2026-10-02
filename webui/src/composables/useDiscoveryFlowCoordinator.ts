@@ -210,6 +210,15 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
     },
   });
 
+  watch(
+    [flowPresentation.completedStages, parallelMode, () => flow.flow.value?.selection, state.draftPlatform],
+    ([completed, allPlatforms, selection, draft]) => {
+      const ownsCurrentRound = allPlatforms ? selection === "all" : selection === draft;
+      state.setFlowCompletedSteps(ownsCurrentRound ? completed : null);
+    },
+    { immediate: true },
+  );
+
   const flowFailureNotice = computed(() => {
     if (!parallelMode.value || flow.flow.value?.selection !== "all") return "";
     const tracks = (state.pipelineResult.value as (typeof state.pipelineResult.value & {

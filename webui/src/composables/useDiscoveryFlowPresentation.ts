@@ -2,6 +2,7 @@ import { computed, reactive, ref, type Ref } from "vue";
 import {
   ACTIVE_TRACK_STATUSES,
   STAGE_IN_FLIGHT_STATUSES,
+  STAGE_COMPLETED_STATUSES,
   TRACK_PROBLEM_STATUSES,
   TRACK_STOPPED_STATUSES,
   TERMINAL_TRACK_STATUSES,
@@ -701,12 +702,35 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
   }
 
   const runtimeFor = computed(() => stateFor(flowId.value));
+  const completedStages = computed<FlowStepId[]>(() => {
+    const currentTracks = input.flow.value?.tracks || [];
+    if (!currentTracks.length) return [];
+    const stageComplete = (kind: FlowProgressKind, track: FlowPresentationTrack): boolean => {
+      if (kind === "screen" && (track.unfinished_ai_screening === true
+        || TRACK_STOPPED_STATUSES.includes(track.status)
+        || (TERMINAL_TRACK_STATUSES.includes(track.status) && !STAGE_COMPLETED_STATUSES.includes(track.status)))) return false;
+      const runId = kind === "scrape" ? track.scrape_run_id : track.screen_run_id;
+      const items = kind === "scrape" ? scrapeItems.value : screenItems.value;
+      const item = items.find((candidate) => candidate.trackId === track.id && candidate.runId === runId);
+      if (item) return STAGE_COMPLETED_STATUSES.includes(String(item.snapshot.status || ""));
+      // 初次水合前只接受后台已确认的交接/成功事实，不借页面解锁推断完成。
+      if (kind === "scrape") return Boolean(track.scrape_run_id) && isAiCurrentStage(track);
+      return Boolean(track.screen_run_id || track.ai_screened)
+        && STAGE_COMPLETED_STATUSES.includes(track.status)
+        && track.unfinished_ai_screening !== true;
+    };
+    const completed: FlowStepId[] = [];
+    if (currentTracks.every((track) => stageComplete("scrape", track))) completed.push("search");
+    if (currentTracks.every((track) => stageComplete("screen", track))) completed.push("screen");
+    return completed;
+  });
   return {
     flowId,
     hydrated: computed(() => runtimeFor.value.hydrated),
     manualHold,
     unlockedSteps: enabledSteps,
     highestUnlocked,
+    completedStages,
     // 页面层要回答「这条线有没有结果、还有谁在跑」时读这一份投影——与上面的解锁判定
     // 同一条 tracks 链（结果投影进来后会覆盖失败轨道的状态与岗位），不再各数一份 Flow。
     flowTracks: tracks,
