@@ -364,6 +364,7 @@ describe("Discovery recovery paths", () => {
     await flushPromises();
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
 
@@ -1216,6 +1217,7 @@ describe("Discovery recovery paths", () => {
 
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
     expect(wrapper.get('[data-testid="history-round-marker"]')).toBeTruthy();

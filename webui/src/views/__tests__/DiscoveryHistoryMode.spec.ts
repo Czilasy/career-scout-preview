@@ -108,6 +108,8 @@ describe("DiscoveryView history mode", () => {
     await flushPromises();
     expect(wrapper.find('[data-testid="history-drawer"]').exists()).toBe(true);
 
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
+
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
 
@@ -324,6 +326,7 @@ describe("DiscoveryView history mode", () => {
     // 进智联历史轮，选第二条（历史现场）
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-zhilian"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="history-round-marker"]').exists()).toBe(true);
@@ -346,6 +349,7 @@ describe("DiscoveryView history mode", () => {
     // 再进同一历史轮：历史现场（选中的第二条）仍在。
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-zhilian"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
     expect(wrapper.get('[data-testid="job-detail"]').text()).toContain("历史岗位二");
@@ -406,6 +410,7 @@ describe("DiscoveryView history mode", () => {
     // 看一条 BOSS 历史（顶部平台段跟着历史轮展示 BOSS，但只是展示）。
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
@@ -465,6 +470,7 @@ describe("DiscoveryView history mode", () => {
     // 进智联历史
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-zhilian"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="platform-current-zhilian"]').exists()).toBe(true);
@@ -512,6 +518,7 @@ describe("DiscoveryView history mode", () => {
 
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="history-round-marker"]').exists()).toBe(true);
@@ -602,6 +609,7 @@ describe("DiscoveryView history mode", () => {
     await flushPromises();
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-zhilian"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
 
@@ -669,6 +677,7 @@ describe("DiscoveryView history mode", () => {
     await flushPromises();
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
 
@@ -754,6 +763,7 @@ describe("DiscoveryView history mode", () => {
     // 看历史（真实路径：开抽屉 → 进历史轮）
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="history-round-marker"]').exists()).toBe(true);
@@ -782,6 +792,7 @@ describe("DiscoveryView history mode", () => {
 
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
     // 历史轮浏览期间：当前轮「进行确认AI筛选条件」入口不得出现（scrapeCompleted 未被历史轮置位）

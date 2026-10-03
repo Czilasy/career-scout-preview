@@ -2,7 +2,9 @@
 
 **Branch**: `codex/spec/b094-vertical-domain-match` | **Date**: 2026-10-02 | **Spec**: [spec.md](spec.md)
 
-**Status**: 2026-10-03 按用户全权修复授权执行独立审查返修；业务需求保持冻结，最终验证状态以 Tasks 最新记录为准。
+**Status**: 2026-10-03 按用户“开始执行修复和优化达到可以交付的条件”授权处理交付缺口；业务需求保持冻结，仅新增以下测试维护范围，最终验证状态以 Tasks 最新记录为准。
+
+**Delivery Base**: `f43ed37`；当前交付范围门禁同时检查该基准到 HEAD 的改动及未提交层。用户最新确认：领域效果达到 90% 即可；暂停原失败用例及相关回归未复现超时则本轮通过；修复原失败测试并聚焦验证，不重复全量，不自动提交、合并或推送。
 
 ## Summary
 
@@ -76,6 +78,8 @@ Phase 0 前已核对架构原则；Phase 1 后复核无需要原则豁免的设�
 - 后续实施允许同步：`README.md`、`CHANGELOG.md`；只写真实落地的用户可感知变化。
 - 后续实施允许修改 `.specify/memory/constitution.md` 的模块地图，登记两个新模块，不改变原则或门禁。
 - 本轮修复额外允许：`webui/src/errorCodes.ts` 仅同步登记错误说明；`tests/healthy_pipeline/test_pipeline_convergence_pending.py` 仅调整原失败用例为部分 JD 缺失，保留持久化断言；`tests/ai/test_ai_match.py` 仅将原计数测试的无证据城市剔除假件改为有标题和画像证据的实习/全职冲突，保留全部计数断言。两份超长既有测试不增长、不新增逻辑。以上是用户全权修复授权下的必要契约接点，不扩展业务需求。
+- 交付修复追加范围（用户 2026-10-03 最新执行授权）：`webui/src/components/__tests__/ResultHistoryDrawer.spec.ts`、`webui/src/views/__tests__/DiscoveryHistoryMode.spec.ts`、`webui/src/views/__tests__/DiscoveryRecovery.spec.ts`、`webui/src/views/__tests__/DiscoveryScrapeOnly.spec.ts`、`webui/src/views/__tests__/DiscoveryView.spec.ts`。仅修正历史平台导航前提、轨道行选择器，以及已确认的聚合/平台分页和移除冻结提示契约；保留历史只读、计数、删除、日志、详情、键盘和原始数据不泄露的业务断言，新增默认聚合页守卫。不改前端产品代码、历史 Spec 或冻结哈希，不新增文件。五文件负责当前前端聚焦回归，不等同前端全量。
+- 门禁维护追加范围（用户最新明确允许修改并要求测试通过）：`tests/test_b096_final_review.py`。历史冻结清单原字节及旧 Spec 保持只读；旧产品字节冻结和跨所有后续功能的旧范围检查改为历史清单完整性及本次精确交付范围检查。不得删除业务守卫、跳过用例或放宽暂停超时；新增清单损坏和越界文件必须失败的负向检查。
 - `.specify/feature.json` 已指向本版本，不重复改写。`.trae/rules/project_rules.md` 不存在，以本索引和现有 feature 状态提供代理定位，不建立平行项目规则。
 
 ### 禁止修改

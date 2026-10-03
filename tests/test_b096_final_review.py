@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import pathlib
 import subprocess
 import tempfile
@@ -270,12 +269,43 @@ if __name__ == "__main__":
 
 
 class B096V2StructuralGuardTests(unittest.TestCase):
-    """T001: freeze V2 boundaries before implementation."""
+    """Preserve historical evidence and enforce the active delivery boundary."""
 
     ROOT = pathlib.Path(__file__).resolve().parents[1]
     #: SPEC 046 V2 之前那一个提交（`chore(release): bump version to 1.9.5`）：
-    #: 边界闸以此为基准核对「本链改过的全部文件」，而不只是未提交的那一层。
+    #: 仅记录原 V2 开发基准；当前交付范围使用下方 DELIVERY_BASE_COMMIT。
     V2_CHAIN_BASE_COMMIT = "54164e6"
+    # 用户已授权完成 B094 的测试收口。范围门禁按当前交付链检查，
+    # 不再把后续独立功能永久绑定到已结束的 B096 开发快照。
+    DELIVERY_BASE_COMMIT = "f43ed37"
+    DELIVERY_ALLOWED_PATHS = frozenset({
+        ".specify/memory/constitution.md", "CHANGELOG.md", "README.md",
+        "specs/009-ai-screen-trust/INDEX.md",
+        "specs/009-ai-screen-trust/v2/contracts/domain-screening.md",
+        "specs/009-ai-screen-trust/v2/plan.md",
+        "specs/009-ai-screen-trust/v2/quickstart.md",
+        "specs/009-ai-screen-trust/v2/tasks.md",
+        "tests/ai/test_ai_domain_context.py", "tests/ai/test_ai_domain_recall.py",
+        "tests/ai/test_ai_domain_repair.py", "tests/ai/test_ai_match.py",
+        "tests/ai/test_ai_platform_filters.py",
+        "tests/healthy_pipeline/test_pipeline_convergence_pending.py",
+        "tests/test_ai_prompts.py", "tests/test_b096_production_flow.py",
+        "tests/test_error_registry.py", "tests/test_screen_flow.py",
+        "tests/test_b096_final_review.py",
+        "webui/ai_domain_context.py", "webui/ai_domain_policy.py",
+        "webui/ai_filters.py", "webui/ai_platform_adapter.py",
+        "webui/ai_prompts.py", "webui/ai_screen_failure.py",
+        "webui/ai_screening.py", "webui/error_registry.py",
+        "webui/flow_task_state.py", "webui/prompt_texts.py",
+        "webui/runners/ai_screen_jd.py", "webui/runners/ai_screen_task.py",
+        "webui/screen_flow.py", "webui/src/errorCodes.ts",
+        "webui/store_screen_resume_mixin.py",
+        "webui/src/components/__tests__/ResultHistoryDrawer.spec.ts",
+        "webui/src/views/__tests__/DiscoveryHistoryMode.spec.ts",
+        "webui/src/views/__tests__/DiscoveryRecovery.spec.ts",
+        "webui/src/views/__tests__/DiscoveryScrapeOnly.spec.ts",
+        "webui/src/views/__tests__/DiscoveryView.spec.ts",
+    })
     BASELINE_PATH = (
         ROOT / "specs" / "046-parallel-platform-flow" / "v2"
         / "pre-v2-protected.sha256"
@@ -477,37 +507,38 @@ class B096V2StructuralGuardTests(unittest.TestCase):
         "webui/source_zhilian_cdp.py",
     })
 
-    def test_baseline_files_keep_pre_v2_hashes(self):
-        expected = {}
-        for raw in self.BASELINE_PATH.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            digest, relative = line.split("  ", 1)
-            expected[relative.replace("\\", "/")] = digest
-        self.assertEqual(len(expected), 76)
-        missing = []
-        changed = []
-        for relative, digest in expected.items():
-            path = self.ROOT / relative
-            if not path.is_file():
-                missing.append(relative)
-                continue
-            actual = hashlib.sha256(path.read_bytes()).hexdigest()
-            if actual != digest:
-                changed.append(relative)
-        self.assertEqual(missing, [])
-        self.assertEqual(changed, [])
+    def _assert_historical_manifest_unchanged(self):
+        relative = "specs/046-parallel-platform-flow/v2/pre-v2-protected.sha256"
+        frozen = subprocess.check_output(
+            ["git", "show", f"{self.DELIVERY_BASE_COMMIT}:{relative}"],
+            cwd=self.ROOT,
+        )
+        # Git 与 Windows checkout 换行不同不表示历史清单被改写。
+        self.assertEqual(self.BASELINE_PATH.read_bytes().replace(b"\r\n", b"\n"),
+                         frozen.replace(b"\r\n", b"\n"))
+        entries = [line.split("  ", 1) for line in frozen.decode("utf-8").splitlines()
+                   if line.strip() and not line.startswith("#")]
+        self.assertEqual(len(entries), 76)
+        for digest, relative in entries:
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+            self.assertTrue((self.ROOT / relative).is_file(), relative)
+
+    def test_historical_pre_v2_manifest_is_preserved(self):
+        # 冻结哈希是历史审计资料；已授权的新功能不需保持旧产品字节不变。
+        self._assert_historical_manifest_unchanged()
+
+    def test_historical_manifest_edit_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            corrupted = pathlib.Path(temp) / "protected.sha256"
+            source = self.BASELINE_PATH.read_bytes()
+            corrupted.write_bytes(source.replace(b"b5d53", b"05d53", 1))
+            with mock.patch.object(self, "BASELINE_PATH", corrupted), self.assertRaises(AssertionError):
+                self._assert_historical_manifest_unchanged()
 
     def _committed_chain_changes(self) -> set[str]:
-        """本链已提交的变更文件（`54164e6..HEAD`）。
-
-        只看工作树的那一版查不出已经进过仓库的越界改动：返修批次一路提交上去，
-        边界闸到收口时永远「干净」。T046 要的是允许路径与冻结清单之外零新增差异，
-        所以基准必须包含提交区间。
-        """
+        """当前交付基准到 HEAD 的已提交改动，不能只检查未提交层。"""
         result = subprocess.run(
-            ["git", "diff", "--name-only", f"{self.V2_CHAIN_BASE_COMMIT}..HEAD"],
+            ["git", "diff", "--name-only", f"{self.DELIVERY_BASE_COMMIT}..HEAD"],
             cwd=self.ROOT, check=True, capture_output=True, text=True,
             encoding="utf-8",
         )
@@ -534,27 +565,19 @@ class B096V2StructuralGuardTests(unittest.TestCase):
             paths.add(path)
         return paths
 
-    def test_no_chain_or_working_tree_changes_outside_v2_boundary(self):
-        """T046「允许路径和冻结清单之外零新增差异」（原 `test_no_new_working_tree_changes_outside_v2_boundary`）。
+    def _assert_delivery_boundary(self, changed):
+        self.assertEqual(sorted(set(changed) - self.DELIVERY_ALLOWED_PATHS), [])
 
-        基准从「只看工作树」改成「提交区间 `54164e6..HEAD` 的变更文件 ∪ 工作树未提交变更」：
-        本链的越界改动大多已经提交，旧写法在收口时看不见它们。断言形式不放宽——
-        清单里只要有一条文件既不在冻结基线、也不在逐条登记过的允许路径里，就失败。
-        """
-        changed = self._committed_chain_changes() | self._working_tree_changes()
-        protected = {
-            raw.split("  ", 1)[1].strip().replace("\\", "/")
-            for raw in self.BASELINE_PATH.read_text(encoding="utf-8").splitlines()
-            if raw.strip() and not raw.strip().startswith("#")
-        }
-        unexpected = sorted(
-            path for path in changed
-            if path not in protected
-            and path not in self.V2_ALLOWED_PATHS
-            and path not in self.E2E_FOLLOWUP_ALLOWED_PATHS
-            and path not in self.INSTANCE_REPAIR_ALLOWED_PATHS
+    def test_no_changes_outside_current_delivery_boundary(self):
+        self._assert_delivery_boundary(
+            self._committed_chain_changes() | self._working_tree_changes()
         )
-        self.assertEqual(unexpected, [])
+
+    def test_delivery_boundary_rejects_unapproved_files(self):
+        for forbidden in ("webui/app.py", "webui/store.py",
+                          "specs/046-parallel-platform-flow/v2/pre-v2-protected.sha256"):
+            with self.subTest(path=forbidden), self.assertRaises(AssertionError):
+                self._assert_delivery_boundary({forbidden})
 
     INSTANCE_REPAIR_ALLOWED_PATHS = frozenset({
         # 2026-10-02 接手明确授权：046 V2 Plan 精确范围，历史哈希原样保留。

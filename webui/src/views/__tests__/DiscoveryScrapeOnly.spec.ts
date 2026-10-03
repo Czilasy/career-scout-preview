@@ -322,6 +322,7 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
     // 打开历史抽屉并打开该轮（历史入口由 App 顶栏触发，组件内走 exposed 方法）
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     const row = wrapper.find('[data-testid="history-round-row"]');
     await row.trigger("click");
     await flushPromises();

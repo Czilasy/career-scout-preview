@@ -28,8 +28,8 @@ function item(overrides: Partial<HistoryRoundItem> = {}): HistoryRoundItem {
 }
 
 describe("ResultHistoryDrawer", () => {
-  function mountDrawer(overrides: Record<string, unknown> = {}) {
-    return mount(ResultHistoryDrawer, {
+  async function mountDrawer(overrides: Record<string, unknown> = {}) {
+    const wrapper = mount(ResultHistoryDrawer, {
       props: {
         open: true,
         items: [
@@ -50,10 +50,27 @@ describe("ResultHistoryDrawer", () => {
         ...overrides,
       },
     });
+    // 明确进入夹具所属的历史页；产品默认页仍是聚合，由独立用例检查。
+    const flows = (overrides.flowItems || []) as FlowHistoryItem[];
+    const rounds = (overrides.items || [item()]) as HistoryRoundItem[];
+    const platform = flows.find((flow) => !flow.legacy)?.selection
+      || rounds[0]?.platform || "boss";
+    const tab = platform === "all" ? "aggregate" : platform;
+    await wrapper.get(`[data-testid="history-platform-tab-${tab}"]`).trigger("click");
+    return wrapper;
   }
 
-  it("groups rounds by platform, maps machine statuses to Chinese, and marks latest", () => {
-    const wrapper = mountDrawer();
+  it("opens on the aggregate tab before explicit platform navigation", () => {
+    const wrapper = mount(ResultHistoryDrawer, {
+      props: { open: true, items: [item()], loading: false, error: "", deleting: false, deleteTarget: null },
+    });
+    expect(wrapper.get('[data-testid="history-platform-tab-aggregate"]').attributes("aria-selected")).toBe("true");
+    expect(wrapper.get('[data-testid="history-empty"]').text()).toBe("暂无聚合流程");
+    expect(wrapper.find('[data-testid="history-round-row"]').exists()).toBe(false);
+  });
+
+  it("groups rounds by platform, maps machine statuses to Chinese, and marks latest", async () => {
+    const wrapper = await mountDrawer();
     expect(wrapper.findAll('[data-platform="boss"]')).toHaveLength(1);
     expect(wrapper.findAll('[data-platform="zhilian"]')).toHaveLength(1);
     expect(wrapper.get('[data-testid="history-platform-tab-boss"]').text()).toContain("2");
@@ -68,7 +85,7 @@ describe("ResultHistoryDrawer", () => {
     expect(wrapper.findAll('[data-testid="history-latest-badge"]')).toHaveLength(2);
   });
 
-  it("renders one outer Flow card with two platform tracks", () => {
+  it("renders one outer Flow card with two platform tracks", async () => {
     const flow: FlowHistoryItem = {
       flow_id: "flow-history",
       profile_id: "profile-flow",
@@ -83,7 +100,7 @@ describe("ResultHistoryDrawer", () => {
         { platform: "zhilian", status: "failed", jobs: [], message: "未完成 AI 筛选", screened_count: 0 },
       ],
     };
-    const wrapper = mountDrawer({ items: [], flowItems: [flow] });
+    const wrapper = await mountDrawer({ items: [], flowItems: [flow] });
 
     expect(wrapper.find('[data-testid="history-flow-card"]').exists()).toBe(true);
     expect(wrapper.findAll('[data-testid="history-flow-track"]')).toHaveLength(2);
@@ -119,14 +136,14 @@ describe("ResultHistoryDrawer", () => {
         },
       ],
     };
-    const wrapper = mountDrawer({ items: [], flowItems: [flow] });
+    const wrapper = await mountDrawer({ items: [], flowItems: [flow] });
 
     // 详情入口只认结果轮；抓取任务线在、日志入口就必须在（见下方删除轮回归）。
     expect(wrapper.find(
-      '[data-testid="history-flow-track"][data-platform="boss"] button.history-flow-track-button',
+      '[data-testid="history-flow-track"][data-platform="boss"] .history-flow-track-line[role=button]',
     ).exists()).toBe(false);
-    expect(wrapper.get('[data-testid="history-flow-track"][data-platform="boss"] .history-flow-track-button--static').text()).toContain("失败");
-    await wrapper.get('[data-testid="history-flow-track"][data-platform="zhilian"] button').trigger("click");
+    expect(wrapper.get('[data-testid="history-flow-track"][data-platform="boss"] .history-flow-track-line--static').text()).toContain("失败");
+    await wrapper.get('[data-testid="history-flow-track"][data-platform="zhilian"] .history-flow-track-line[role=button]').trigger("click");
     expect(wrapper.emitted("open-round")).toEqual([["result-snapshot"]]);
   });
 
@@ -147,7 +164,7 @@ describe("ResultHistoryDrawer", () => {
         { platform: "zhilian", status: "done", result_run_id: null, scrape_run_id: "zhilian-scrape", jobs: [], dropped: [] },
       ],
     };
-    const wrapper = mountDrawer({ items: [], flowItems: [flow] });
+    const wrapper = await mountDrawer({ items: [], flowItems: [flow] });
 
     const card = wrapper.get('[data-testid="history-flow-card"]');
     // 两条轨道都没有结果轮：整卡不出现任何「完成」字样。
@@ -168,12 +185,12 @@ describe("ResultHistoryDrawer", () => {
       })]);
       // 没有可删轮次 → 不给删除入口；详情入口仍只认 result_run_id。
       expect(track.find('[data-testid="history-delete-trigger"]').exists()).toBe(false);
-      expect(track.find("button.history-flow-track-button").exists()).toBe(false);
+      expect(track.find(".history-flow-track-line[role=button]").exists()).toBe(false);
     }
   });
 
   // 结果轮被删、但抓取台账还在的轨道：如实说明「已抓取，未筛选」，不得说完成。
-  it("labels a Flow track without a result round but with scraped jobs as unscreened", () => {
+  it("labels a Flow track without a result round but with scraped jobs as unscreened", async () => {
     const flow: FlowHistoryItem = {
       flow_id: "flow-deleted-but-scraped",
       profile_id: "profile-deleted-but-scraped",
@@ -187,7 +204,7 @@ describe("ResultHistoryDrawer", () => {
         jobs: [{ job_id: "b1" }], dropped: [], message: "未完成 AI 筛选",
       }],
     };
-    const wrapper = mountDrawer({ items: [], flowItems: [flow] });
+    const wrapper = await mountDrawer({ items: [], flowItems: [flow] });
     const card = wrapper.get('[data-testid="history-flow-card"]');
     expect(card.get(".history-round-status").text()).toBe("已抓取，未筛选");
     expect(card.get('[data-testid="history-flow-track-status"]').text()).toBe("已抓取，未筛选");
@@ -195,7 +212,7 @@ describe("ResultHistoryDrawer", () => {
   });
 
   // 界面文案口径属树干统一规则：后端状态枚举不得以任何形式出现在界面上。
-  it("maps every Flow status the drawer can receive to Chinese copy without echoing enums", () => {
+  it("maps every Flow status the drawer can receive to Chinese copy without echoing enums", async () => {
     const cases: Array<[string, string]> = [
       ["interrupted", "已中断"],
       ["stopped", "已停止"],
@@ -221,7 +238,7 @@ describe("ResultHistoryDrawer", () => {
         scrape_run_id: `scrape-${status}`, jobs: [{ job_id: "j1" }], dropped: [],
       }],
     }));
-    const wrapper = mountDrawer({ items: [], flowItems: flows });
+    const wrapper = await mountDrawer({ items: [], flowItems: flows });
     const cards = wrapper.findAll('[data-testid="history-flow-card"]');
     expect(cards).toHaveLength(cases.length);
     for (const [status, label] of cases) {
@@ -246,7 +263,7 @@ describe("ResultHistoryDrawer", () => {
       legacy: true,
       tracks: [{ platform: "boss", status: "done", result_run_id: "h1", screen_run_id: "h1", jobs: [] }],
     };
-    const wrapper = mountDrawer({
+    const wrapper = await mountDrawer({
       items: [
         item({ run_id: "h1", scrape_task_id: "scrape-h1" }),
         item({ run_id: "h2", status: "partial", is_latest: false, scrape_task_id: "scrape-h2" }),
@@ -269,8 +286,8 @@ describe("ResultHistoryDrawer", () => {
   });
 
   // Flow 卡片只承载有 durable flow 身份的真实 Flow；旧轮继续走平铺列表，
-  // 两种视图共存且不重复展示同一个结果轮。
-  it("shows real Flow cards beside legacy round rows without duplicating flow-owned rounds", () => {
+  // 聚合页展示组合流程；平台页分别展示该平台的结果轮，保留旧轮动作。
+  it("separates aggregate Flow cards and platform rounds without duplicating rows", async () => {
     const realFlow: FlowHistoryItem = {
       flow_id: "flow-1",
       profile_id: "profile-mixed",
@@ -284,7 +301,7 @@ describe("ResultHistoryDrawer", () => {
         { platform: "zhilian", status: "done", result_run_id: "flow-round-z", jobs: [] },
       ],
     };
-    const wrapper = mountDrawer({
+    const wrapper = await mountDrawer({
       items: [
         item({ run_id: "flow-round", scrape_task_id: "flow-scrape", is_latest: false }),
         item({ run_id: "legacy-round", scrape_task_id: "scrape-legacy" }),
@@ -296,11 +313,18 @@ describe("ResultHistoryDrawer", () => {
     // Flow 卡片也要给出这一轮的时间：平铺行不再覆盖这些轮次后，时间是
     // 用户分辨「哪一轮是刚才那次」的唯一线索。
     expect(wrapper.get('[data-testid="history-flow-card"]').text()).toContain("2026-08-12 09:20");
-    const rows = wrapper.findAll('[data-testid="history-round-row"]');
-    expect(rows).toHaveLength(1);
-    expect(rows[0].attributes("data-run-id")).toBe("legacy-round");
+    expect(wrapper.findAll('[data-testid="history-round-row"]')).toHaveLength(0);
     expect(wrapper.text()).toContain("共 1 个流程");
-    expect(wrapper.text()).toContain("共 1 轮");
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
+    expect(wrapper.findAll('[data-testid="history-flow-card"]')).toHaveLength(0);
+    const rows = wrapper.findAll('[data-testid="history-round-row"]');
+    expect(rows.map((row) => row.attributes("data-run-id"))).toEqual(["flow-round", "legacy-round"]);
+    expect(wrapper.text()).toContain("共 2 轮");
+    await wrapper.get('[data-testid="history-platform-tab-zhilian"]').trigger("click");
+    expect(wrapper.get('[data-testid="history-platform-tab-zhilian"]').attributes("aria-selected")).toBe("true");
+    await wrapper.get('[data-testid="history-platform-tab-aggregate"]').trigger("click");
+    expect(wrapper.findAll('[data-testid="history-flow-card"]')).toHaveLength(1);
+    expect(wrapper.findAll('[data-testid="history-round-row"]')).toHaveLength(0);
   });
 
   // 真实 Flow 的结果轮同样是可删除、可看日志的轮次：卡片内必须保留等价入口，
@@ -321,7 +345,7 @@ describe("ResultHistoryDrawer", () => {
         },
       ],
     };
-    const wrapper = mountDrawer({ items: [], flowItems: [realFlow] });
+    const wrapper = await mountDrawer({ items: [], flowItems: [realFlow] });
 
     const track = wrapper.get('[data-testid="history-flow-track"][data-platform="boss"]');
     await track.get('[data-testid="history-log-trigger"]').trigger("click");
@@ -332,7 +356,7 @@ describe("ResultHistoryDrawer", () => {
     await track.get('[data-testid="history-delete-trigger"]').trigger("click");
     expect(wrapper.emitted("confirm-delete")).toEqual([[expect.objectContaining({ run_id: "flow-result" })]]);
 
-    const confirming = mountDrawer({
+    const confirming = await mountDrawer({
       items: [],
       flowItems: [realFlow],
       deleteTarget: { run_id: "flow-result", platform: "boss" } as HistoryRoundItem,
@@ -342,9 +366,9 @@ describe("ResultHistoryDrawer", () => {
     expect(confirming.emitted("open-round")).toBeUndefined();
   });
 
-  it("shows finished_at as the primary time and falls back to created_at", () => {
+  it("shows finished_at as the primary time and falls back to created_at", async () => {
     // 017-US3: 主时间=定稿时间（重抓/补筛后刷新）；缺失回退创建时间
-    const wrapper = mountDrawer({
+    const wrapper = await mountDrawer({
       items: [
         item({
           run_id: "h1", status: "done",
@@ -363,9 +387,9 @@ describe("ResultHistoryDrawer", () => {
     expect(times[1].text()).toContain("2026-08-02 09:00");
   });
 
-  it("renders only the three allowed status labels", () => {
+  it("renders only the three allowed status labels", async () => {
     // 017-US3: 标签只有 完成 / 部分结果 / 已抓取，未筛选 三种
-    const wrapper = mountDrawer({
+    const wrapper = await mountDrawer({
       items: [
         item({ run_id: "h1", status: "done" }),
         item({ run_id: "h2", status: "partial" }),
@@ -378,8 +402,8 @@ describe("ResultHistoryDrawer", () => {
     expect(statuses[2].text()).toBe("已抓取，未筛选");
   });
 
-  it("shows the total scraped jobs after every history status", () => {
-    const wrapper = mountDrawer({
+  it("shows the total scraped jobs after every history status", async () => {
+    const wrapper = await mountDrawer({
       items: [
         item({ run_id: "h1", status: "done", total_scraped: 54, total_kept: 47, total_dropped: 7 }),
         item({ run_id: "h2", status: "partial", total_scraped: 19, total_kept: 12 }),
@@ -396,15 +420,15 @@ describe("ResultHistoryDrawer", () => {
     ]);
   });
 
-  it("keeps latest badge immediately after the time", () => {
+  it("keeps latest badge immediately after the time", async () => {
     const source = readFileSync(path.join(__dirname, "../../components/ResultHistoryDrawer.vue"), "utf8");
     const head = source.match(/\.history-round-head\s*\{[^}]*\}/s)?.[0] || "";
     expect(head).toContain("justify-content: flex-start");
     expect(head).not.toContain("space-between");
   });
 
-  it("colors the round count parts by status tone", () => {
-    const wrapper = mountDrawer();
+  it("colors the round count parts by status tone", async () => {
+    const wrapper = await mountDrawer();
     const meta = wrapper.find('[data-run-id="h1"] [data-testid="history-round-meta"]');
     const metrics = meta.findAll(".history-metric");
     expect(metrics.map((metric) => metric.attributes("data-tone"))).toEqual(["match", "mismatch", "unsure", "reject"]);
@@ -416,7 +440,7 @@ describe("ResultHistoryDrawer", () => {
   });
 
   it("switches the visible round group with the top platform tabs", async () => {
-    const wrapper = mountDrawer();
+    const wrapper = await mountDrawer();
     expect(wrapper.get('[data-platform="boss"]').attributes("aria-hidden")).toBe("false");
     expect(wrapper.get('[data-platform="zhilian"]').attributes("aria-hidden")).toBe("true");
 
@@ -426,7 +450,7 @@ describe("ResultHistoryDrawer", () => {
   });
 
   it("emits open-round on row click", async () => {
-    const wrapper = mountDrawer();
+    const wrapper = await mountDrawer();
     await wrapper.get('[data-run-id="h2"]').trigger("click");
     expect(wrapper.emitted("open-round")).toEqual([["h2"]]);
   });
@@ -434,7 +458,7 @@ describe("ResultHistoryDrawer", () => {
   // 平铺轮次行整行 cursor:pointer、点了就开，但它是 div 且没有键盘入口：
   // 只用键盘的用户 Tab 进抽屉只能删轮和看日志，一轮历史内容都打不开。
   it("opens a flat round row from the keyboard while keeping nested buttons independent", async () => {
-    const wrapper = mountDrawer();
+    const wrapper = await mountDrawer();
     const row = wrapper.get('[data-run-id="h2"]');
 
     expect(row.attributes("tabindex")).toBe("0");
@@ -448,7 +472,7 @@ describe("ResultHistoryDrawer", () => {
   });
 
   it("does not open a round when the keyboard event belongs to a nested row action", async () => {
-    const wrapper = mountDrawer({
+    const wrapper = await mountDrawer({
       items: [item({ run_id: "h1", scrape_task_id: "scrape-h1" })],
     });
     const logButton = wrapper.get('[data-run-id="h1"] [data-testid="history-log-trigger"]');
@@ -462,28 +486,28 @@ describe("ResultHistoryDrawer", () => {
   });
 
   it("keeps a confirming row closed to keyboard opening", async () => {
-    const wrapper = mountDrawer({ deleteTarget: item({ run_id: "h2", status: "partial" }) });
+    const wrapper = await mountDrawer({ deleteTarget: item({ run_id: "h2", status: "partial" }) });
     await wrapper.get('[data-run-id="h2"]').trigger("keydown", { key: "Enter" });
     expect(wrapper.emitted("open-round")).toBeUndefined();
     wrapper.unmount();
   });
 
   // 键盘可达必须看得见落点：焦点环样式必须存在（窄屏深色主题下同样可辨）。
-  it("gives the keyboard-focusable round row a visible focus ring", () => {
+  it("gives the keyboard-focusable round row a visible focus ring", async () => {
     const source = readFileSync(path.join(__dirname, "../../components/ResultHistoryDrawer.vue"), "utf8");
     const focusBlock = source.match(/\.history-round-row:focus-visible\s*\{[^}]*\}/s)?.[0] || "";
     expect(focusBlock).toContain("outline");
   });
 
   it("confirms before deleting a round", async () => {
-    const wrapper = mountDrawer({ deleteTarget: item({ run_id: "h2", status: "partial" }) });
+    const wrapper = await mountDrawer({ deleteTarget: item({ run_id: "h2", status: "partial" }) });
     await wrapper.get('[data-testid="history-delete-confirm-yes"]').trigger("click");
     expect(wrapper.emitted("delete-round")).toHaveLength(1);
     expect(wrapper.emitted("delete-round")![0]).toEqual([expect.objectContaining({ run_id: "h2" })]);
   });
 
-  it("shows the full-row glass confirm with icon-only actions", () => {
-    const wrapper = mountDrawer({ deleteTarget: item({ run_id: "h2" }) });
+  it("shows the full-row glass confirm with icon-only actions", async () => {
+    const wrapper = await mountDrawer({ deleteTarget: item({ run_id: "h2" }) });
     const confirm = wrapper.get('[data-testid="history-delete-confirm"]');
     expect(confirm.text()).toContain("确认删除");
     expect(confirm.text()).not.toContain("删除后保留任务日志");
@@ -492,17 +516,17 @@ describe("ResultHistoryDrawer", () => {
   });
 
   it("does not open a round while the delete confirm overlay is visible", async () => {
-    const wrapper = mountDrawer({ deleteTarget: item({ run_id: "h2" }) });
+    const wrapper = await mountDrawer({ deleteTarget: item({ run_id: "h2" }) });
     await wrapper.get('[data-testid="history-delete-confirm"]').trigger("click");
     expect(wrapper.emitted("open-round")).toBeUndefined();
   });
 
   it("cancels delete from the x button", async () => {
-    const wrapper = mountDrawer({ deleteTarget: item({ run_id: "h2" }) });
+    const wrapper = await mountDrawer({ deleteTarget: item({ run_id: "h2" }) });
     await wrapper.get('[data-testid="history-delete-confirm-no"]').trigger("click");
     expect(wrapper.emitted("cancel-delete")).toHaveLength(1);
   });
-  it("does not render round location summary", () => {
+  it("does not render round location summary", async () => {
     const detail = {
       ok: true,
       has_result: true,
@@ -520,7 +544,7 @@ describe("ResultHistoryDrawer", () => {
       },
       result: { jobs: [] },
     } as HistoryRoundDetail;
-    const wrapper = mountDrawer({ detail });
+    const wrapper = await mountDrawer({ detail });
     expect(wrapper.find('[data-testid="history-detail-location"]').exists()).toBe(false);
   });
 });

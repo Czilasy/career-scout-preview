@@ -552,6 +552,7 @@ describe("DiscoveryView", () => {
     //（returnToLatest → applyFetchedLatestResult），该入口必须与启动加载同口径。
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="back-to-latest"]').trigger("click");
@@ -572,8 +573,8 @@ describe("DiscoveryView", () => {
 
   // 历史列表行属于「一眼扫过」的密度：冻结条件的原始 JSON、内部映射版本号和
   // 英文字段码都不得吐给用户；整坨 JSON 还会成为该轮按钮的可访问名。
-  // 用户能感知的只有一件事：这一轮的条件已经冻结、按当时条件跑。
-  it("summarizes a Flow history track's frozen conditions in plain Chinese without JSON or version codes", async () => {
+  // 用户已确认移除冻结条件提示；历史行仍不得泄露原始快照或内部字段。
+  it("keeps frozen Flow conditions out of the history row without leaking JSON or version codes", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
@@ -614,8 +615,10 @@ describe("DiscoveryView", () => {
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
 
+    await wrapper.get('[data-testid="history-platform-tab-aggregate"]').trigger("click");
     const track = wrapper.get('[data-testid="history-flow-track"]');
-    expect(track.text()).toContain("筛选条件已按当时冻结");
+    expect(track.text()).not.toContain("筛选条件已按当时冻结");
+    expect(track.text()).toContain("BOSS");
     expect(track.text()).not.toContain("b096-v2-history");
     expect(track.text()).not.toContain("10k-20k");
     expect(track.text()).not.toContain("10-20k");
@@ -624,15 +627,15 @@ describe("DiscoveryView", () => {
     expect(track.text()).not.toContain("salary");
     expect(track.text()).not.toContain("mappingVersion");
     // 整坨 JSON 之前还成了这一轮按钮的可访问名
-    const openButton = track.find("button.history-flow-track-button");
+    const openButton = track.find(".history-flow-track-line[role=button]");
     expect(openButton.text()).not.toContain("\"");
     wrapper.unmount();
     vi.unstubAllGlobals();
   });
 
   // V1 老快照只有 {"salary":["406"]} 这种裸字段码，既没有 platformValues 也没有
-  // unifiedValues：同样不得整坨回显，也不得因为「读不懂」就什么都不说。
-  it("summarizes a legacy V1 frozen snapshot without echoing its raw field codes", async () => {
+  // unifiedValues：同样不得回显原始快照，不重新添加用户要求移除的提示。
+  it("keeps a legacy V1 frozen snapshot out of the history row without echoing raw field codes", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/latest-running-task")) return response(NO_TASK_PAYLOAD);
@@ -667,8 +670,10 @@ describe("DiscoveryView", () => {
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
 
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     const track = wrapper.get('[data-testid="history-flow-track"]');
-    expect(track.text()).toContain("筛选条件已按当时冻结");
+    expect(track.text()).not.toContain("筛选条件已按当时冻结");
+    expect(track.text()).toContain("BOSS");
     expect(track.text()).not.toContain("406");
     expect(track.text()).not.toContain("salary");
     expect(track.text()).not.toContain("{");
@@ -760,6 +765,7 @@ describe("DiscoveryView", () => {
     // 历史返回（点灵动岛跳回上一轮走同一入口）后，03 面板不得以“没有筛选单元”为由隐藏
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="back-to-latest"]').trigger("click");
@@ -2214,6 +2220,7 @@ describe("DiscoveryView", () => {
     await flushPromises();
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="history-round-marker"]').exists()).toBe(true);
@@ -3565,6 +3572,7 @@ describe("DiscoveryView", () => {
     // 上一轮结论通过历史查看：进入 completed_with_pending 历史轮 → 04 页 partial 状态
     (wrapper.vm as any).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     await wrapper.get('[data-run-id="partial-run"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="history-round-marker"]').exists()).toBe(true);
@@ -4489,6 +4497,7 @@ describe("DiscoveryView", () => {
     // 完成态启动自动新一轮（干净 01 页）；经历史轮进入结果页
     (wrapper.vm as any).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     await wrapper.get('[data-run-id="run-results"]').trigger("click");
     await flushPromises();
     // 结果页（含历史轮）平台切换锁定
@@ -7238,6 +7247,7 @@ describe("DiscoveryView 035 界面收口（US1/US2 界面级）", () => {
     // 进历史模式，查看旧一轮 04 页
     (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
     await flushPromises();
+    await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     await wrapper.get('[data-testid="history-round-row"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="history-round-marker"]').exists()).toBe(true);
