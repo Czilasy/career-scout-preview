@@ -20,6 +20,9 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          # 历史交付审计会读取冻结提交；发布门禁需要完整 Git 历史。
+          fetch-depth: 0
 
       - name: 安装 Python
         uses: actions/setup-python@v5
