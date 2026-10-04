@@ -259,44 +259,6 @@ function onRowClick(notice: IslandNotice) {
   font-size: 13px;
 }
 
-:global([data-theme="kaleido"]) .island-panel {
-  background: rgba(20, 18, 30, 0.72);
-  border-color: rgba(255, 255, 255, 0.22);
-  backdrop-filter: blur(6px);
-}
-:global([data-theme="kaleido"]) .notice-row {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.18);
-}
-:global([data-theme="kaleido"]) .notice-title {
-  color: rgba(255, 255, 255, 0.92);
-}
-:global([data-theme="kaleido"]) .notice-detail {
-  color: rgba(255, 255, 255, 0.65);
-}
-:global([data-theme="kaleido"]) .notice-row:hover,
-:global([data-theme="kaleido"]) .notice-row.is-unread {
-  background: rgba(255, 255, 255, 0.16);
-  border-color: rgba(255, 255, 255, 0.35);
-}
-/* 037：kaleido 下 interrupt tone 行在半透明毛玻璃上保持可见。 */
-:global([data-theme="kaleido"]) .notice-row.notice-interrupt[data-tone="warning"] {
-  background: rgba(229, 161, 58, 0.18);
-  border-color: rgba(229, 161, 58, 0.45);
-}
-:global([data-theme="kaleido"]) .notice-row.notice-interrupt[data-tone="warning"].is-unread {
-  background: rgba(229, 161, 58, 0.28);
-  border-color: rgba(229, 161, 58, 0.60);
-}
-:global([data-theme="kaleido"]) .notice-row.notice-interrupt[data-tone="error"] {
-  background: rgba(168, 87, 81, 0.18);
-  border-color: rgba(168, 87, 81, 0.45);
-}
-:global([data-theme="kaleido"]) .notice-row.notice-interrupt[data-tone="error"].is-unread {
-  background: rgba(168, 87, 81, 0.28);
-  border-color: rgba(168, 87, 81, 0.60);
-}
-
 @media (max-width: 760px) {
   /* B1：锚点（胶囊）在窄屏 flex-wrap 顶栏里偏左，absolute 锚定必然溢出视口；
      改 fixed 按视口居中，top 由父组件实测胶囊底缘经 --panel-top 传入。 */

@@ -155,13 +155,13 @@ class ResultHistoryStoreTests(unittest.TestCase):
             self.assertIn("finished_at", item)
             self.assertIsNotNone(item["finished_at"])
 
-    def test_prune_keeps_30_rounds_per_platform(self):
-        for index in range(32):
-            _save_round(self.store, "boss", keyword=f"k-{index}")
-        deleted = self.service.prune_retention(limit=30)
-        self.assertEqual(len(deleted), 2)
-        items = self.service.list_history("boss")
-        self.assertEqual(len(items), 30)
+    def test_more_than_30_rounds_survive_reopen_and_archive(self):
+        ids = [_save_round(self.store, "boss", keyword=f"k-{index}") for index in range(32)]
+        self.service.archive_all_current_results()
+        reopened = ResultHistoryService(TaskStore(self.db_path))
+        self.assertEqual({item["run_id"] for item in reopened.list_history("boss")}, set(ids))
+        self.assertIsNotNone(reopened.get_round(ids[0]))
+
 
 
 class ResultHistoryApiTests(unittest.TestCase):

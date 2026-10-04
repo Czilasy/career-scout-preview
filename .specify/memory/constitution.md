@@ -184,12 +184,13 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/browser_registry_api.py` — 浏览器注册表路由域：探测清单/保存选择/路径校验端点（029，b082 分支）
 - `webui/browser_account_rate_limit_api.py` — 浏览器账号限流标记路由：用户手动清除 `rate_limited` 视觉标记，不修改账号池、浏览器资料或登录状态（038 B091 V3）
 - `webui/src/components/BrowserSettingsDialog.vue` — 浏览器选择对话框：注册表清单/手动路径即时校验/当前生效路径展示（029，b082 分支）
-- `webui/src/themes/registry.ts` — 主题注册口：light/dark/kaleido 三态登记与值校验（032）
-- `webui/src/themes/ThemePickerOptions.vue` — 长按弹层选项列表：三主题标本与当前态标识（032）
+- `webui/src/themes/registry.ts` — 主题注册口：可用主题登记、值校验与样式统一入口
+- `webui/src/themes/base/theme.css` — 明暗主题共用令牌、字体与平台品牌色基座
+- `webui/src/themes/picker.css` — 通用主题选择列表样式
+- `webui/src/themes/ThemePickerOptions.vue` — 长按弹层选项列表：按注册表渲染主题与当前态标识
+- `webui/src/themes/ThemeSurfaceHost.vue` — 通用主题环境宿主：按注册表挂载与卸载独立主题组件
+- `webui/src/themes/kaleido/` — 万花筒主题集中模块：界面样式、镜像画布、动效生命周期和专属测试；不承载业务逻辑
 - `webui/src/themes/__tests__/registry.spec.ts` — 注册口聚焦测试（032）
-- `webui/src/themes/kaleido/kaleido.css` — 万花筒主题样式：kaleido 令牌降级基座＋四页视觉＋流动层（032）
-- `webui/src/themes/kaleido/KaleidoField.vue` — 万花筒光场组件：光轮/碎玻璃/注视之眼（032）
-- `webui/src/themes/kaleido/useKaleidoMotion.ts` — 万花筒交互动效：转筒/瞳孔/逃生舱/首启转场（032）
 - `scripts/zhilian/cdp.py` — 智联 CDP 原语与平台常量：HTTP/WS 连接、求值/导航/就绪探测、后台标签建销、端口与 host allowlist、探测 URL/提取 JS/风险 marker（031 B6）
 - `scripts/zhilian/search.py` — 智联列表域：登录态探测/preflight/fetch_list/空结果 marker 确认、风险信号判定与岗位字段归一（031 B6）
 - `scripts/zhilian/detail.py` — 智联详情域：单条详情提取、tab 池并行批量抓取、会话重置与默认等待器（031 B6）
@@ -212,7 +213,7 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/src/composables/useIslandNotices.ts` — 灵动岛通知池：roundStatus capsule 跃迁派生 completed/error/paused 通知（sync watch、同 kind 内容级替换、running 不清池/idle 清空、初始观察不产幽灵、interrupt 沉入、profile reset）
 - `webui/src/composables/useReminderBadge.ts` — 提醒角标单源：服务端 /api/job-reminders/count total 与 seq 守卫/99+ 截断/aria（统一 Spec 037）
 - `webui/src/composables/useIslandValueTransition.ts` — 灵动岛展示值切换：保留旧值短暂退场并在减少动态时直接替换（统一 Spec 037 修订）
-- `webui/src/components/IslandNoticePanel.vue` — 灵动岛通知面板：胶囊下方弹出、error→paused→interrupt→completed 排序、未读高亮/已读淡化、行点击直达、interrupt 行 tone 染色、kaleido blur 6px（统一 Spec 037）
+- `webui/src/components/IslandNoticePanel.vue` — 灵动岛通知面板：胶囊下方弹出、error→paused→interrupt→completed 排序、未读高亮/已读淡化、行点击直达、interrupt 行 tone 染色（统一 Spec 037）
 - `webui/whitebox.py` — 033 V2 任务证据白箱公共服务：计划、事实、最终结论与报告的唯一业务入口
 - `webui/whitebox_rules.py` — 033 V2 任务证据纯规则：按计划单元与完成证据收敛完整成功、空结果、部分完成、失败、无法确认和中断
 - `webui/store_whitebox.py` — 033 V2 白箱数据访问域：任务运行、计划单元、分页事实、摘要与应急追加持久化

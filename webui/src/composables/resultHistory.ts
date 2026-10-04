@@ -45,6 +45,7 @@ export interface HistoryRoundDetail {
 }
 
 export interface FlowHistoryTrack {
+  id?: string;
   platform: Platform;
   status: string;
   stage?: string;

@@ -448,7 +448,6 @@ class B096FlowApiTests(unittest.TestCase):
                 "BROWSER_ACCOUNTS_PATH": str(pathlib.Path(self.temp.name) / "accounts.json"),
             }),
             clear_auto_screen=mock.Mock(),
-            prune_history_best_effort=mock.Mock(),
             schedule_pipeline_task_cleanup=mock.Mock(),
         )
         compat = SimpleNamespace(
@@ -561,7 +560,7 @@ class B096FlowApiTests(unittest.TestCase):
                 "RESULT_DIR": self.temp.name,
                 "BROWSER_ACCOUNTS_PATH": str(pathlib.Path(self.temp.name) / "accounts.json"),
             }),
-            clear_auto_screen=mock.Mock(), prune_history_best_effort=mock.Mock(),
+            clear_auto_screen=mock.Mock(),
             load_jd_checkpoint=lambda _path: {},
             jd_checkpoint_path=lambda _result_dir, _run_id: str(pathlib.Path(self.temp.name) / "jd.json"),
         )
@@ -652,7 +651,6 @@ class B096FlowApiTests(unittest.TestCase):
                 "BROWSER_ACCOUNTS_PATH": str(pathlib.Path(self.temp.name) / "accounts.json"),
             }),
             clear_auto_screen=mock.Mock(),
-            prune_history_best_effort=mock.Mock(),
         )
         compat = SimpleNamespace(
             _FINALIZE_WAIT_TIMEOUT_S=0,
@@ -765,7 +763,6 @@ class B096FlowApiTests(unittest.TestCase):
                 "BROWSER_ACCOUNTS_PATH": str(pathlib.Path(self.temp.name) / "accounts.json"),
             }),
             clear_auto_screen=mock.Mock(),
-            prune_history_best_effort=mock.Mock(),
             load_jd_checkpoint=lambda _path: {},
             jd_checkpoint_path=lambda _result_dir, _run_id: str(
                 pathlib.Path(self.temp.name) / "jd.json"

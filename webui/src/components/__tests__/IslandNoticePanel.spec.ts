@@ -6,17 +6,11 @@
 // 四色 chip 渲染（counts 缺省回退 detail 文字）。
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import IslandNoticePanel from "../IslandNoticePanel.vue";
 import type { DynamicIslandState } from "../../composables/useDiscoveryState";
 import type { IslandNotice } from "../../composables/useIslandNotices";
 
 const capsule: DynamicIslandState = { state: "idle", platform: "boss" };
-const panelSource = readFileSync(
-  resolve(process.cwd(), "src/components/IslandNoticePanel.vue"),
-  "utf8",
-);
 
 function makeNotice(overrides: Partial<IslandNotice> = {}): IslandNotice {
   return {
@@ -89,10 +83,6 @@ describe("IslandNoticePanel 无障碍与退场（037 复审 C 批）", () => {
     expect(panel.attributes("tabindex")).toBe("-1");
   });
 
-  it("037 修订：kaleido 面板 blur 与胶囊统一为 6px", () => {
-    expect(panelSource).toContain("backdrop-filter: blur(6px)");
-    expect(panelSource).not.toContain("backdrop-filter: blur(12px)");
-  });
 
   it("leaving=true 时根挂 is-leaving（退场两阶段由父驱动）", async () => {
     const wrapper = mountPanel([makeNotice()]);
@@ -101,15 +91,6 @@ describe("IslandNoticePanel 无障碍与退场（037 复审 C 批）", () => {
     expect(wrapper.get('[data-testid="island-notice-panel"]').classes()).toContain("is-leaving");
   });
 
-  it("kaleido 主题冒烟：面板与行正常渲染不崩", async () => {
-    document.documentElement.setAttribute("data-theme", "kaleido");
-    try {
-      const wrapper = mountPanel([makeNotice({ kind: "error", title: "任务出错" })]);
-      expect(wrapper.get('[data-testid="island-notice-row-error"]').text()).toContain("任务出错");
-    } finally {
-      document.documentElement.removeAttribute("data-theme");
-    }
-  });
 });
 
 describe("IslandNoticePanel 行点击", () => {
@@ -193,18 +174,6 @@ describe("IslandNoticePanel 037 interrupt 行", () => {
     expect(wrapper.emitted("row-click")?.[0]).toEqual([notice]);
   });
 
-  it("kaleido 主题下 interrupt tone 行不崩（冒烟）", async () => {
-    document.documentElement.setAttribute("data-theme", "kaleido");
-    try {
-      const wrapper = mountPanel([
-        makeNotice({ kind: "interrupt", id: "n-warn", title: "投递提醒", tone: "warning" }),
-        makeNotice({ kind: "interrupt", id: "n-err", title: "导出失败", tone: "error" }),
-      ]);
-      expect(wrapper.get('[data-testid="island-notice-row-interrupt"]').text()).toContain("投递提醒");
-    } finally {
-      document.documentElement.removeAttribute("data-theme");
-    }
-  });
 });
 
 describe("IslandNoticePanel 037 completed 行（两色现实口径）", () => {

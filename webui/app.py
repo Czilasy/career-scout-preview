@@ -208,12 +208,6 @@ def create_app(config=None):
     if not app.config.get("TESTING"):
         configure_logging()
 
-    def _prune_history_best_effort():
-        try:
-            history_service.prune_retention()
-        except _OPERATIONAL_ERRORS:
-            pass  # 保留清理失败不阻断任务主流程
-
     from webui.tuning import TuningController
     TuningController(store).recover_after_restart()
     store.import_legacy_advanced_settings(app.config["ADVANCED_SETTINGS_PATH"])
@@ -467,7 +461,7 @@ def create_app(config=None):
     ctx = build_app_support(
         app, store, runner, workbench_runner,
         job_feedback_service, history_service, resume_service,
-        _prune_history_best_effort, _load_legacy_advanced_settings,
+        _load_legacy_advanced_settings,
         _save_legacy_advanced_settings, _make_cdp_source,
         scope_previews, _runtime_mode, _BossCdpSource)
     app.config["PIPELINE_CONTEXT"] = ctx

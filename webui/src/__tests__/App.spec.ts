@@ -793,13 +793,40 @@ describe("App", () => {
 
       const toggle = wrapper.get('[data-testid="theme-toggle"]');
       await toggle.trigger("pointerdown");
-      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(wrapper.find('[data-testid="theme-picker"]').exists()).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
       await flushPromises();
 
       expect(wrapper.find('[data-testid="theme-picker"]').exists()).toBe(true);
       // 长按蓄力结束后浏览器补发的 click 必须被吞掉，明暗保持不变。
       await toggle.trigger("click");
       expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+      const options = wrapper.get('[data-testid="theme-picker"]').findAll('[role="option"]');
+      expect(options.map((option) => option.find(".theme-option-label").text())).toEqual(["亮", "暗", "万花筒"]);
+      await options[2]!.trigger("click");
+      expect(document.documentElement.getAttribute("data-theme")).toBe("kaleido");
+      expect(wrapper.find('[data-testid="theme-picker"]').exists()).toBe(false);
+      toggleTheme("dark");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("提前松开主题按钮取消蓄力，普通点击仍切换明暗", async () => {
+    vi.useFakeTimers();
+    try {
+      toggleTheme("light");
+      const wrapper = mount(App);
+      await flushPromises();
+      const toggle = wrapper.get('[data-testid="theme-toggle"]');
+      await toggle.trigger("pointerdown");
+      await vi.advanceTimersByTimeAsync(500);
+      await toggle.trigger("pointerup");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(wrapper.find('[data-testid="theme-picker"]').exists()).toBe(false);
+      await toggle.trigger("click");
+      expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
     } finally {
       vi.useRealTimers();
     }

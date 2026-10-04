@@ -749,9 +749,6 @@ class _ScreenCtx:
     def clear_auto_screen(self, task_id):
         return None
 
-    def prune_history_best_effort(self):
-        return None
-
 
 class BatchSignalProgressTests(unittest.TestCase):
     """批内信号（jd_batch）必须活过条级进度刷新。

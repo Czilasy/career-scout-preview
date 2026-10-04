@@ -9,6 +9,7 @@ from __future__ import annotations
 from flask import jsonify, request
 
 from webui.result_history import ResultHistoryService
+from webui.run_cleanup import HistoryDeletionBlocked
 
 _PLATFORMS = ("boss", "zhilian")
 
@@ -106,6 +107,8 @@ def register_result_history_routes(app, store) -> None:
     def result_history_delete(run_id: str):
         try:
             deleted = service.delete_round(str(run_id), _profile_id_arg())
+        except HistoryDeletionBlocked as exc:
+            return _error("history_delete_blocked", str(exc), 409)
         except Exception:
             return _error("persistence_failed", "删除失败", 500)
         if not deleted:

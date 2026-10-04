@@ -74,7 +74,7 @@ class ReleaseAssetTests(unittest.TestCase):
         self.assertEqual(duplicates, [], "CHANGELOG 相邻版本存在重复条目")
 
     def test_no_remote_font_references_in_source_or_build(self):
-        source = _read("webui/src/styles/theme.css")
+        source = _read("webui/src/themes/base/theme.css")
         self.assertNotIn("fonts.googleapis.com", source)
         dist = ROOT / "webui" / "dist"
         self.assertTrue(dist.is_dir(), "webui/dist 不存在，请先构建前端")

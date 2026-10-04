@@ -1,4 +1,4 @@
-"""Result history service: metadata, detail and retention semantics."""
+"""Result history service: metadata, detail and explicit user deletion."""
 
 from __future__ import annotations
 
@@ -226,9 +226,6 @@ class ResultHistoryService:
         return self.store.archive_flow_results(flow_id, profile_id)
 
     def delete_round(self, run_id: str, profile_id: str | None = None) -> bool:
-        """043：整条进出——删除轮连带其根账本/派生记录/白箱/日志一起走。"""
+        """手动整轮删除：关联轨道、任务、结果及日志一起清除，保留其他轨道。"""
         from webui import run_cleanup
         return run_cleanup.delete_run(self.store, run_id, profile_id=profile_id)
-
-    def prune_retention(self, limit: int = 30) -> list[str]:
-        return self.store.prune_result_history(limit)

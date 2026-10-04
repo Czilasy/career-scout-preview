@@ -13,7 +13,9 @@ import os
 import pathlib
 import re
 import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -86,6 +88,10 @@ class RepoHygieneTests(unittest.TestCase):
             ".env.*",
             "!.env.example",
             "__pycache__/",
+            ".release/",
+            "build/",
+            "dist/",
+            "design/",
             "node_modules/",
             "tests/run_isolated_webui.py",
             "tests/sc002_24h_monitor.py",
@@ -105,6 +111,11 @@ class RepoHygieneTests(unittest.TestCase):
             "webui/node_modules/pkg/index.js",
             "docs/private.md",
             "webui/dist/assets/app.js",
+            ".release/CareerScout-v0.0.0.exe",
+            "build/package.tmp",
+            "dist/package.exe",
+            "design/preview.html",
+            ".learnmap/private.md",
         ]
         must_not_ignore = [
             ".env.example",
@@ -146,8 +157,14 @@ class RepoHygieneTests(unittest.TestCase):
                 mismatches.append(rel)
         lock = json.loads((ROOT / "webui/package-lock.json").read_text(encoding="utf-8"))
         lock_values = [lock.get("version"), (lock.get("packages") or {}).get("", {}).get("version")]
-        if any(value != expected for value in lock_values if value):
+        if any(value != expected for value in lock_values):
             mismatches.append("webui/package-lock.json")
+        desktop_versions = re.findall(
+            r"(?:最新正式版：v|CareerScout-v)(\d+\.\d+\.\d+)",
+            (ROOT / "README.md").read_text(encoding="utf-8"),
+        )
+        if not desktop_versions or any(value != expected for value in desktop_versions):
+            mismatches.append("README.md 桌面版")
         uv = (ROOT / "uv.lock").read_text(encoding="utf-8")
         uv_match = re.search(r'^name = "career-scout"\nversion = "([^"]+)"', uv, re.MULTILINE)
         if not uv_match or uv_match.group(1) != expected:
@@ -193,7 +210,12 @@ class RepoHygieneTests(unittest.TestCase):
         for rel in paths:
             path = pathlib.PurePosixPath(rel)
             # 调优实验运行数据只禁止仓库根目录下的 tuning/（tests/tuning 是测试包）。
-            if path.parts and path.parts[0] == "tuning":
+            if path.parts and path.parts[0] in {
+                "tuning", ".release", "build", "dist", "design", "roadmap", ".learnmap",
+            }:
+                bad.append(rel)
+                continue
+            if rel.startswith("webui/dist/"):
                 bad.append(rel)
                 continue
             if any(part in forbidden_dir_parts for part in path.parts) or path.name in forbidden_names or path.name.endswith(forbidden_suffixes):
@@ -249,11 +271,26 @@ class RepoHygieneTests(unittest.TestCase):
             active = patterns
             if rel.startswith("webui/dist/"):
                 active = patterns[:3]
-            for rx in active:
+            for rule, rx in enumerate(active, start=1):
                 m = rx.search(text)
                 if m:
-                    issues.append(f"{rel}: 命中 {m.group(0)!r}")
+                    line = text.count("\n", 0, m.start()) + 1
+                    issues.append(f"{rel}:{line}: 命中凭据或本地路径规则#{rule}（内容已隐藏）")
         self.assertEqual(issues, [], "已跟踪文本文件不得包含本地路径或凭据")
+
+    def test_sensitive_scan_failure_does_not_echo_matched_content(self):
+        token = "sk-" + "x" * 24
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            (root / "sample.py").write_text(f'key = "{token}"\n', encoding="utf-8")
+            with mock.patch(__name__ + ".ROOT", root), mock.patch(
+                __name__ + "._git", return_value="sample.py\0",
+            ), mock.patch(__name__ + "._local_env_paths", return_value=[]):
+                with self.assertRaises(AssertionError) as failure:
+                    self.test_no_local_paths_or_credentials_in_tracked_files()
+        self.assertIn("sample.py:1", str(failure.exception))
+        self.assertIn("内容已隐藏", str(failure.exception))
+        self.assertNotIn(token, str(failure.exception))
 
     def test_silent_except_pass_baseline(self):
         """pass-only 吞噬基线（031 B4 / FR-012）：只许下降，白名单与代码注释一一对应。

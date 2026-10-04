@@ -53,13 +53,16 @@ class ThemeApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertFalse(self.theme_path.exists())
 
-    def test_theme_accepts_kaleido_easter_egg_mode(self):
+    def test_theme_persists_kaleidoscope(self):
         resp = self.client.put("/api/theme", json={"mode": "kaleido"})
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.get_json()["mode"], "kaleido")
+        self.assertEqual(self.client.get("/api/theme").get_json()["mode"], "kaleido")
+        self.assertEqual(json.loads(self.theme_path.read_text())["mode"], "kaleido")
+
+    def test_theme_restores_saved_kaleidoscope(self):
+        self.theme_path.write_text(json.dumps({"mode": "kaleido"}), encoding="utf-8")
         data = self.client.get("/api/theme").get_json()
         self.assertEqual(data["mode"], "kaleido")
-        self.assertTrue(self.theme_path.exists())
 
 
 class WebUIAppTests(unittest.TestCase):

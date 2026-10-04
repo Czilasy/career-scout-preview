@@ -14,6 +14,7 @@
 
 - 本项目的功能需求必须先完成 grill-me 边界质询并冻结需求；冻结后进入完整 Spec Kit 流程：`speckit-constitution → speckit-clarify（按需）→ speckit-specify → speckit-plan → speckit-tasks → speckit-implement → speckit-converge`。该项目硬性流程不替代全局授权边界。
 - 项目架构原则、文件边界与职责分层以 `.specify/memory/constitution.md` 为准；Plan/Tasks 必须写明允许修改、禁止修改、新增文件和引用方向。
+- 主题实现统一存放于 `webui/src/themes/`，每个独立主题一个子目录，样式、组件、动效、资源、预览和专属测试集中存放；公共组件不得写入具体独立主题的专属实现，主题通过统一注册入口接入。通用明暗切换、长按 1 秒打开主题选择及偏好保存逻辑必须保留，模块约定见 `webui/src/themes/README.md`。
 - 文件规模红线：Python 文件原则上不超过 800 行，Vue 文件原则上不超过 1200 行。超过红线的文件在未拆分前，普通功能不得继续向其中追加新逻辑；拆分必须单独建立 Spec。以下为 2026-09-14 实测的超限产品文件（仅作定位线索，不代表实时行数，修改前必须重新测量）：`scripts/maintenance/historical_recovery.py`、`webui/exec_search_api.py`、`webui/pipeline_exec_details.py`、`webui/pipeline_exec_search.py`、`webui/runners/recrawl_task.py`、`webui/task_continue_api.py`、`webui/updater.py`、`webui/src/views/DiscoveryView.vue`（Vue 文件，红线 1200）。
 
 ## 树干与树枝（通用与平台专属的边界）
@@ -48,6 +49,8 @@
 - 提交或推送前先运行：`uv run python -m unittest tests.test_repo_hygiene`，失败禁止提交和推送。
 - 查看 `git status` 与 `git diff --cached`，确认没有无关文件、临时文件、密钥或不应提交产物。
 - 提交信息使用 Conventional Commits（`feat|fix|docs|style|refactor|test|perf|build|ci|chore|revert`）；卫生测试校验最近 3 条非 merge 提交格式。
+- 卫生检查须阻断本地设计、运行数据及构建产物入库，校验全部版本位置；凭据命中只报告文件、行号与规则，不回显命中内容。钩子保留失败详情，失败不得换解释器绕过。
+- 已结束交付的文件范围审计固定在其历史提交区间，保留原范围与越界拒绝检查；不得用旧 Spec 白名单永久限制后续已授权改动。
 
 ## 钩子
 

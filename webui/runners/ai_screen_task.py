@@ -524,10 +524,6 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary, scrape_t
             ctx.store.append_task_event(task_id, 'history_snapshot', {'snapshot_run_id': source_run_id, 'status': _saved_run.get('status') or 'done', 'jobs': len(enriched), 'dropped': len(dropped)})
         except ctx.operational_errors:
             pass
-        ctx.prune_history_best_effort()
-        # 043：整条进出——定稿流程清更早中间档 + 无主账本兜底（服务内部 best-effort）。
-        from webui import run_cleanup
-        run_cleanup.prune_after_finalize(ctx.store, str(source_run_id or ""))
         with ctx.lock:
             task = ctx.tasks.get(task_id)
             if task is not None:

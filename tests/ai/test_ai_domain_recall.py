@@ -154,7 +154,6 @@ class DomainRecallHarness(unittest.TestCase):
             clear_auto_screen=lambda _task_id: None,
             schedule_pipeline_task_cleanup=lambda _task_id: None,
             release_worker_resume_claims=lambda _task: None,
-            prune_history_best_effort=lambda: None,
             screen_overall_percent=lambda *_args: 0,
             record_pause_failure=lambda *_args, **_kwargs: None,
             persist_jd_job_failures=lambda *_args, **_kwargs: None,

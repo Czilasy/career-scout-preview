@@ -917,18 +917,15 @@ class TuningEntitiesMigrationTests(unittest.TestCase):
         self.assertEqual(row["c"], 1, "execution_lease 必须有且仅有 id=1 的单例行")
 
 
-class Migration032ClearHistoryTests(unittest.TestCase):
-    """017-US3: 升级迁移一次性清空存量历史轮（FR-009/SC-005）。
-
-    - 全部 result_snapshot 轮（含子表行）删除；任务行（process_log）与
-      任务日志/事件保留；活动任务进度与断点不受影响。
-    - recount_pipeline_result 重算时同步刷新 finished_at（定稿时间）。
-    """
+class Migration032PreserveHistoryTests(unittest.TestCase):
+    """Upgrade retains history, active tasks and logs; recount updates timestamps."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.db_path = pathlib.Path(self.temp.name) / "state" / "webui.db"
-        self._cleanup_shared_backup_dir()
+        self.backup_patch = patch.object(TaskStore, "_migration_backup_dir", return_value=pathlib.Path(self.temp.name) / "backups")
+        self.backup_patch.start()
+        self.addCleanup(self.backup_patch.stop)
 
     def tearDown(self):
         self._cleanup_shared_backup_dir()
@@ -974,15 +971,16 @@ class Migration032ClearHistoryTests(unittest.TestCase):
         store.append_task_event(task_id, "stage_start", {"stage": "scrape"})
         return store, round_id, task_id
 
-    def test_upgrade_clears_history_rounds_keeps_active_tasks(self):
+    def test_upgrade_preserves_history_rounds_and_active_tasks(self):
         store, round_id, task_id = self._build_v31_with_history()
         self.assertEqual(len(store.list_history_rounds("boss")), 1)
 
         reopened = TaskStore(self.db_path)  # 触发 migration 32
         self.assertGreaterEqual(reopened.schema_version(), 32)
-        # 存量历史轮全清
-        self.assertEqual(reopened.list_history_rounds("boss"), [])
-        self.assertFalse(reopened.history_round_exists(round_id))
+        # 升级不得自动删除已有历史轮及其岗位结果。
+        self.assertEqual(len(reopened.list_history_rounds("boss")), 1)
+        self.assertTrue(reopened.history_round_exists(round_id))
+        self.assertTrue(reopened.load_latest_pipeline_result(round_id)["result"]["jobs"])
         # 活动任务与日志保留
         task = reopened.get_screening_run(task_id)
         self.assertIsNotNone(task)

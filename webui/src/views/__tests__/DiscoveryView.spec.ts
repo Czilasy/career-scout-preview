@@ -673,7 +673,7 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="history-platform-tab-boss"]').trigger("click");
     const track = wrapper.get('[data-testid="history-flow-track"]');
     expect(track.text()).not.toContain("筛选条件已按当时冻结");
-    expect(track.text()).toContain("BOSS");
+    expect(wrapper.get(".history-platform-title").text()).toBe("BOSS");
     expect(track.text()).not.toContain("406");
     expect(track.text()).not.toContain("salary");
     expect(track.text()).not.toContain("{");

@@ -21,7 +21,6 @@ import { safeCanonicalUrl } from "./jobFeedback";
 import { platformLabel, type RoundStatusPayload } from "./discovery";
 import { useTheme } from "./composables/useTheme";
 import ThemePickerOptions from "./themes/ThemePickerOptions.vue";
-import KaleidoField from "./themes/kaleido/KaleidoField.vue";
 import { isThemeId } from "./themes/registry";
 import { cleanJobLocation } from "./location";
 import type { CandidateProfile, Notice } from "./types";
@@ -407,7 +406,7 @@ function handleThemeToggle(event: MouseEvent) {
   ripple.addEventListener("animationend", () => ripple.remove(), { once: true });
 }
 
-// 长按弹层选择（032）：亮/暗直切；万花筒经 useTheme 值域扩展生效。
+// 长按弹层按通用主题注册表选择，切换与持久化交给 useTheme。
 function handleThemePick(id: string) {
   themePickerOpen.value = false;
   if (!isThemeId(id) || id === mode.value) return;
@@ -662,8 +661,6 @@ function handleIslandExpand() {
 
 <template>
   <div class="app-shell">
-    <!-- 万花筒彩蛋主题：整站光场衬底（032，仅该主题挂载） -->
-    <KaleidoField v-if="mode === 'kaleido'" />
     <!-- 036 自绘标题栏：仅桌面 EXE 渲染（浏览器模式不显示），页面最顶部 -->
     <WindowTitleBar />
     <header class="app-header">

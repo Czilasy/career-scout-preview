@@ -223,16 +223,6 @@ describe("DynamicIsland 四态渲染（胶囊本体）", () => {
     expect(pill.text()).toContain("正在抓取 12/100");
   });
 
-  it("kaleido 主题冒烟：idle 正常渲染", async () => {
-    document.documentElement.setAttribute("data-theme", "kaleido");
-    try {
-      const wrapper = mountIsland(makeStatus({ state: "idle", platform: "boss" }));
-      expect(wrapper.get('[data-testid="island-idle"]').text()).toContain("BOSS");
-      wrapper.unmount();
-    } finally {
-      document.documentElement.removeAttribute("data-theme");
-    }
-  });
 });
 
 describe("DynamicIsland 点击派发（无通知 → 直达导航）", () => {
@@ -467,21 +457,6 @@ describe("DynamicIsland 037 carousel + 红光 + 芯片", () => {
     }
   });
 
-  it("037 completed 芯片：匹配绿 + 待确认琥珀（kaleido 适配）", async () => {
-    document.documentElement.setAttribute("data-theme", "kaleido");
-    try {
-      const wrapper = mountIsland(makeStatus({
-        state: "completed", platform: "boss",
-        results: { matched: 7, pending: 3 },
-      }));
-      const el = wrapper.get('[data-testid="dynamic-island-completed"]');
-      expect(el.find(".island-chip.c-green").exists()).toBe(true);
-      expect(el.find(".island-chip.c-amber").exists()).toBe(true);
-      wrapper.unmount();
-    } finally {
-      document.documentElement.removeAttribute("data-theme");
-    }
-  });
 
   it("037 红光层：attention 时出现，离开时移除", async () => {
     const wrapper = mountIsland(makeStatus({

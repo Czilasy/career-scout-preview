@@ -79,7 +79,7 @@ describe("useTheme", () => {
   });
 
   it("keeps the all-platform scope neutral in both light and dark CSS branches", async () => {
-    const css = readFileSync(path.join(__dirname, "../../styles/theme.css"), "utf8");
+    const css = readFileSync(path.join(__dirname, "../../themes/base/theme.css"), "utf8");
     expect(css).toContain(':root[data-theme="light"][data-platform="all"]');
     expect(css).toContain(':root[data-theme="dark"][data-platform="all"]');
     const { setThemePlatform, toggleTheme } = await loadModule();
@@ -161,25 +161,16 @@ describe("useTheme", () => {
     expect(body.mode).toBe("dark");
   });
 
-  it("accepts kaleido as an explicit easter egg mode and persists it", async () => {
-    const { toggleTheme } = await loadModule();
-    const next = toggleTheme("kaleido");
-    expect(next).toBe("kaleido");
-    expect(document.documentElement.getAttribute("data-theme")).toBe("kaleido");
-    // 特殊主题大类标记：万花筒归 special（spec 036 A9 大类统一样式的依据）
-    expect(document.documentElement.getAttribute("data-theme-category")).toBe("special");
-    expect(localStorage.getItem("career-scout-theme-mode")).toBe("kaleido");
-  });
-
-  it("restores saved kaleido mode from localStorage on first access", async () => {
+  it("restores the approved kaleidoscope from localStorage", async () => {
     localStorage.setItem("career-scout-theme-mode", "kaleido");
     const { useTheme } = await loadModule();
     const { mode } = useTheme();
     expect(mode.value).toBe("kaleido");
     expect(document.documentElement.getAttribute("data-theme")).toBe("kaleido");
+    expect(document.documentElement.getAttribute("data-theme-category")).toBe("special");
   });
 
-  it("lets backend restore kaleido mode before user interaction", async () => {
+  it("restores the approved kaleidoscope from the backend", async () => {
     global.fetch = vi.fn(
       async () =>
         ({ ok: true, json: async () => ({ mode: "kaleido" }) }) as Response,
@@ -189,6 +180,19 @@ describe("useTheme", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(mode.value).toBe("kaleido");
     expect(document.documentElement.getAttribute("data-theme")).toBe("kaleido");
+  });
+
+  it("persists kaleidoscope and keeps platform changes independent", async () => {
+    const { toggleTheme, setThemePlatform } = await loadModule();
+    toggleTheme("kaleido");
+    setThemePlatform("zhilian");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("kaleido");
+    expect(localStorage.getItem("career-scout-theme-mode")).toBe("kaleido");
+    expect(global.fetch).toHaveBeenCalledWith("/api/theme", expect.objectContaining({
+      method: "PUT", body: JSON.stringify({ mode: "kaleido" }),
+    }));
+    expect(toggleTheme()).toBe("light");
+    expect(document.documentElement.getAttribute("data-theme-category")).toBe("base");
   });
 
 });

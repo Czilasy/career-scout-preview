@@ -1033,40 +1033,6 @@ function setTrackRef(el: unknown): void {
   50%      { opacity: 0.45; }
 }
 
-:global([data-theme="kaleido"]) .island-pill {
-  background: rgba(255, 255, 255, 0.12);
-  border-color: rgba(255, 255, 255, 0.22);
-  color: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(6px);
-}
-:global([data-theme="kaleido"]) .island-pill:hover,
-:global([data-theme="kaleido"]) .island-pill.is-open {
-  background: rgba(255, 255, 255, 0.2);
-  border-color: rgba(255, 255, 255, 0.35);
-  color: #fff;
-}
-:global([data-theme="kaleido"]) .island-value {
-  color: #fff;
-}
-:global([data-theme="kaleido"]) .island-idle-label {
-  /* 037 复审：与主主题一致去掉 wash 底色块（"不要带方块"），只保留字色。 */
-  color: rgba(255, 255, 255, 0.92);
-}
-:global([data-theme="kaleido"]) .island-chip.c-green {
-  color: #4ade80;
-  background: rgba(74, 222, 128, 0.15);
-}
-:global([data-theme="kaleido"]) .island-chip.c-amber {
-  color: #fbbf24;
-  background: rgba(251, 191, 36, 0.15);
-}
-:global([data-theme="kaleido"]) .island-interrupt-title {
-  color: #fff;
-}
-:global([data-theme="kaleido"]) .island-interrupt-detail {
-  color: rgba(255, 255, 255, 0.65);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .island-live,
   .island-unread,

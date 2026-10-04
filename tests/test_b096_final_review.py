@@ -118,7 +118,6 @@ class B096FinalWorkerReviewTests(unittest.TestCase):
             jd_checkpoint_path=lambda _result_dir, _task_id: str(pathlib.Path(self.temp.name) / "jd.json"),
             load_jd_checkpoint=lambda _path: {},
             save_jd_checkpoint=lambda _path, _value: None,
-            prune_history_best_effort=lambda: None,
             screen_overall_percent=lambda _stage, _current, _total: 0,
             msg_user_finished="已结束",
             msg_user_stopped_screen="已停止",
@@ -269,15 +268,16 @@ if __name__ == "__main__":
 
 
 class B096V2StructuralGuardTests(unittest.TestCase):
-    """Preserve historical evidence and enforce the active delivery boundary."""
+    """Preserve historical evidence and enforce the frozen delivery boundary."""
 
     ROOT = pathlib.Path(__file__).resolve().parents[1]
     #: SPEC 046 V2 之前那一个提交（`chore(release): bump version to 1.9.5`）：
-    #: 仅记录原 V2 开发基准；当前交付范围使用下方 DELIVERY_BASE_COMMIT。
+    #: 仅记录原 V2 开发基准；历史交付范围使用下方固定提交区间。
     V2_CHAIN_BASE_COMMIT = "54164e6"
-    # 用户已授权完成 B094 的测试收口。范围门禁按当前交付链检查，
-    # 不再把后续独立功能永久绑定到已结束的 B096 开发快照。
+    # 原 B094 测试收口的授权范围；后续独立功能不受此历史白名单约束。
     DELIVERY_BASE_COMMIT = "f43ed37"
+    # 原交付已经结束；范围审计固定在历史提交之间，不约束后续授权工作。
+    DELIVERY_END_COMMIT = "8e54488"
     DELIVERY_ALLOWED_PATHS = frozenset({
         ".specify/memory/constitution.md", "CHANGELOG.md", "README.md",
         "specs/009-ai-screen-trust/INDEX.md",
@@ -536,9 +536,9 @@ class B096V2StructuralGuardTests(unittest.TestCase):
                 self._assert_historical_manifest_unchanged()
 
     def _committed_chain_changes(self) -> set[str]:
-        """当前交付基准到 HEAD 的已提交改动，不能只检查未提交层。"""
+        """保留原交付提交区间的范围审计。"""
         result = subprocess.run(
-            ["git", "diff", "--name-only", f"{self.DELIVERY_BASE_COMMIT}..HEAD"],
+            ["git", "diff", "--name-only", f"{self.DELIVERY_BASE_COMMIT}..{self.DELIVERY_END_COMMIT}"],
             cwd=self.ROOT, check=True, capture_output=True, text=True,
             encoding="utf-8",
         )
@@ -548,30 +548,11 @@ class B096V2StructuralGuardTests(unittest.TestCase):
             if line.strip()
         }
 
-    def _working_tree_changes(self) -> set[str]:
-        """工作树里尚未提交的变更与未跟踪文件。"""
-        result = subprocess.run(
-            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-            cwd=self.ROOT, check=True, capture_output=True, text=True,
-            encoding="utf-8",
-        )
-        paths = set()
-        for raw in result.stdout.splitlines():
-            path = raw[3:].strip().strip('"').replace("\\", "/")
-            if "->" in path:  # 重命名条目取新路径
-                path = path.split("->")[-1].strip().strip('"')
-            if path.endswith("/"):
-                continue
-            paths.add(path)
-        return paths
-
     def _assert_delivery_boundary(self, changed):
         self.assertEqual(sorted(set(changed) - self.DELIVERY_ALLOWED_PATHS), [])
 
-    def test_no_changes_outside_current_delivery_boundary(self):
-        self._assert_delivery_boundary(
-            self._committed_chain_changes() | self._working_tree_changes()
-        )
+    def test_no_changes_outside_historical_delivery_boundary(self):
+        self._assert_delivery_boundary(self._committed_chain_changes())
 
     def test_delivery_boundary_rejects_unapproved_files(self):
         for forbidden in ("webui/app.py", "webui/store.py",

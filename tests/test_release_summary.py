@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import unittest
+import json
+import pathlib
+import subprocess
+import sys
 
 from scripts.release_summary import _reject_overlong_items, build_release_summary
 
@@ -28,6 +32,15 @@ class ReleaseSummaryLengthGateTests(unittest.TestCase):
     def test_missing_version_fails_before_publish(self):
         with self.assertRaises(ValueError):
             build_release_summary("9.9.9")
+
+    def test_direct_script_entry_can_load_project_modules(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        version = json.loads((root / "webui/package.json").read_text(encoding="utf-8"))["version"]
+        result = subprocess.run(
+            [sys.executable, str(root / "scripts/release_summary.py"), "--version", version],
+            cwd=root, capture_output=True, text=True, encoding="utf-8", check=True,
+        )
+        self.assertEqual(json.loads(result.stdout), build_release_summary(version))
 
 
 if __name__ == "__main__":

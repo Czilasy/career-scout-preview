@@ -233,16 +233,10 @@ class B096FlowHistoryTests(unittest.TestCase):
             [track["result_run_id"] for track in durable["tracks"]], [bound_run],
         )
 
-    def test_deleting_a_flow_result_round_keeps_the_flow_readable_and_the_log_line_bound(
+    def test_deleting_a_flow_result_round_removes_flow_and_search_data(
         self,
     ):
-        """删掉结果轮之后流程列表必须仍然讲得清事实。
-
-        ``DELETE FROM screening_runs`` 由 ``ON DELETE SET NULL`` 清空
-        ``flow_tracks.result_run_id``，流程行与抓取任务线都留着：历史卡片据此
-        判定「这一轮已经没有结果了，但日志仍可看」。这里钉住后端在删除后给出的
-        形状，前端不得再按 ``result_run_id`` 是否存在一并收掉三个入口。
-        """
+        """Explicit deletion removes the entire track, including its search identity."""
         flow = self.store.create_flow(
             profile_id=self.profile_id, selection="boss", start_key="history-deleted-1",
             confirmed_filters={"boss": {}},
@@ -256,6 +250,8 @@ class B096FlowHistoryTests(unittest.TestCase):
         self.store.bind_flow_track_runs(
             flow["id"], "boss", profile_id=self.profile_id, scrape_run_id=scrape["id"],
         )
+        with self.store._connection() as conn:
+            conn.execute("UPDATE search_runs SET status = 'succeeded' WHERE id = ?", (scrape["id"],))
         run_id = self._snapshot(flow, "boss", "Deleted")
         service = ResultHistoryService(self.store)
 
@@ -268,20 +264,70 @@ class B096FlowHistoryTests(unittest.TestCase):
 
         self.assertTrue(service.delete_round(run_id, self.profile_id))
 
-        after = next(
-            entry for entry in service.list_flow_history(self.profile_id)
-            if entry["flow_id"] == flow["id"]
-        )
-        deleted_track = after["tracks"][0]
-        self.assertIsNone(deleted_track["result_run_id"])
-        self.assertEqual(str(deleted_track["scrape_run_id"]), str(scrape["id"]))
-        self.assertEqual(deleted_track["jobs"], [])
-        self.assertEqual(deleted_track["dropped"], [])
-        self.assertEqual(deleted_track["screened_count"], 0)
-        # 平铺轮次列表不再给出被删轮；本轮不新增 Flow 删除能力，流程行仍在。
+        self.assertEqual(service.list_flow_history(self.profile_id), [])
+        with self.assertRaises(KeyError):
+            self.store.get_search_run(scrape["id"])
+        with self.store._connection() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM flows").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM flow_tracks").fetchone()[0], 0)
         rounds = service.list_history(profile_id=self.profile_id)
         self.assertNotIn(run_id, [round_["run_id"] for round_ in rounds])
-        self.assertIn(flow["id"], [entry["flow_id"] for entry in service.list_flow_history(self.profile_id)])
+
+    def test_delete_one_aggregate_track_keeps_other_platform_results(self):
+        flow = self.store.create_flow(
+            profile_id=self.profile_id, selection="all", start_key="delete-track",
+            confirmed_filters={"boss": {}, "zhilian": {}},
+        )
+        first = self._snapshot(flow, "boss", "Delete")
+        other = self._snapshot(flow, "zhilian", "Keep")
+        service = ResultHistoryService(self.store)
+        self.assertTrue(service.delete_round(first, self.profile_id))
+        remaining = service.list_flow_history(self.profile_id)
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual([t["platform"] for t in remaining[0]["tracks"]], ["zhilian"])
+        self.assertIsNotNone(service.get_round(other, self.profile_id))
+        self.assertTrue(service.delete_round(other, self.profile_id))
+        self.assertEqual(service.list_flow_history(self.profile_id), [])
+
+    def test_delete_empty_track_via_history_api_respects_profile_and_active_status(self):
+        flow = self.store.create_flow(
+            profile_id=self.profile_id, selection="boss", start_key="delete-empty",
+            confirmed_filters={"boss": {}},
+        )
+        track = flow["tracks"][0]
+        app = Flask(__name__)
+        register_result_history_routes(app, self.store)
+        client = app.test_client()
+        url = f"/api/result-history/{track['id']}"
+        for status in ("queued", "running", "paused"):
+            with self.subTest(status=status):
+                self.store.update_flow_track(flow["id"], "boss", profile_id=self.profile_id, status=status)
+                response = client.delete(url, query_string={"profile_id": self.profile_id})
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.get_json()["error_code"], "history_delete_blocked")
+                self.assertIn("请先结束或取消流程", response.get_json()["message"])
+                self.assertEqual(len(ResultHistoryService(self.store).list_flow_history(self.profile_id)), 1)
+        self.store.update_flow_track(flow["id"], "boss", profile_id=self.profile_id, status="failed")
+        self.assertEqual(client.delete(url, query_string={"profile_id": "other"}).status_code, 404)
+        self.assertEqual(client.delete(url, query_string={"profile_id": self.profile_id}).status_code, 200)
+        self.assertEqual(ResultHistoryService(self.store).list_flow_history(self.profile_id), [])
+
+    def test_delete_failure_rolls_back_result_task_and_track(self):
+        import sqlite3
+        flow = self.store.create_flow(
+            profile_id=self.profile_id, selection="boss", start_key="delete-rollback",
+            confirmed_filters={"boss": {}},
+        )
+        run_id = self._snapshot(flow, "boss", "Rollback")
+        self.store.append_task_event(run_id, "stage_start", {"stage": "scrape"})
+        with self.store._connection() as conn:
+            conn.execute("CREATE TRIGGER fail_history_delete BEFORE DELETE ON flow_tracks "
+                         "BEGIN SELECT RAISE(ABORT, 'forced deletion failure'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            ResultHistoryService(self.store).delete_round(run_id, self.profile_id)
+        self.assertIsNotNone(ResultHistoryService(self.store).get_round(run_id, self.profile_id))
+        self.assertTrue(self.store.list_task_events(run_id))
+        self.assertEqual(len(ResultHistoryService(self.store).list_flow_history(self.profile_id)), 1)
 
     def test_archive_rejects_partial_flow_scope_instead_of_archiving_global_results(self):
         app = Flask(__name__)

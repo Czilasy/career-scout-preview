@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from webui.store_helpers import _now
+from webui.run_cleanup import HistoryDeletionBlocked
 
 _RESULT_SNAPSHOT = "result_snapshot"
 
@@ -121,157 +122,120 @@ class ResultHistoryStoreMixin:
             ).fetchone()
         return row is not None
 
-    def _run_closure_ids(self, run_id: str, *, upward: bool = True) -> list[str]:
-        """043：流程闭包收集（轮 → 根账本 → 派生过程记录）。
-
-        以 ``execution_params_json.scrape_task_id`` 为唯一持久关联键，
-        ``source_run_id`` 为补充（重抓指向目标轮）；``upward=True`` 先向上
-        收根账本（整条进出用），``upward=False`` 只向下收派生（局部清中间档用）。
-        """
-        target = str(run_id or "")
-        if not target:
-            return []
-        with self._connection() as conn:
-            rows = conn.execute(
-                "SELECT id, execution_params_json FROM screening_runs"
-            ).fetchall()
-        edges: dict[str, list[str]] = {}
-        parents: dict[str, list[str]] = {}
+    @staticmethod
+    def _history_closure_ids(rows, seeds) -> set[str]:
+        """Collect the persisted parent/child run graph without leaving the transaction."""
+        edges: dict[str, set[str]] = {}
+        parents: dict[str, set[str]] = {}
         for row in rows:
             try:
                 params = json.loads(row["execution_params_json"] or "{}")
             except (TypeError, ValueError):
                 params = {}
+            if not isinstance(params, dict):
+                continue
             child = str(row["id"])
             for key in ("scrape_task_id", "source_run_id"):
                 parent = str(params.get(key) or "")
-                if not parent:
-                    continue
-                edges.setdefault(parent, []).append(child)
-                parents.setdefault(child, []).append(parent)
-        collected = {target}
-        frontier = [target]
-        # 向上：把本流程的根账本（轮 → 账本）收进来（upward=False 时跳过）
-        while upward and frontier:
-            current = frontier.pop()
-            for parent in parents.get(current, []):
-                if parent not in collected:
-                    collected.add(parent)
-                    frontier.append(parent)
-        # 再向下：收全部派生过程记录（账本 → AI/重抓中间档）
+                if parent:
+                    edges.setdefault(parent, set()).add(child)
+                    parents.setdefault(child, set()).add(parent)
+        collected = {str(seed) for seed in seeds if seed}
         frontier = list(collected)
         while frontier:
-            current = frontier.pop()
-            for child in edges.get(current, []):
-                if child not in collected:
-                    collected.add(child)
-                    frontier.append(child)
-        return list(collected)
+            for related in parents.get(frontier.pop(), ()):
+                if related not in collected:
+                    collected.add(related)
+                    frontier.append(related)
+        frontier = list(collected)
+        while frontier:
+            for related in edges.get(frontier.pop(), ()):
+                if related not in collected:
+                    collected.add(related)
+                    frontier.append(related)
+        return collected
 
-    def _delete_run_ids(self, ids: list[str]) -> bool:
-        """删除给定 run id 集合的全部足迹（白箱 → 日志 → 主行级联）。
+    def delete_run_closure(self, run_id: str, profile_id: str | None = None) -> bool:
+        """User deletion only: atomically remove one history round and its track.
 
-        FR-020：集合内存在未结束任务（queued/running/paused）时拒绝。
+        An empty/failed track may be addressed by its track id. The other tracks
+        in an aggregate stay intact; the outer flow disappears with its last track.
+        Running/queued/paused tasks and foreign profile/shared run ownership refuse
+        deletion before any writes. User job assets are outside this closure.
         """
-        if not ids:
+        target = str(run_id or "")
+        if not target:
             return False
-        placeholders = ",".join("?" for _ in ids)
         with self._connection() as conn:
-            active = conn.execute(
-                f"SELECT COUNT(*) AS n FROM screening_runs WHERE id IN ({placeholders}) "
-                "AND status IN ('queued','running','paused')",
-                tuple(ids),
-            ).fetchone()
-        if int(active["n"] or 0) > 0:
-            return False
-        for owner_id in ids:
-            for owner_kind in ("scrape", "screening", "recrawl"):
-                self.delete_whitebox_runs_for_owner(owner_kind, owner_id)
-        for task_id in ids:
-            self.delete_task_with_logs(task_id)
-        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             self._assert_recovery_writes_allowed(conn)
-            conn.execute(
-                f"DELETE FROM screening_runs WHERE id IN ({placeholders})",
-                tuple(ids),
-            )
-        return True
-
-    def delete_run_closure(
-        self, run_id: str, profile_id: str | None = None,
-    ) -> bool:
-        """043：整条删除一条流程的全部足迹（删除/淘汰共用）。
-
-        闭包 = 轮 + 根账本 + 全部派生过程记录（AI 筛选/重抓中间档）；
-        白箱证据与任务日志按 owner/task 显式清（FR-021：日志随流程清除，
-        不再保留）；六张从表由外键级联自动清。删除顺序先子后主，
-        中途失败时主行仍在，重跑幂等。
-
-        FR-020：闭包内存在未结束任务（queued/running/paused）时拒绝删除。
-        Spec041：传入 ``profile_id`` 时校验归属，禁止跨画像删除；无归属
-        （NULL/空）老数据对所有画像可见可管。
-        """
-        target = str(run_id or "")
-        if not target:
-            return False
-        with self._connection() as conn:
-            row = conn.execute(
-                "SELECT id, profile_id FROM screening_runs WHERE id = ?",
-                (target,),
+            track = conn.execute(
+                "SELECT ft.*, f.profile_id FROM flow_tracks ft "
+                "JOIN flows f ON f.id = ft.flow_id "
+                "WHERE ft.id = ? OR ft.result_run_id = ?",
+                (target, target),
             ).fetchone()
-        if row is None:
-            return False
-        if profile_id and row["profile_id"] and str(row["profile_id"]) != str(profile_id):
-            return False
-        return self._delete_run_ids(self._run_closure_ids(target))
-
-    def delete_run_subtree(self, run_id: str) -> bool:
-        """043 FR-022：只删除该过程记录及其向下派生（不动根账本与轮）。
-
-        整条进出用于流程级删除；本方法用于流程内部的中间档瘦身
-        （定稿后只保留最新一次筛选/重抓中间档）。
-        """
-        target = str(run_id or "")
-        if not target:
-            return False
-        with self._connection() as conn:
-            row = conn.execute(
-                "SELECT id FROM screening_runs WHERE id = ?", (target,),
-            ).fetchone()
-        if row is None:
-            return False
-        return self._delete_run_ids(self._run_closure_ids(target, upward=False))
-
-    def prune_result_history(self, limit: int = 30) -> list[str]:
-        """Drop the oldest rounds per platform until ``limit`` remain."""
-        limit = max(1, int(limit))
-        candidates: list[str] = []
-        with self._connection() as conn:
-            rows = conn.execute(
-                "SELECT platform, COUNT(*) AS n FROM screening_runs "
-                "WHERE record_kind = ? AND "
-                "EXISTS (SELECT 1 FROM screening_results r WHERE r.run_id = screening_runs.id) "
-                "GROUP BY platform",
-                (_RESULT_SNAPSHOT,),
-            ).fetchall()
-            for row in rows:
-                platform = str(row["platform"] or "")
-                overflow = max(0, int(row["n"]) - limit)
-                if overflow <= 0:
-                    continue
-                old_rows = conn.execute(
-                    "SELECT id FROM screening_runs "
-                    "WHERE platform = ? AND record_kind = ? AND "
-                    "EXISTS (SELECT 1 FROM screening_results r WHERE r.run_id = screening_runs.id) "
-                    "ORDER BY created_at ASC, rowid ASC LIMIT ?",
-                    (platform, _RESULT_SNAPSHOT, overflow),
+            row = conn.execute("SELECT * FROM screening_runs WHERE id = ?", (target,)).fetchone()
+            if track is None and row is None:
+                return False
+            owner = (track if track is not None else row)["profile_id"]
+            if profile_id and owner and str(owner) != str(profile_id):
+                return False
+            active = {"queued", "running", "paused"}
+            if track is not None and track["status"] in active:
+                raise HistoryDeletionBlocked("请先结束或取消流程，再删除历史轮次")
+            rows = conn.execute("SELECT * FROM screening_runs").fetchall()
+            seeds = {target} if row is not None else set()
+            if track is not None:
+                seeds.update(track[key] for key in ("scrape_run_id", "screen_run_id", "result_run_id") if track[key])
+                search_rows = conn.execute("SELECT * FROM search_runs").fetchall()
+                for item in [*rows, *search_rows]:
+                    try:
+                        field = "execution_params_json" if "execution_params_json" in item.keys() else "profile_snapshot_json"
+                        params = json.loads(item[field] or "{}")
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(params, dict):
+                        continue
+                    if params.get("track_id") == track["id"] or (
+                        params.get("flow_id") == track["flow_id"]
+                        and (item["platform"] if "platform" in item.keys() else params.get("platform")) == track["platform"]
+                    ):
+                        seeds.add(item["id"])
+            ids = sorted(self._history_closure_ids(rows, seeds))
+            if ids:
+                marks = ",".join("?" for _ in ids)
+                for table in ("screening_runs", "search_runs", "tasks"):
+                    related = conn.execute(f"SELECT * FROM {table} WHERE id IN ({marks})", ids).fetchall()
+                    for item in related:
+                        if item["status"] in active:
+                            raise HistoryDeletionBlocked("请先结束或取消流程，再删除历史轮次")
+                        if "profile_id" in item.keys() and item["profile_id"] and item["profile_id"] != (owner or profile_id):
+                            return False
+                # Never erase a run still owned by another platform track.
+                shared = conn.execute(
+                    f"SELECT id FROM flow_tracks WHERE (scrape_run_id IN ({marks}) "
+                    f"OR screen_run_id IN ({marks}) OR result_run_id IN ({marks}))",
+                    ids * 3,
                 ).fetchall()
-                candidates.extend(str(item["id"]) for item in old_rows)
-        deleted = []
-        for run_id in candidates:
-            if self.delete_run_closure(run_id):
-                deleted.append(run_id)
-        return deleted
+                if any(track is None or item["id"] != track["id"] for item in shared):
+                    return False
+                conn.execute(
+                    f"DELETE FROM whitebox_runs WHERE owner_id IN ({marks}) OR parent_owner_id IN ({marks})",
+                    ids * 2,
+                )
+                conn.execute(f"DELETE FROM task_logs WHERE task_id IN ({marks})", ids)
+                conn.execute(f"DELETE FROM tasks WHERE id IN ({marks})", ids)
+                conn.execute(f"DELETE FROM screening_runs WHERE id IN ({marks})", ids)
+                conn.execute(f"DELETE FROM search_runs WHERE id IN ({marks})", ids)
+            if track is not None:
+                conn.execute("DELETE FROM flow_tracks WHERE id = ?", (track["id"],))
+                conn.execute(
+                    "DELETE FROM flows WHERE id = ? AND NOT EXISTS "
+                    "(SELECT 1 FROM flow_tracks WHERE flow_id = ?)",
+                    (track["flow_id"], track["flow_id"]),
+                )
+        return True
 
     # ------------------------------------------------------------------
     # 043：未收尾流程的一次性提醒（记号与水位）
@@ -360,119 +324,3 @@ class ResultHistoryStoreMixin:
         except (sqlite3.OperationalError, RuntimeError):
             return False
         return cursor.rowcount > 0
-
-    # ------------------------------------------------------------------
-    # 043：无主账本兜底 / 派生记录查询 / 孤儿明细回收
-    # ------------------------------------------------------------------
-
-    def list_derived_runs_for_source(self, source_id: str) -> list[dict[str, Any]]:
-        """挂在某 source（根账本/轮）下的派生过程记录，新 → 旧。
-
-        043 FR-022：只保留最新一次的中间过程档；本查询供清理服务挑选候选。
-        """
-        target = str(source_id or "")
-        if not target:
-            return []
-        with self._connection() as conn:
-            rows = conn.execute(
-                "SELECT id, platform, status, created_at FROM screening_runs "
-                "WHERE record_kind = 'process_log' AND ("
-                "json_extract(execution_params_json, '$.scrape_task_id') = ? "
-                "OR json_extract(execution_params_json, '$.source_run_id') = ?) "
-                "ORDER BY created_at DESC, rowid DESC",
-                (target, target),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def prune_unowned_run_closures(
-        self, limit: int = 30, *, dry_run: bool = False,
-    ) -> list[str]:
-        """043 FR-011：无主账本按每平台最近 N 条保留，超出者整条清除。
-
-        无主 = 根账本（自身无 scrape_task_id / source_run_id 父键）没有被任何
-        结果轮引用；被未结束任务引用的流程不淘汰；派生记录随根走、不单独计数。
-        ``dry_run=True`` 只返回候选不删除（启动兜底据此决定是否先备份）。
-        """
-        limit = max(1, int(limit))
-        overflow: list[str] = []
-        with self._connection() as conn:
-            rows = conn.execute(
-                "SELECT id, platform, status, execution_params_json FROM screening_runs "
-                "WHERE record_kind = 'process_log' "
-                "ORDER BY created_at DESC, rowid DESC"
-            ).fetchall()
-            active_ids = {
-                str(item["id"]) for item in conn.execute(
-                    "SELECT id FROM screening_runs "
-                    "WHERE status IN ('queued','running','paused')"
-                )
-            }
-            referenced: set[str] = set()
-            for item in conn.execute(
-                "SELECT execution_params_json FROM screening_runs "
-                "WHERE record_kind = 'result_snapshot'"
-            ):
-                try:
-                    params = json.loads(item["execution_params_json"] or "{}")
-                except (TypeError, ValueError):
-                    params = {}
-                for key in ("scrape_task_id", "source_run_id"):
-                    value = str(params.get(key) or "")
-                    if value:
-                        referenced.add(value)
-            by_platform: dict[str, list[str]] = {}
-            for row in rows:
-                rid = str(row["id"])
-                try:
-                    params = json.loads(row["execution_params_json"] or "{}")
-                except (TypeError, ValueError):
-                    params = {}
-                if str(params.get("scrape_task_id") or "") or str(params.get("source_run_id") or ""):
-                    continue
-                if rid in referenced or rid in active_ids:
-                    continue
-                if any(cid in active_ids for cid in self._run_closure_ids(rid)):
-                    continue
-                by_platform.setdefault(str(row["platform"] or ""), []).append(rid)
-            for _platform, ids in by_platform.items():
-                overflow.extend(ids[limit:])
-        if dry_run:
-            return overflow
-        deleted: list[str] = []
-        for rid in overflow:
-            if self.delete_run_closure(rid):
-                deleted.append(rid)
-        return deleted
-
-    _ORPHAN_SCOPES = (
-        ("screening_results", "run_id", "screening_runs"),
-        ("screening_pending_results", "run_id", "screening_runs"),
-        ("pipeline_checkpoints", "run_id", "screening_runs"),
-        ("scrape_run_jobs", "run_id", "screening_runs"),
-        ("scrape_page_progress", "run_id", "screening_runs"),
-        ("task_logs", "task_id", "tasks"),
-    )
-
-    def count_orphan_rows(self) -> dict[str, int]:
-        """043 启动兜底：父行已不存在的孤儿明细计数（存量核对用）。"""
-        counts: dict[str, int] = {}
-        with self._connection() as conn:
-            for table, column, parent in self._ORPHAN_SCOPES:
-                counts[table] = int(conn.execute(
-                    f"SELECT COUNT(*) AS n FROM {table} "
-                    f"WHERE {column} NOT IN (SELECT id FROM {parent})"
-                ).fetchone()["n"] or 0)
-        return counts
-
-    def delete_orphan_rows(self) -> dict[str, int]:
-        """043 启动兜底：清除父行已不存在的孤儿明细（已删轮/任务的残留）。"""
-        removed: dict[str, int] = {}
-        with self._connection() as conn:
-            self._assert_recovery_writes_allowed(conn)
-            for table, column, parent in self._ORPHAN_SCOPES:
-                cursor = conn.execute(
-                    f"DELETE FROM {table} "
-                    f"WHERE {column} NOT IN (SELECT id FROM {parent})"
-                )
-                removed[table] = int(cursor.rowcount or 0)
-        return removed

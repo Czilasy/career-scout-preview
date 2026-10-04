@@ -5,7 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
+
+if __package__ in (None, ""):
+    # 发布脚本直接执行本文件时，Python 的搜索路径默认只有 scripts/。
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from webui.updater import _summarize_release_notes
 

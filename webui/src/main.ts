@@ -1,8 +1,9 @@
+import "./styles.css";
+import "./themes/registry";
 import { createApp } from "vue";
 import App from "./App.vue";
 import CloseConfirmHost from "./components/CloseConfirmHost.vue";
-import "./styles.css";
-import "./styles/theme.css";
+import ThemeSurfaceHost from "./themes/ThemeSurfaceHost.vue";
 
 // 036 桌面 EXE 模式标记：window.pywebview 存在即 EXE 模式，给 <html> 挂
 // data-desktop="true"。CSS 用 [data-desktop="true"] 把顶部 fixed 浮窗下移
@@ -104,6 +105,10 @@ function initTooltips() {
 }
 
 createApp(App).mount("#app");
+// 通用主题环境宿主：具体主题由注册表提供，切换回基座时自动卸载。
+const themeSurfaceEl = document.createElement("div");
+document.body.appendChild(themeSurfaceEl);
+createApp(ThemeSurfaceHost).mount(themeSurfaceEl);
 initTooltips();
 
 // 045 v2：关闭确认宿主以独立 Vue 实例挂在 body 上，不进任何页面组件

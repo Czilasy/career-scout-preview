@@ -8,7 +8,6 @@
 
 import json
 import pathlib
-import sqlite3
 import tempfile
 import unittest
 
@@ -129,7 +128,7 @@ class RunNoticeUnitTests(unittest.TestCase):
 
 
 class RunCleanupClosureTests(unittest.TestCase):
-    """043 T012：整条进出 / 无主兜底 / 定稿中间档 / 孤儿回收。"""
+    """043 T012：手动整轮删除与永久保留。"""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -185,9 +184,11 @@ class RunCleanupClosureTests(unittest.TestCase):
         self.assertEqual(self._count("tasks", "id", "scrape-root"), 0)
 
     def test_delete_refuses_while_active_task_inside(self):
+        from webui.run_cleanup import HistoryDeletionBlocked
         self._insert_process_log("scrape-active", status="running")
         round_id = self._save_round("scrape-active", n=1)
-        self.assertFalse(self.store.delete_run_closure(round_id))
+        with self.assertRaises(HistoryDeletionBlocked):
+            self.store.delete_run_closure(round_id)
         self.assertIsNotNone(self.store.get_screening_run(round_id))
         self.assertIsNotNone(self.store.get_screening_run("scrape-active"))
 
@@ -201,53 +202,22 @@ class RunCleanupClosureTests(unittest.TestCase):
         self.assertIsNotNone(self.store.get_screening_run("scrape-a"))
         self.assertGreater(self._count("screening_results", "run_id", round_a), 0)
 
-    def test_prune_unowned_keeps_recent_and_protects_referenced(self):
-        self._insert_process_log("orphan-0", created_at="2026-08-01T10:00:00+08:00")
-        self._insert_process_log("orphan-1", created_at="2026-08-02T10:00:00+08:00")
-        self._insert_process_log("orphan-2", created_at="2026-08-03T10:00:00+08:00")
-        self._insert_process_log("owned", created_at="2026-07-01T10:00:00+08:00")
-        round_id = self._save_round("owned", n=1)
+    def test_startup_keeps_all_old_unowned_processes(self):
+        import threading
+        from webui.app import create_app
+        for index in range(32):
+            self._insert_process_log(f"retained-{index}")
+        create_app({
+            "TESTING": False, "START_TASKS": False,
+            "DB_PATH": str(self.store.db_path),
+            "RESULT_DIR": str(pathlib.Path(self.temp.name) / "results"),
+        })
+        for thread in threading.enumerate():
+            if thread.name == "run-cleanup-sweep":
+                thread.join(timeout=10)
+        for index in range(32):
+            self.assertIsNotNone(self.store.get_screening_run(f"retained-{index}"))
 
-        removed = self.store.prune_unowned_run_closures(limit=2)
-        self.assertEqual(removed, ["orphan-0"])
-        self.assertIsNotNone(self.store.get_screening_run("orphan-2"))
-        self.assertIsNotNone(self.store.get_screening_run("owned"))
-        self.assertIsNotNone(self.store.get_screening_run(round_id))
-
-    def test_prune_stale_intermediate_keeps_only_latest(self):
-        from webui import run_cleanup as run_cleanup_module
-        self._insert_process_log("scrape-root")
-        round_id = self.store.save_pipeline_result(
-            {"ok": True, "jobs": _jobs(1), "dropped": [], "total_scraped": 1, "total_kept": 1},
-            {"platform": "boss"},
-            execution_params={"platform": "boss", "scrape_task_id": "scrape-root"},
-        )
-        self._insert_process_log("ai-old", created_at="2026-08-01T10:00:00+08:00",
-                                 execution_params={"scrape_task_id": "scrape-root"})
-        self._insert_process_log("ai-new", created_at="2026-08-02T10:00:00+08:00",
-                                 execution_params={"scrape_task_id": "scrape-root"})
-
-        removed = run_cleanup_module.prune_stale_intermediate_runs(self.store, round_id)
-        self.assertEqual(removed, ["ai-old"])
-        self.assertIsNotNone(self.store.get_screening_run("ai-new"))
-
-    def test_orphan_rows_are_reclaimed(self):
-        # 旧库遗留形态：父行已不在。新库外键会拒绝该写入，这里关闭外键模拟旧数据。
-        raw = sqlite3.connect(str(self.store.db_path))
-        try:
-            raw.execute("PRAGMA foreign_keys = OFF")
-            raw.execute(
-                "INSERT INTO screening_results (id, run_id, job_id, platform_job_id, verdict, created_at)"
-                " VALUES ('ghost-row-1', 'ghost-run', 'ghost-job', 'ghost-job', '', ?)",
-                ("2026-09-01T10:00:00+08:00",),
-            )
-            raw.commit()
-        finally:
-            raw.close()
-        self.assertGreaterEqual(self.store.count_orphan_rows()["screening_results"], 1)
-        removed = self.store.delete_orphan_rows()
-        self.assertGreaterEqual(removed["screening_results"], 1)
-        self.assertEqual(self.store.count_orphan_rows()["screening_results"], 0)
 
 
 if __name__ == "__main__":

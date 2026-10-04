@@ -39,7 +39,7 @@ const singlePlatformFlowItems = computed(() => realFlowItems.value.filter((flow)
 const flowCardItems = computed(() => activePlatform.value === "aggregate"
   ? aggregateFlowItems.value
   : singlePlatformFlowItems.value.filter((flow) => flow.selection === activePlatform.value));
-// 单平台流程保留已有流程卡；组合流程的各平台结果可在对应平台页独立查看。
+// 单平台流程复用紧凑轮次外观；组合流程的各平台结果可在对应平台页独立查看。
 const flowOwnedRunIds = computed(() => new Set(
   singlePlatformFlowItems.value
     .flatMap((flow) => (flow.tracks || []).map((track) => flowTrackRunId(track)))
@@ -64,6 +64,14 @@ function flowTrackRunId(track: FlowHistoryTrack): string {
   // Task IDs are useful for status/log presentation, but opening them as
   // round detail would fabricate a result for failed or partial tracks.
   return String(track.result_run_id || "");
+}
+
+function flowTrackDeleteId(track: FlowHistoryTrack): string {
+  return flowTrackRunId(track) || String(track.id || "");
+}
+
+function historyDeleteBlocked(status: unknown): boolean {
+  return ["queued", "running", "paused"].includes(String(status || ""));
 }
 
 function flowTrackJobCount(track: FlowHistoryTrack): number {
@@ -115,7 +123,7 @@ function flowRoundItem(track: FlowHistoryTrack): HistoryRoundItem {
   const jobs = Array.isArray(track.jobs) ? track.jobs.length : 0;
   const dropped = Array.isArray(track.dropped) ? track.dropped.length : 0;
   return {
-    run_id: flowTrackRunId(track),
+    run_id: flowTrackDeleteId(track),
     platform: track.platform,
     status: String(track.status || ""),
     scrape_task_id: String(track.scrape_run_id || ""),
@@ -277,15 +285,16 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
             {{ activePlatform === 'aggregate' ? '暂无聚合流程' : `暂无${platformLabel(activePlatform)}历史轮次` }}
           </div>
           <template v-else>
+            <h3 v-if="activePlatform !== 'aggregate'" class="history-platform-title">{{ platformLabel(activePlatform) }}</h3>
             <template v-if="flowCardItems.length">
               <article
                 v-for="flow in flowCardItems"
                 :key="flow.flow_id"
-                class="history-flow-card"
-                data-testid="history-flow-card"
+                :class="{ 'history-flow-card': activePlatform === 'aggregate' }"
+                :data-testid="activePlatform === 'aggregate' ? 'history-flow-card' : undefined"
                 :data-flow-id="flow.flow_id"
               >
-                <header class="history-flow-head">
+                <header v-if="activePlatform === 'aggregate'" class="history-flow-head">
                   <strong>流程 · {{ flow.selection === 'all' ? '全部' : platformLabel(flow.selection) }}</strong>
                   <span class="history-flow-time">{{ formatHistoryTime(flow.updated_at || flow.created_at) || "时间未知" }}</span>
                   <span class="history-round-status">{{ flowCardStatus(flow) }}</span>
@@ -293,13 +302,13 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
                 <div
                   v-for="track in flow.tracks"
                   :key="`${flow.flow_id}-${track.platform}`"
-                  class="history-flow-track"
+                  :class="{ 'history-flow-track': activePlatform === 'aggregate', 'history-single-round': activePlatform !== 'aggregate' }"
                   data-testid="history-flow-track"
                   :data-platform="track.platform"
                 >
                   <Transition name="delete-confirm">
                     <div
-                      v-if="deleteTarget && deleteTarget.run_id === flowTrackRunId(track)"
+                      v-if="deleteTarget && deleteTarget.run_id === flowTrackDeleteId(track)"
                       class="history-delete-confirm"
                       data-testid="history-delete-confirm"
                       @click.stop
@@ -330,13 +339,19 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
                     </div>
                     <div
                       v-else
-                      :class="['history-round-row', 'history-flow-track-line', { 'history-flow-track-line--static': !flowTrackRunId(track) }]"
+                      :class="['history-round-row', { 'history-flow-track-line': activePlatform === 'aggregate', 'history-flow-track-line--static': !flowTrackRunId(track) }]"
+                      :data-testid="activePlatform !== 'aggregate' ? 'history-round-row' : undefined"
+                      :data-run-id="flowTrackRunId(track) || undefined"
                       :role="flowTrackRunId(track) ? 'button' : undefined"
                       :tabindex="flowTrackRunId(track) ? 0 : undefined"
                       @click="flowTrackRunId(track) && emit('open-round', flowTrackRunId(track))"
                       @keydown="flowTrackRunId(track) && onRoundRowKeydown($event, flowRoundItem(track))"
                     >
-                      <span class="history-round-head history-flow-platform">{{ platformLabel(track.platform) }}</span>
+                      <span v-if="activePlatform === 'aggregate'" class="history-round-head history-flow-platform">{{ platformLabel(track.platform) }}</span>
+                      <span v-else class="history-round-head">
+                        <span class="history-round-time">{{ formatHistoryTime(flowTrackHistoryItem(track)?.finished_at || flowTrackHistoryItem(track)?.created_at || flow.updated_at || flow.created_at) || "时间未知" }}</span>
+                        <span v-if="flowTrackHistoryItem(track)?.is_latest" class="history-latest-badge" data-testid="history-latest-badge">最新</span>
+                      </span>
                       <span class="history-round-status" data-testid="history-flow-track-status">{{ flowTrackStatus(track) }}</span>
                       <span class="history-round-total" data-testid="history-round-total">
                         共 {{ flowTrackHistoryItem(track)?.total_scraped ?? flowTrackJobCount(track) }} 个岗位
@@ -351,12 +366,10 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
                         {{ flowTrackHistoryItem(track)?.keyword_summary }}
                       </span>
                       <span v-if="track.message" class="history-flow-track-message">{{ track.message }}</span>
-                      <!-- 三个入口各自按自己的依据判定：详情只认结果轮、日志认该
-                           轨道的抓取任务线、删除只在确实还有可删轮次时给出。结果轮
-                           被删后日志仍可看，也不再有删不掉的幽灵行。 -->
+                      <!-- 详情认结果轮，日志认抓取任务，删除认持久轮次或轨道身份。 -->
                       <span
-                        v-if="track.scrape_run_id || flowTrackRunId(track)"
-                        class="history-row-actions history-flow-track-actions"
+                        v-if="track.scrape_run_id || flowTrackDeleteId(track)"
+                        :class="['history-row-actions', { 'history-flow-track-actions': activePlatform === 'aggregate' }]"
                         @click.stop
                       >
                         <button
@@ -370,9 +383,11 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
                           <ScrollText :size="16" aria-hidden="true" />
                         </button>
                         <button
-                          v-if="flowTrackRunId(track)"
+                          v-if="flowTrackDeleteId(track)"
                           class="icon-button history-delete"
                           type="button"
+                          :disabled="deleting || historyDeleteBlocked(track.status)"
+                          :title="historyDeleteBlocked(track.status) ? '请先结束或取消流程，再删除历史轮次' : '删除该轮次'"
                           :aria-label="`删除 ${platformLabel(track.platform)} 该轮次`"
                           data-testid="history-delete-trigger"
                           @click="emit('confirm-delete', flowRoundItem(track))"
@@ -395,7 +410,6 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
                 :data-platform="platform"
                 :aria-hidden="activePlatform !== platform"
               >
-                <h3 class="history-platform-title">{{ platformLabel(platform) }}</h3>
                 <div
                   v-for="item in platform === 'boss' ? bossItems : zhilianItems"
                   :key="item.run_id"
@@ -475,6 +489,8 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
                     <button
                       class="icon-button history-delete"
                       type="button"
+                      :disabled="deleting || historyDeleteBlocked(item.status)"
+                      :title="historyDeleteBlocked(item.status) ? '请先结束或取消流程，再删除历史轮次' : '删除该轮次'"
                       :aria-label="`删除 ${formatHistoryTime(item.finished_at || item.created_at) || '该轮次'}`"
                       data-testid="history-delete-trigger"
                       @click="emit('confirm-delete', item)"
@@ -691,6 +707,18 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
   color: var(--text-soft);
   font-size: 0.84rem;
   font-weight: 600;
+}
+
+/* 紧凑流程行保留独立定位，删除确认只覆盖当前轮次。 */
+.history-single-round {
+  position: relative;
+  min-width: 0;
+  min-height: 92px;
+  margin-bottom: 8px;
+}
+
+.history-single-round > :deep(.history-round-row) {
+  margin-bottom: 0;
 }
 
 .history-flow-track-actions {

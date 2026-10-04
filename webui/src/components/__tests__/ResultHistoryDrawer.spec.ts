@@ -60,6 +60,27 @@ describe("ResultHistoryDrawer", () => {
     return wrapper;
   }
 
+  it.each(["queued", "running", "paused"])("disables deleting unfinished legacy and Flow rounds (%s)", async (status) => {
+    const legacy = await mountDrawer({ items: [item({ status })] });
+    const legacyDelete = legacy.get('[data-testid="history-delete-trigger"]');
+    expect(legacyDelete.attributes("disabled")).toBeDefined();
+    expect(legacyDelete.attributes("title")).toContain("请先结束或取消流程");
+    await legacyDelete.trigger("click");
+    expect(legacy.emitted("confirm-delete")).toBeUndefined();
+    const flow = await mountDrawer({
+      items: [],
+      flowItems: [{ flow_id: "busy-flow", profile_id: "profile", selection: "boss", status,
+        created_at: "2026-10-04", updated_at: "2026-10-04", legacy: false, screened_count: 0,
+        tracks: [{ id: "busy-track", platform: "boss", status, jobs: [], screened_count: 0 }],
+      }],
+    });
+    const flowDelete = flow.get('[data-testid="history-delete-trigger"]');
+    expect(flowDelete.attributes("disabled")).toBeDefined();
+    expect(flowDelete.attributes("title")).toContain("请先结束或取消流程");
+    await flowDelete.trigger("click");
+    expect(flow.emitted("confirm-delete")).toBeUndefined();
+  });
+
   it("opens on the aggregate tab before explicit platform navigation", () => {
     const wrapper = mount(ResultHistoryDrawer, {
       props: { open: true, items: [item()], loading: false, error: "", deleting: false, deleteTarget: null },
@@ -105,6 +126,34 @@ describe("ResultHistoryDrawer", () => {
     expect(wrapper.find('[data-testid="history-flow-card"]').exists()).toBe(true);
     expect(wrapper.findAll('[data-testid="history-flow-track"]')).toHaveLength(2);
     expect(wrapper.text()).toContain("未完成 AI 筛选");
+  });
+
+  it.each(["boss", "zhilian"] as const)("uses compact rows for new and legacy %s rounds without a flow shell", async (platform) => {
+    const recent = item({ run_id: "single-result", platform, scrape_task_id: "single-scrape", finished_at: "2026-10-02 04:03:00" });
+    const older = item({ run_id: "older-result", platform, is_latest: false });
+    const wrapper = await mountDrawer({
+      items: [recent, older],
+      flowItems: [{
+        flow_id: "single-flow", profile_id: "profile", selection: platform, status: "done", legacy: false,
+        updated_at: "2026-10-02 04:05:00", tracks: [{ platform, status: "done", result_run_id: recent.run_id, scrape_run_id: "single-scrape" }],
+      }],
+    });
+    expect(wrapper.find('[data-testid="history-flow-card"]').exists()).toBe(false);
+    expect(wrapper.find(".history-flow-head").exists()).toBe(false);
+    const rows = wrapper.findAll('[data-testid="history-round-row"]');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].classes()).not.toContain("history-flow-track-line");
+    expect(rows[0].get(".history-round-time").text()).toBe("2026-10-02 04:03");
+    expect(rows[0].text()).toContain("匹配 3");
+    await rows[0].trigger("click");
+    await rows[0].get('[data-testid="history-log-trigger"]').trigger("click");
+    await rows[0].get('[data-testid="history-delete-trigger"]').trigger("click");
+    expect(wrapper.emitted("open-round")).toEqual([[recent.run_id]]);
+    expect(wrapper.emitted("view-log")).toEqual([[recent]]);
+    expect(wrapper.emitted("confirm-delete")).toEqual([[recent]]);
+    await wrapper.setProps({ deleteTarget: recent });
+    await wrapper.get('[data-testid="history-delete-confirm-yes"]').trigger("click");
+    expect(wrapper.emitted("delete-round")).toEqual([[recent]]);
   });
 
   it("only opens a Flow track when a result snapshot id exists", async () => {
@@ -160,8 +209,8 @@ describe("ResultHistoryDrawer", () => {
       updated_at: "2026-08-12 09:20:00",
       legacy: false,
       tracks: [
-        { platform: "boss", status: "done", result_run_id: null, scrape_run_id: "boss-scrape", jobs: [], dropped: [] },
-        { platform: "zhilian", status: "done", result_run_id: null, scrape_run_id: "zhilian-scrape", jobs: [], dropped: [] },
+        { id: "boss-track", platform: "boss", status: "done", result_run_id: null, scrape_run_id: "boss-scrape", jobs: [], dropped: [] },
+        { id: "zhilian-track", platform: "zhilian", status: "done", result_run_id: null, scrape_run_id: "zhilian-scrape", jobs: [], dropped: [] },
       ],
     };
     const wrapper = await mountDrawer({ items: [], flowItems: [flow] });
@@ -183,8 +232,9 @@ describe("ResultHistoryDrawer", () => {
       expect(wrapper.emitted("view-log")?.at(-1)).toEqual([expect.objectContaining({
         scrape_task_id: scrapeTaskId,
       })]);
-      // 没有可删轮次 → 不给删除入口；详情入口仍只认 result_run_id。
-      expect(track.find('[data-testid="history-delete-trigger"]').exists()).toBe(false);
+      // 旧空壳也能手动删除，详情入口仍然只认真实结果轮。
+      await track.get('[data-testid="history-delete-trigger"]').trigger("click");
+      expect(wrapper.emitted("confirm-delete")?.at(-1)).toEqual([expect.objectContaining({ run_id: `${platform}-track` })]);
       expect(track.find(".history-flow-track-line[role=button]").exists()).toBe(false);
     }
   });
@@ -205,8 +255,8 @@ describe("ResultHistoryDrawer", () => {
       }],
     };
     const wrapper = await mountDrawer({ items: [], flowItems: [flow] });
-    const card = wrapper.get('[data-testid="history-flow-card"]');
-    expect(card.get(".history-round-status").text()).toBe("已抓取，未筛选");
+    const card = wrapper.get('[data-testid="history-round-row"]');
+    expect(wrapper.find('[data-testid="history-flow-card"]').exists()).toBe(false);
     expect(card.get('[data-testid="history-flow-track-status"]').text()).toBe("已抓取，未筛选");
     expect(card.find('[data-testid="history-log-trigger"]').exists()).toBe(true);
   });
@@ -239,10 +289,10 @@ describe("ResultHistoryDrawer", () => {
       }],
     }));
     const wrapper = await mountDrawer({ items: [], flowItems: flows });
-    const cards = wrapper.findAll('[data-testid="history-flow-card"]');
+    const cards = wrapper.findAll('[data-testid="history-round-row"]');
     expect(cards).toHaveLength(cases.length);
     for (const [status, label] of cases) {
-      const card = wrapper.get(`[data-testid="history-flow-card"][data-flow-id="flow-status-${status}"]`);
+      const card = wrapper.get(`[data-testid="history-round-row"][data-run-id="result-${status}"]`);
       expect(card.text().toLowerCase()).not.toContain(status);
       expect(card.get(".history-round-status").text()).toBe(label);
       expect(card.get('[data-testid="history-flow-track-status"]').text()).toBe(label);
