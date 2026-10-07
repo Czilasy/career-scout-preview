@@ -34,6 +34,7 @@ from webui.task_runners import _iso_epoch_ms
 from webui.whitebox import WhiteboxService
 from webui.whitebox import WhiteboxNotFoundError
 from webui.logging_setup import get_logger
+from webui.task_state_lifecycle import authoritative_run, closure_for_run
 
 _logger = get_logger(__name__)
 
@@ -150,7 +151,7 @@ def register_task_state_routes(app, ctx):
                 }
             else:
                 live = None
-        run = ctx.store.get_screening_run(run_id)
+        run = authoritative_run(ctx.store, ctx.store.get_screening_run(run_id), run_id)
         if run is not None and _profile_mismatch(run.get("profile_id")):
             return _not_found()
         if run is None and live is None:
@@ -246,6 +247,7 @@ def register_task_state_routes(app, ctx):
             scraped_count = ctx.store.count_scrape_run_jobs(scraped_count_source)
         except ctx.operational_errors:
             scraped_count = 0
+        closure = closure_for_run(ctx, run_id, run, live)
         error_code = (run or {}).get("error_code")
         error_reason = (run or {}).get("error_reason")
         platform_name = str(
@@ -485,6 +487,7 @@ def register_task_state_routes(app, ctx):
             "platform": (run or {}).get("platform") or (live or {}).get("platform"),
             "task_input_digest": (run or {}).get("task_input_digest"),
             "auto_screen": bool((live or {}).get("auto_screen", exec_params.get("auto_screen"))),
+            "closure": closure,
             "source_summary": source_summary,
             "source_outcomes": source_outcomes,
             "combo_issues": combo_issues,

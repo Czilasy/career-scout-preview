@@ -99,6 +99,82 @@ describe("TaskProgress 用户结束保存口径", () => {
   });
 });
 
+describe("TaskProgress closure (047 US5)", () => {
+  it("finish pending 不显示硬失败，也不声称成功", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "paused",
+          integrity: {
+            conclusion: "unverifiable",
+            label: "无法确认",
+            primary_code: "evidence_missing",
+            primary_reason: "完成证据不足",
+          },
+          closure: { kind: "finish", phase: "pending" },
+        }) as never,
+        kind: "screen",
+      },
+    });
+    expect(wrapper.text()).toContain("正在结束保存");
+    expect(wrapper.text()).not.toContain("完成证据不足");
+    wrapper.unmount();
+  });
+
+  it("finish committed 显示正常收尾而不报中断", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "completed_with_pending",
+          integrity: {
+            conclusion: "interrupted",
+            label: "已中断",
+            primary_code: "interrupted",
+            primary_reason: "任务因取消或停止而中断",
+          },
+          closure: { kind: "finish", phase: "committed" },
+        }) as never,
+        kind: "screen",
+      },
+    });
+    expect(wrapper.text()).not.toContain("任务因取消或停止而中断");
+    expect(wrapper.text()).toContain("已结束保存部分结果");
+    wrapper.unmount();
+  });
+
+  it("stop closure 不冒充保存成功", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "stopped",
+          progress: { overall_percent: 42, current: 3, total: 7 },
+          closure: { kind: "stop", phase: "committed" },
+        }) as never,
+        kind: "scrape",
+      },
+    });
+    expect(wrapper.get(".task-status").text()).toContain("已停止");
+    expect(wrapper.text()).not.toContain("已结束保存");
+    wrapper.unmount();
+  });
+
+  it("真实错误仍然优先于 closure", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "failed",
+          error_code: "source_login_required",
+          pause_info: { error_code: "source_login_required", error_reason: "登录已失效" },
+          closure: { kind: "finish", phase: "pending" },
+        }) as never,
+        kind: "scrape",
+      },
+    });
+    expect(wrapper.text()).toContain("登录已失效");
+    wrapper.unmount();
+  });
+});
+
 describe("TaskProgress diagnostics", () => {
   // 终态口径以后端 flow_tracks 白名单为唯一权威（done/succeeded/failed/stopped/
   // cancelled）。stopped 是真实写入的终态（store_flow_claims 停止轨道），

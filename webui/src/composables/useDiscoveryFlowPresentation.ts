@@ -498,6 +498,7 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
         terminal: TERMINAL_TRACK_STATUSES.includes(trackStatus),
         stage: kind,
         status: stageStatus,
+        trackStatus,
         runId: entry.runId,
         finishRunId,
       });
@@ -638,11 +639,13 @@ export function useDiscoveryFlowPresentation(input: FlowPresentationOptions) {
       isTrackFailure(String(track.status || "")) && ownsTrackState("screen", track)
     ));
     const hadResult = tracks.value.some((track) => trackHasDeliveredResult(track));
+    // 047 C4：两段投影先全部在本地构建，再一次性同步发布——不让第二次
+    // await 之前出现「只有抓取行、没有筛选行」的半成品渲染窗口。
     const nextScrapeItems = await buildItems("scrape_run_id", "scrape", runtimeState, generation, id);
     if (!isCurrentRefresh(generation, id) || !nextScrapeItems) return;
-    scrapeItems.value = nextScrapeItems;
     const nextScreenItems = await buildItems("screen_run_id", "screen", runtimeState, generation, id);
     if (!isCurrentRefresh(generation, id) || !nextScreenItems) return;
+    scrapeItems.value = nextScrapeItems;
     screenItems.value = nextScreenItems;
     if (!isCurrentRefresh(generation, id)) return;
     // A failed AI track with no result is still a recoverable hand-off to

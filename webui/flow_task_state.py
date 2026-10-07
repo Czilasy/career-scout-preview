@@ -49,6 +49,7 @@ _RECOVERABLE_CODES = frozenset({
 })
 _PUBLIC_CODES = frozenset(FLOW_ERROR_MESSAGES) | frozenset({
     "source_login_required",
+    "source_status_unclear",
     "source_verification_required",
     "source_rate_limited",
     "source_account_restricted",
@@ -170,36 +171,47 @@ def close_flow_task_state(
         or source_params.get("profile_id")
         or task_params.get("profile_id")
     )
-    if flow_id and profile_id:
-        try:
-            ctx.store.close_flow_task_state_atomic(
-                flow_id,
-                target_platform,
-                profile_id,
-                task_run_id=task_id,
-                scrape_run_id=scrape_task_id,
-                status=target,
-                error_code=code,
-                error_reason=safe_reason,
-                stage=stage,
-            )
-        except Exception:
-            _LOGGER.exception("Flow durable state closure failed")
-            raise
-    else:
-        for run_id in dict.fromkeys((task_id, scrape_task_id)):
-            try:
-                _write_screening_status(ctx, run_id, target, code, safe_reason)
-            except Exception:
-                _LOGGER.exception("Legacy screening status closure failed")
-                raise
-        try:
-            _write_search_status(ctx, scrape_task_id, target, code)
-        except Exception:
-            _LOGGER.exception("Legacy search status closure failed")
-            raise
-
     with ctx.lock:
+        if flow_id and profile_id:
+            try:
+                close_with_outcome = getattr(ctx.store, "close_flow_task_state_outcome_atomic", None)
+                close_atomic = (
+                    close_with_outcome if callable(close_with_outcome)
+                    else ctx.store.close_flow_task_state_atomic
+                )
+                outcome = close_atomic(
+                    flow_id,
+                    target_platform,
+                    profile_id,
+                    task_run_id=task_id,
+                    scrape_run_id=scrape_task_id,
+                    status=target,
+                    error_code=code,
+                    error_reason=safe_reason,
+                    stage=stage,
+                )
+                if callable(close_with_outcome) and not outcome["applied"]:
+                    track = next((
+                        item for item in outcome["flow"]["tracks"]
+                        if item["platform"] == target_platform
+                    ), {})
+                    return str(track.get("status") or target)
+            except Exception:
+                _LOGGER.exception("Flow durable state closure failed")
+                raise
+        else:
+            for run_id in dict.fromkeys((task_id, scrape_task_id)):
+                try:
+                    _write_screening_status(ctx, run_id, target, code, safe_reason)
+                except Exception:
+                    _LOGGER.exception("Legacy screening status closure failed")
+                    raise
+            try:
+                _write_search_status(ctx, scrape_task_id, target, code)
+            except Exception:
+                _LOGGER.exception("Legacy search status closure failed")
+                raise
+
         for run_id in dict.fromkeys((task_id, scrape_task_id)):
             task = ctx.tasks.get(run_id)
             if task is not None and task.get("status") not in {"done", "cancelled"}:

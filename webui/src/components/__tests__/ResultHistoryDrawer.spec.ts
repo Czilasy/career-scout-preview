@@ -28,6 +28,40 @@ function item(overrides: Partial<HistoryRoundItem> = {}): HistoryRoundItem {
 }
 
 describe("ResultHistoryDrawer", () => {
+  it("keeps the drawer below a wrapping header and releases its resize observer", async () => {
+    const header = document.createElement("header");
+    header.className = "app-header";
+    document.body.append(header);
+    let bottom = 156;
+    vi.spyOn(header, "getBoundingClientRect").mockImplementation(() => ({ bottom } as DOMRect));
+    let resize: ResizeObserverCallback = () => {};
+    const disconnect = vi.fn();
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: ResizeObserverCallback) { resize = callback; }
+      observe = vi.fn();
+      disconnect = disconnect;
+    });
+    let wrapper: Awaited<ReturnType<typeof mountDrawer>> | undefined;
+    try {
+      wrapper = await mountDrawer();
+      const panel = wrapper.get(".history-drawer").element as HTMLElement;
+      expect(parseFloat(panel.style.getPropertyValue("--history-header-bottom"))).toBeGreaterThan(bottom);
+      bottom = 204;
+      resize([], {} as ResizeObserver);
+      await wrapper.vm.$nextTick();
+      expect(parseFloat(panel.style.getPropertyValue("--history-header-bottom"))).toBeGreaterThan(bottom);
+      await wrapper.get('[data-testid="history-close"]').trigger("click");
+      expect(wrapper.emitted("close")).toHaveLength(1);
+      wrapper.unmount();
+      wrapper = undefined;
+      expect(disconnect).toHaveBeenCalled();
+    } finally {
+      wrapper?.unmount();
+      header.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
   async function mountDrawer(overrides: Record<string, unknown> = {}) {
     const wrapper = mount(ResultHistoryDrawer, {
       props: {
@@ -79,6 +113,43 @@ describe("ResultHistoryDrawer", () => {
     expect(flowDelete.attributes("title")).toContain("请先结束或取消流程");
     await flowDelete.trigger("click");
     expect(flow.emitted("confirm-delete")).toBeUndefined();
+  });
+
+  it("047 US6: 权威 can_delete=false 立即防误删并显示真实阻断原因", async () => {
+    const blocked = await mountDrawer({
+      items: [],
+      flowItems: [{
+        flow_id: "blocked-flow", profile_id: "profile", selection: "boss", status: "failed",
+        created_at: "2026-10-04", updated_at: "2026-10-04", legacy: false, screened_count: 0,
+        tracks: [{
+          id: "blocked-track", platform: "boss", status: "failed", jobs: [], screened_count: 0,
+          can_delete: false, delete_block_reason: "该历史轮次仍被其它平台运行线引用，无法删除",
+        }],
+      }],
+    });
+    const trigger = blocked.get('[data-testid="history-delete-trigger"]');
+    expect(trigger.attributes("disabled")).toBeDefined();
+    expect(trigger.attributes("title")).toContain("仍被其它平台运行线引用");
+    await trigger.trigger("click");
+    expect(blocked.emitted("confirm-delete")).toBeUndefined();
+  });
+
+  it("047 US6: 权威 can_delete=true 时 failed 历史也可删除", async () => {
+    const allowed = await mountDrawer({
+      items: [],
+      flowItems: [{
+        flow_id: "allowed-flow", profile_id: "profile", selection: "boss", status: "failed",
+        created_at: "2026-10-04", updated_at: "2026-10-04", legacy: false, screened_count: 0,
+        tracks: [{
+          id: "allowed-track", platform: "boss", status: "failed", jobs: [], screened_count: 0,
+          result_run_id: "result-allowed", can_delete: true, delete_block_reason: null,
+        }],
+      }],
+    });
+    const trigger = allowed.get('[data-testid="history-delete-trigger"]');
+    expect(trigger.attributes("disabled")).toBeUndefined();
+    await trigger.trigger("click");
+    expect(allowed.emitted("confirm-delete")).toHaveLength(1);
   });
 
   it("opens on the aggregate tab before explicit platform navigation", () => {

@@ -209,6 +209,41 @@ describe("screenFlow", () => {
     expect(deriveTrackActionBar({ stage: "screen", status: "succeeded", runId: "screen-a" }).action.kind).toBe("none");
   });
 
+  it("047: failed 轨道给独立重试出口，且不再给 stop/finish", () => {
+    expect(deriveTrackActionBar({ stage: "scrape", status: "failed", runId: "scrape-a" })).toMatchObject({
+      action: { kind: "retry-track", label: "重试" },
+      showFinishSave: false,
+      showCancel: false,
+    });
+    expect(deriveTrackActionBar({ stage: "screen", status: "failed", runId: "screen-a" })).toMatchObject({
+      action: { kind: "retry-track", label: "重试" },
+      showFinishSave: false,
+      showCancel: false,
+    });
+    // 没有 run 的失败版本同样有入口（空 run 合法但身份仍要核对）
+    expect(deriveTrackActionBar({ stage: "scrape", status: "failed", runId: "" })).toMatchObject({
+      action: { kind: "retry-track", label: "重试" },
+    });
+    // paused 仍然是继续，不混淆重试
+    expect(deriveTrackActionBar({ stage: "scrape", status: "paused", runId: "scrape-a" }).action.kind)
+      .toBe("continue-scrape");
+  });
+
+  it("047 T055: 轨道级 failed 不被阶段快照的 completed_with_pending 盖掉", () => {
+    expect(deriveTrackActionBar({
+      stage: "scrape",
+      status: "completed_with_pending",
+      trackStatus: "failed",
+      operable: true,
+      terminal: true,
+      runId: "scrape-a",
+    })).toMatchObject({
+      action: { kind: "retry-track", label: "重试" },
+      showFinishSave: false,
+      showCancel: false,
+    });
+  });
+
   it("continueTargets returns both platforms on all filter", () => {
     const contexts: RoundContext[] = [
       { platform: "boss", keywords: [], cities: [], screening_fields: {}, profile_summary: "", profile_facts: {}, scrape_task_id: "a", screen_run_id: "1", status: "paused", resumable: true },
@@ -270,9 +305,10 @@ function renderedTrackActionKinds(): string[] {
 }
 
 describe("轨道行动作 kind 与后端操作一一对应", () => {
-  it("正向：轨道行仍然给得出暂停、继续与终止这几类动作（删功能不许蒙过这条检查）", () => {
+  it("正向：轨道行仍然给得出暂停、继续、重试与终止这几类动作（删功能不许蒙过这条检查）", () => {
     expect(renderedTrackActionKinds()).toEqual([
       "cancel", "continue", "continue-scrape", "finish-save", "pause", "pause-scrape",
+      "retry-track",
     ]);
   });
 
@@ -285,9 +321,9 @@ describe("轨道行动作 kind 与后端操作一一对应", () => {
     expect(unmapped).toEqual([]);
   });
 
-  it("轨道映射只有暂停、继续、停止三种后端操作，不再留空转的 kind", () => {
+  it("轨道映射只有暂停、继续、停止与重试这几种后端操作，不再留空转的 kind", () => {
     expect(Object.values(TRACK_ACTION_OPERATIONS).sort()).toEqual([
-      "pause", "pause", "resume", "resume", "stop",
+      "pause", "pause", "resume", "resume", "retry", "stop",
     ]);
   });
 

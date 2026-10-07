@@ -27,6 +27,10 @@ from webui.task_pause_support import (
     scrape_checkpoint,
     stop_mode_for_event,
 )
+from webui.flow_run_lifecycle import (
+    record_late_callback,
+    sync_flow_track_after_scrape as _sync_flow_track_after_scrape,
+)
 from webui.flow_task_state import FlowStateClosureError, close_flow_task_state
 from webui.pipeline_task_outcome import (
     durable_pause_guard as _durable_pause_guard,
@@ -37,90 +41,6 @@ from webui.pipeline_task_outcome import (
 # 完成事实优先，命令口只回执不执行。
 _FINALIZING_STAGES = ("closing_chrome", "done")
 
-
-def _sync_flow_track_after_scrape(ctx, task_id, status, *, error_code="", reason=""):
-    flow_service = None
-    flow_id = platform = profile_id = None
-    try:
-        flow_service = getattr(ctx, "flow_service", None)
-        run = ctx.store.get_screening_run(task_id) or {}
-        params = run.get("execution_params") or {}
-        flow_id = params.get("flow_id")
-        platform = run.get("platform") or params.get("platform")
-        profile_id = run.get("profile_id")
-        if not flow_id or flow_service is None or not platform or not profile_id:
-            return
-        if status == "finished":
-            return
-        if status == "done":
-            flow_service.mark_scrape_complete(
-                flow_id=flow_id, platform=platform, profile_id=profile_id,
-            )
-            auto_screen = getattr(ctx, "enqueue_auto_screen_for_scrape", None)
-            if callable(auto_screen):
-                auto_screen(task_id)
-                consume_auto_screen = getattr(ctx, "consume_auto_screen", None)
-                if callable(consume_auto_screen):
-                    consume_auto_screen(task_id)
-        elif status == "paused":
-            # A recoverable source/CDP block is a durable paused Track.  Keep
-            # it on the same failure-state path as other marker writes so a
-            # later generic exception cannot silently turn it into a stale
-            # running/queued Track.
-            flow_service.fail_track(
-                flow_id=flow_id, platform=platform, profile_id=profile_id,
-                error_code=error_code or "source_cdp_unavailable",
-                reason=reason or "source temporarily unavailable",
-                stage="scrape", status="paused",
-            )
-        else:
-            flow_service.fail_track(
-                flow_id=flow_id, platform=platform, profile_id=profile_id,
-                error_code=error_code or "scrape_failed", reason=reason or status,
-            )
-    except Exception as exc:
-        # Marker/AI scheduling failures are part of the Track outcome.  The
-        # worker has already persisted its run state; close the corresponding
-        # Flow Track as well, while keeping a recoverable pause paused.
-        try:
-            fallback_status = "paused" if status == "paused" else "failed"
-            flow_service.fail_track(
-                flow_id=flow_id, platform=platform, profile_id=profile_id,
-                error_code=(error_code or "source_cdp_unavailable")
-                if fallback_status == "paused" else (error_code or "scrape_failed"),
-                reason=reason or type(exc).__name__, stage="scrape",
-                status=fallback_status,
-            )
-        except Exception as flow_error:  # noqa: BLE001 - preserve the marker error
-            from webui.logging_setup import get_logger
-            get_logger(__name__).debug(
-                "B096 Flow scrape marker failure write failed (%s)",
-                type(flow_error).__name__,
-            )
-            # The fallback failed too.  Try the single SQLite closure path so
-            # a terminal scrape run cannot leave its Flow Track active; the
-            # safe exception remains observable to the worker caller.
-            try:
-                if flow_id and platform and profile_id:
-                    close_flow_task_state(
-                        ctx,
-                        task_id=task_id,
-                        scrape_task_id=task_id,
-                        flow_id=flow_id,
-                        profile_id=profile_id,
-                        status="paused" if status == "paused" else "failed",
-                        error_code=(error_code or "source_cdp_unavailable")
-                        if status == "paused" else (error_code or "scrape_failed"),
-                        reason="抓取流程状态收口失败",
-                        platform=platform,
-                        stage="scrape",
-                    )
-            except Exception as closure_error:  # noqa: BLE001
-                get_logger(__name__).debug(
-                    "B096 Flow scrape atomic closure failed (%s)",
-                    type(closure_error).__name__,
-                )
-            raise FlowStateClosureError() from flow_error
 
 def run_pipeline_task(ctx,
     task_id, script_params, execution_config=None, frozen_scope=None,
@@ -135,6 +55,10 @@ def run_pipeline_task(ctx,
                 "started_at": int(time.time() * 1000), "finished_at": None,
             }
             ctx.tasks[task_id] = task
+        # 047 复核 P1：本 worker 只认启动时捕获的这个 task 实例。同 run 恢复
+        # 会替换 ctx.tasks[task_id]；此后旧实例的进度/结果/异常/清理一律
+        # 不得写新实例，也不得推进共享 run 的 durable 状态。
+        worker_task = task
         task["status"] = "running"
         task["script_params"] = script_params  # 断点续抓需要原始参数
         if execution_config is not None:
@@ -147,15 +71,16 @@ def run_pipeline_task(ctx,
     if ctx.is_user_finished(task_id):
         with ctx.lock:
             current = ctx.tasks.get(task_id)
-            if current is not None:
+            if current is worker_task:
                 current["status"] = "cancelled"
                 current["error"] = ctx.msg_user_finished
-        ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
+                ctx.release_worker_resume_claims(worker_task)
         return
     def on_progress(snapshot):
         with ctx.lock:
             task = ctx.tasks.get(task_id)
-            if task is None:
+            if task is None or task is not worker_task:
+                # 实例已被同 run 恢复替换：旧 worker 的进度不再代表当前事实。
                 return
             task["progress"] = snapshot
             # 收尾区立牌：抓取已干完（正在关浏览器/收尾）后立牌，命令口据此
@@ -174,7 +99,10 @@ def run_pipeline_task(ctx,
         # 取出停止信号传给 run_search；cancel 接口 set 它后，
         # run_search 会在下一个组合边界退出，或因浏览器被关而抛错。
         with ctx.lock:
-            task_ref = ctx.tasks.get(task_id, {})
+            if ctx.tasks.get(task_id) is not worker_task:
+                record_late_callback(ctx.store, run_id=task_id, stage="scrape", detail="superseded startup")
+                return
+            task_ref = worker_task
             stop_event = task_ref.get("stop_event")
             skip_combos = task_ref.get("skip_combos") or None
             old_jobs = task_ref.get("old_jobs") or []
@@ -214,124 +142,138 @@ def run_pipeline_task(ctx,
             profile_key=frozen_profile_key,
             run_id=task_id,
         )
-        if source is None:
-            completed = scrape_checkpoint(ctx, task_id, skip_combos=skip_combos)
-            reason = user_visible_failure_reason(
-                "source_cdp_unavailable", "", str(frozen_platform or ""),
-            )
-            try:
-                from webui.whitebox import ScrapeEvidence
-                _pages = frozen_scope.pages_per_combination if frozen_scope is not None else int(script_params.get("pages") or 3)
-                _evidence = ScrapeEvidence(ctx.store, task_id, expand_combinations(script_params), _pages)
-                if _evidence.startup_error is None:
-                    for _key in _evidence.units:
-                        _evidence.incomplete(_key, reason, "source_cdp_unavailable")
-                    _evidence.finish({"ok": False, "jobs": [], "total_scraped": 0,
-                                      "total_matched": 0, "combinations": len(_evidence.units),
-                                      "error": reason})
-            except Exception as _whitebox_exc:
-                logger = getattr(ctx, "logger", None)
-                if logger is not None:
-                    logger.warning("source-unavailable whitebox marker failed: %s", type(_whitebox_exc).__name__)
-            completed = mark_scrape_paused(
-                ctx, task_id,
-                completed_combos=completed,
-                source_count=len(expand_combinations(script_params)),
-                reason=reason,
-                error_code="source_cdp_unavailable",
-            )
-            ctx.record_pause_failure(
-                task_id, "scrape", "source_cdp_unavailable", reason,
-                processed=len(completed),
-                total=len(expand_combinations(script_params)),
-                extra={"platform": str(frozen_platform or "")},
-            )
-            with ctx.lock:
-                task = ctx.tasks.get(task_id)
-                if task is not None:
-                    task["status"] = "paused"
-                    task["error"] = reason
-            _flow_run = ctx.store.get_screening_run(task_id) or {}
-            _flow_params = _flow_run.get("execution_params") or {}
-            if _flow_params.get("flow_id"):
-                close_flow_task_state(
-                    ctx,
-                    task_id=task_id,
-                    scrape_task_id=task_id,
-                    status="paused",
-                    error_code="source_cdp_unavailable",
-                    reason=reason,
-                    platform=str(_flow_run.get("platform") or frozen_platform or "boss"),
-                    stage="scrape",
+        with ctx.lock:
+            if ctx.tasks.get(task_id) is not worker_task:
+                record_late_callback(ctx.store, run_id=task_id, stage="scrape", detail="superseded source callback")
+                return
+            if source is None:
+                completed = scrape_checkpoint(ctx, task_id, skip_combos=skip_combos)
+                reason = user_visible_failure_reason(
+                    "source_cdp_unavailable", "", str(frozen_platform or ""),
                 )
-            ctx.schedule_pipeline_task_cleanup(task_id)
-            ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
-            return
+                try:
+                    from webui.whitebox import ScrapeEvidence
+                    _pages = frozen_scope.pages_per_combination if frozen_scope is not None else int(script_params.get("pages") or 3)
+                    _evidence = ScrapeEvidence(ctx.store, task_id, expand_combinations(script_params), _pages)
+                    if _evidence.startup_error is None:
+                        for _key in _evidence.units:
+                            _evidence.incomplete(_key, reason, "source_cdp_unavailable")
+                        _evidence.finish({"ok": False, "jobs": [], "total_scraped": 0,
+                                          "total_matched": 0, "combinations": len(_evidence.units),
+                                          "error": reason})
+                except Exception as _whitebox_exc:
+                    logger = getattr(ctx, "logger", None)
+                    if logger is not None:
+                        logger.warning("source-unavailable whitebox marker failed: %s", type(_whitebox_exc).__name__)
+                completed = mark_scrape_paused(
+                    ctx, task_id,
+                    completed_combos=completed,
+                    source_count=len(expand_combinations(script_params)),
+                    reason=reason,
+                    error_code="source_cdp_unavailable",
+                )
+                ctx.record_pause_failure(
+                    task_id, "scrape", "source_cdp_unavailable", reason,
+                    processed=len(completed),
+                    total=len(expand_combinations(script_params)),
+                    extra={"platform": str(frozen_platform or "")},
+                )
+                with ctx.lock:
+                    task = ctx.tasks.get(task_id)
+                    if task is not None:
+                        task["status"] = "paused"
+                        task["error"] = reason
+                _flow_run = ctx.store.get_screening_run(task_id) or {}
+                _flow_params = _flow_run.get("execution_params") or {}
+                if _flow_params.get("flow_id"):
+                    close_flow_task_state(
+                        ctx,
+                        task_id=task_id,
+                        scrape_task_id=task_id,
+                        status="paused",
+                        error_code="source_cdp_unavailable",
+                        reason=reason,
+                        platform=str(_flow_run.get("platform") or frozen_platform or "boss"),
+                        stage="scrape",
+                    )
+                ctx.schedule_pipeline_task_cleanup(task_id)
+                ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
+                return
 
         def on_combo_done(combo_key, jobs, completed_combos, *, outcome=None):
-            # T404: 先持久化 source attempt，再推进 combo result。
-            # 持久化失败时抛异常，run_search 会捕获并硬停止。
-            attempt_no = 1
-            try:
-                latest = ctx.store.get_latest_source_attempt(task_id, combo_key)
-                if latest is not None:
-                    attempt_no = latest["attempt_no"] + 1
-            except ctx.operational_errors:
-                pass
-            if outcome is not None:
-                outcome_kind = "empty" if outcome.empty_result else "non_empty"
-                ctx.store.append_source_attempt(
-                    run_id=task_id,
-                    platform=frozen_platform,
-                    combo_key=combo_key,
-                    attempt_no=attempt_no,
-                    input_hash=outcome.input_hash,
-                    outcome_kind=outcome_kind,
-                    job_count=len(jobs),
-                    empty_evidence=outcome.empty_evidence,
+            with ctx.lock:
+                if ctx.tasks.get(task_id) is not worker_task:
+                    record_late_callback(ctx.store, run_id=task_id, stage="scrape",
+                                         detail="superseded combo callback")
+                    return
+                # T404: 先持久化 source attempt，再推进 combo result。
+                # 持久化失败时抛异常，run_search 会捕获并硬停止。
+                attempt_no = 1
+                try:
+                    latest = ctx.store.get_latest_source_attempt(task_id, combo_key)
+                    if latest is not None:
+                        attempt_no = latest["attempt_no"] + 1
+                except ctx.operational_errors:
+                    pass
+                if outcome is not None:
+                    outcome_kind = "empty" if outcome.empty_result else "non_empty"
+                    ctx.store.append_source_attempt(
+                        run_id=task_id,
+                        platform=frozen_platform,
+                        combo_key=combo_key,
+                        attempt_no=attempt_no,
+                        input_hash=outcome.input_hash,
+                        outcome_kind=outcome_kind,
+                        job_count=len(jobs),
+                        empty_evidence=outcome.empty_evidence,
+                    )
+                else:
+                    ctx.store.append_source_attempt(
+                        run_id=task_id,
+                        platform=frozen_platform,
+                        combo_key=combo_key,
+                        attempt_no=attempt_no,
+                        outcome_kind="non_empty",
+                        job_count=len(jobs),
+                    )
+                ctx.store.save_scrape_combo_result(
+                    task_id, combo_key, jobs, completed_combos
                 )
-            else:
-                ctx.store.append_source_attempt(
-                    run_id=task_id,
-                    platform=frozen_platform,
-                    combo_key=combo_key,
-                    attempt_no=attempt_no,
-                    outcome_kind="non_empty",
-                    job_count=len(jobs),
-                )
-            ctx.store.save_scrape_combo_result(
-                task_id, combo_key, jobs, completed_combos
-            )
-            ctx.store.append_task_events(task_id, [
-                ("job_success", {
-                    "stage": "scrape", "combo_key": combo_key,
-                    "job_id": str(job.get("job_id") or job.get("source_url") or ""),
-                })
-                for job in jobs if isinstance(job, dict)
-            ])
+                ctx.store.append_task_events(task_id, [
+                    ("job_success", {
+                        "stage": "scrape", "combo_key": combo_key,
+                        "job_id": str(job.get("job_id") or job.get("source_url") or ""),
+                    })
+                    for job in jobs if isinstance(job, dict)
+                ])
 
         def on_page_completed(event):
             """每完成一页原子保存岗位快照与页级 checkpoint。"""
             lock = None
             with ctx.lock:
                 task_ref = ctx.tasks.get(task_id)
+                if task_ref is not worker_task:
+                    # 旧实例的页级事实不得写进替换后的新尝试。
+                    return
                 if task_ref is not None:
                     lock = task_ref.get("page_flush_lock")
             if lock is not None:
                 lock.acquire()
             try:
-                ctx.store.save_scrape_page_progress(
-                    task_id, str(event.get("combo_key") or ""), event)
+                with ctx.lock:
+                    task_ref = ctx.tasks.get(task_id)
+                    if task_ref is not worker_task:
+                        record_late_callback(ctx.store, run_id=task_id, stage="scrape",
+                                             detail="superseded page callback")
+                        return
+                    ctx.store.save_scrape_page_progress(
+                        task_id, str(event.get("combo_key") or ""), event)
+                    task_ref["last_page_snapshot_at"] = time.time()
+                    task_ref["page_persist_seq"] = int(task_ref.get("page_persist_seq") or 0) + 1
+                    task_ref["last_page_progress"] = dict(event)
             finally:
                 if lock is not None:
                     lock.release()
-            with ctx.lock:
-                task_ref = ctx.tasks.get(task_id)
-                if task_ref is not None:
-                    task_ref["last_page_snapshot_at"] = time.time()
-                    task_ref["page_persist_seq"] = int(
-                        task_ref.get("page_persist_seq") or 0) + 1
-                    task_ref["last_page_progress"] = dict(event)
 
         try:
             page_rows = ctx.store.load_scrape_page_progress(task_id)
@@ -399,200 +341,236 @@ def run_pipeline_task(ctx,
             stop_event=stop_event,
             skip_combos=skip_combos,
             merged_total=merged_total,
+            original_task=worker_task,
         )
         _terminal_status = outcome["terminal_status"]; integrity = outcome["integrity"]; _pause_code = outcome["pause_code"]
-        _sync_flow_track_after_scrape(
-            ctx, task_id, _terminal_status,
-            error_code=str(
-                _pause_code if _terminal_status == "paused" else
-                (integrity or {}).get("primary_code") or "scrape_failed"
-            ),
-            reason=str((integrity or {}).get("primary_reason") or result.get("error") or _terminal_status),
-        )
-        if _terminal_status in ("cancelled", "failed", "partial"):
-            ctx.clear_auto_screen(task_id)
-        ctx.schedule_pipeline_task_cleanup(task_id)
-        ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
+        _outcome_primary_code = outcome.get("primary_code") or ""
+        _outcome_primary_reason = outcome.get("primary_reason") or ""
+        if outcome.get("superseded"):
+            # 旧 worker 实例的收口到此为止：不改新实例、不推进共享 Track、
+            # 不清理新 worker 的占位，也不触碰共享 run id 的续跑接管标记
+            # （claim 以 run id 为键，新 worker 可能正持有同一把）。
+            return
+        with ctx.lock:
+            if ctx.tasks.get(task_id) is not worker_task:
+                record_late_callback(ctx.store, run_id=task_id, stage="scrape", detail="superseded outcome callback")
+                return
+            # 047 复核 P1：Track 原因选择与 DB/live 同一条主因——具体失败优先，
+            # 完整性主因只在没有具体错误证据时兜底。
+            _primary_code = str(_outcome_primary_code or (integrity or {}).get("primary_code") or "")
+            _primary_reason = str(
+                _outcome_primary_reason or result.get("error")
+                or (integrity or {}).get("primary_reason") or _terminal_status
+            )
+            auto_screen_handoff = _sync_flow_track_after_scrape(
+                ctx, task_id, _terminal_status,
+                error_code=str(
+                    _pause_code if _terminal_status == "paused" else
+                    (_primary_code or "scrape_failed")
+                ),
+                reason=_primary_reason,
+                defer_auto_screen=True,
+            )
+            if _terminal_status in ("cancelled", "failed", "partial"):
+                ctx.clear_auto_screen(task_id)
+            ctx.schedule_pipeline_task_cleanup(task_id)
+            ctx.release_worker_resume_claims(worker_task)
+        if callable(auto_screen_handoff):
+            auto_screen_handoff()
     except FlowStateClosureError:
         raise
     except Exception as exc:
         with ctx.lock:
             task = ctx.tasks.get(task_id)
-        stop_event = task.get("stop_event") if task is not None else None
-        stop_mode = stop_mode_for_event(stop_event, task)
-        checkpoint_failure = isinstance(
-            exc, (ScrapeCheckpointReadError, ScrapeCheckpointWriteError),
-        )
-        cancelled = stop_mode == "cancel"
-        finishing = stop_mode in (STOP_MODE_FINISH, STOP_MODE_TERMINATE)
-        terminal_stop = cancelled or finishing
-        failure_code = str(
-            getattr(exc, "error_code", "")
-            or getattr(exc, "failed_code", "")
-            or "internal_error"
-        )
-        resolved_failure_code = resolve_code(
-            failure_code, default=failure_code,
-        )
-        task_platform = str((task or {}).get("platform") or "")
-        failure_taxonomy = ERROR_TAXONOMY.get(resolved_failure_code) or {}
-        recoverable_failure = bool(
-            not terminal_stop
-            and not checkpoint_failure
-            and stop_mode != STOP_MODE_PAUSE
-            and failure_taxonomy.get("category") == "source"
-            and failure_taxonomy.get("retryable")
-        )
-        # A checkpoint exception normally owns the recoverable paused state,
-        # but an already-published terminal stop must win the race.  Do not
-        # turn an explicit cancel/finish/terminate into a pause merely because
-        # the worker happened to fail while unwinding its checkpoint.
-        paused = (
-            not terminal_stop
-            and (
-                (stop_mode == STOP_MODE_PAUSE and not checkpoint_failure)
-                or recoverable_failure
+            superseded_worker = task is not None and task is not worker_task
+        if superseded_worker:
+            # 同 run 恢复后旧 worker 的异常收口属于过期尝试：只留安全审计，
+            # 不改新实例、不写 durable 终态、不推进 Track、不动清理占位，
+            # 也不触碰共享 run id 的续跑接管标记。
+            record_late_callback(
+                ctx.store, run_id=task_id, stage="scrape",
+                detail=f"superseded worker exception {type(exc).__name__}",
             )
-        )
-        pause_code = (
-            resolved_failure_code if recoverable_failure else "user_paused"
-        )
-        error_message = (
-            ctx.msg_user_stopped_scrape if cancelled
-            else getattr(exc, "public_reason", "检查点读取失败，任务状态未能恢复") if checkpoint_failure
-            else user_visible_failure_reason(
-                pause_code, "", task_platform,
-            ) if recoverable_failure
-            else "用户已暂停，结果已保留" if paused
-            else f"执行异常：{type(exc).__name__}"
-        )
-        pause_persisted = bool(getattr(exc, "pause_persisted", False))
-        if paused:
-            current_result = (task or {}).get("result") or {}
-            try:
-                mark_scrape_paused(
-                    ctx, task_id,
-                    completed_combos=current_result.get("completed_combos"),
-                    skip_combos=(task or {}).get("skip_combos"),
-                    source_count=current_result.get("combinations"),
-                    total_scraped=current_result.get("total_scraped"),
-                    reason=error_message,
-                    error_code=pause_code,
+            return
+        with ctx.lock:
+            if ctx.tasks.get(task_id) is not worker_task:
+                record_late_callback(ctx.store, run_id=task_id, stage="scrape", detail="superseded exception callback")
+                return
+            stop_event = task.get("stop_event") if task is not None else None
+            stop_mode = stop_mode_for_event(stop_event, task)
+            checkpoint_failure = isinstance(
+                exc, (ScrapeCheckpointReadError, ScrapeCheckpointWriteError),
+            )
+            cancelled = stop_mode == "cancel"
+            finishing = stop_mode in (STOP_MODE_FINISH, STOP_MODE_TERMINATE)
+            terminal_stop = cancelled or finishing
+            failure_code = str(
+                getattr(exc, "error_code", "")
+                or getattr(exc, "failed_code", "")
+                or "internal_error"
+            )
+            resolved_failure_code = resolve_code(
+                failure_code, default=failure_code,
+            )
+            task_platform = str((task or {}).get("platform") or "")
+            failure_taxonomy = ERROR_TAXONOMY.get(resolved_failure_code) or {}
+            recoverable_failure = bool(
+                not terminal_stop
+                and not checkpoint_failure
+                and stop_mode != STOP_MODE_PAUSE
+                and failure_taxonomy.get("category") == "source"
+                and failure_taxonomy.get("retryable")
+            )
+            # A checkpoint exception normally owns the recoverable paused state,
+            # but an already-published terminal stop must win the race.  Do not
+            # turn an explicit cancel/finish/terminate into a pause merely because
+            # the worker happened to fail while unwinding its checkpoint.
+            paused = (
+                not terminal_stop
+                and (
+                    (stop_mode == STOP_MODE_PAUSE and not checkpoint_failure)
+                    or recoverable_failure
                 )
-                pause_persisted = True
-            except (ScrapeCheckpointReadError, ScrapeCheckpointWriteError) as pause_exc:
-                # The helper has already written status=failed and a
-                # structured failure event without touching corrupt
-                # checkpoint bytes.  Do not retry the read in the outer
-                # persistence block or leave memory/DB states divergent.
-                checkpoint_failure = True
-                paused = False
-                recoverable_failure = False
-                failure_code = pause_exc.error_code
-                resolved_failure_code = pause_exc.error_code
-                error_message = pause_exc.public_reason
-                pause_code = pause_exc.error_code
-                pause_persisted = bool(getattr(pause_exc, "pause_persisted", False))
-            except ctx.operational_errors:
-                pass
-        if not cancelled and not paused and not finishing and not checkpoint_failure:
-            record_failure(
-                ctx.store, task_id, stage="scrape",
-                error_code=failure_code, reason=error_message,
-                correlation_id=task_id,
-                diagnostics={}, exception=exc, include_traceback=True,
             )
-        persistence_error = None
-        try:
-            run = ctx.store.get_screening_run(task_id)
-            if run and run.get("status") in ("queued", "running", "paused") and not finishing:
-                if paused and not pause_persisted:
+            pause_code = (
+                resolved_failure_code if recoverable_failure else "user_paused"
+            )
+            error_message = (
+                ctx.msg_user_stopped_scrape if cancelled
+                else getattr(exc, "public_reason", "检查点读取失败，任务状态未能恢复") if checkpoint_failure
+                else user_visible_failure_reason(
+                    pause_code, "", task_platform,
+                ) if recoverable_failure
+                else "用户已暂停，结果已保留" if paused
+                else f"执行异常：{type(exc).__name__}"
+            )
+            pause_persisted = bool(getattr(exc, "pause_persisted", False))
+            if paused:
+                current_result = (task or {}).get("result") or {}
+                try:
                     mark_scrape_paused(
                         ctx, task_id,
-                        completed_combos=((task or {}).get("result") or {}).get(
-                            "completed_combos"),
+                        completed_combos=current_result.get("completed_combos"),
                         skip_combos=(task or {}).get("skip_combos"),
-                        source_count=((task or {}).get("result") or {}).get(
-                            "combinations"),
-                        total_scraped=((task or {}).get("result") or {}).get(
-                            "total_scraped"),
+                        source_count=current_result.get("combinations"),
+                        total_scraped=current_result.get("total_scraped"),
                         reason=error_message,
                         error_code=pause_code,
                     )
-                elif not paused:
-                    write_kwargs = {
-                        "status": "cancelled" if cancelled else "failed",
-                        "current_stage": "scrape",
-                        "error_reason": error_message,
-                    }
-                    if not cancelled:
-                        write_kwargs["error_code"] = failure_code
-                    ctx.write_run(task_id, **write_kwargs)
-        except Exception as persist_exc:
-            persistence_error = type(persist_exc).__name__
-        if recoverable_failure and pause_persisted:
-            try:
-                current_result = (task or {}).get("result") or {}
-                ctx.record_pause_failure(
-                    task_id, "scrape", pause_code, error_message,
-                    processed=len(current_result.get("completed_combos") or []),
-                    total=int(current_result.get("combinations") or 0),
-                    extra={"platform": task_platform},
-                )
-            except Exception as audit_exc:
-                # Durable run/checkpoint state is already preserved; audit
-                # failure must not turn a recoverable pause into failed.
-                logger = getattr(ctx, "logger", None)
-                if logger is not None:
-                    logger.warning(
-                        "pause-failure audit record failed: %s",
-                        type(audit_exc).__name__,
-                    )
-        with ctx.lock:
-            task = ctx.tasks.get(task_id)
-            if task is not None:
-                if ctx.is_user_finished(task_id):
-                    task["status"] = "cancelled"
-                    task["error"] = ctx.msg_user_finished
-                elif paused:
-                    task["status"] = "paused"
-                    task["error"] = error_message
-                elif finishing:
+                    pause_persisted = True
+                except (ScrapeCheckpointReadError, ScrapeCheckpointWriteError) as pause_exc:
+                    # The helper has already written status=failed and a
+                    # structured failure event without touching corrupt
+                    # checkpoint bytes.  Do not retry the read in the outer
+                    # persistence block or leave memory/DB states divergent.
+                    checkpoint_failure = True
+                    paused = False
+                    recoverable_failure = False
+                    failure_code = pause_exc.error_code
+                    resolved_failure_code = pause_exc.error_code
+                    error_message = pause_exc.public_reason
+                    pause_code = pause_exc.error_code
+                    pause_persisted = bool(getattr(pause_exc, "pause_persisted", False))
+                except ctx.operational_errors:
                     pass
-                else:
-                    task["status"] = (
-                        "cancelled" if cancelled and persistence_error is None else "failed"
+            if not cancelled and not paused and not finishing and not checkpoint_failure:
+                record_failure(
+                    ctx.store, task_id, stage="scrape",
+                    error_code=failure_code, reason=error_message,
+                    correlation_id=task_id,
+                    diagnostics={}, exception=exc, include_traceback=True,
+                )
+            persistence_error = None
+            try:
+                run = ctx.store.get_screening_run(task_id)
+                if run and run.get("status") in ("queued", "running", "paused") and not finishing:
+                    if paused and not pause_persisted:
+                        mark_scrape_paused(
+                            ctx, task_id,
+                            completed_combos=((task or {}).get("result") or {}).get(
+                                "completed_combos"),
+                            skip_combos=(task or {}).get("skip_combos"),
+                            source_count=((task or {}).get("result") or {}).get(
+                                "combinations"),
+                            total_scraped=((task or {}).get("result") or {}).get(
+                                "total_scraped"),
+                            reason=error_message,
+                            error_code=pause_code,
+                        )
+                    elif not paused:
+                        write_kwargs = {
+                            "status": "cancelled" if cancelled else "failed",
+                            "current_stage": "scrape",
+                            "error_reason": error_message,
+                        }
+                        if not cancelled:
+                            write_kwargs["error_code"] = failure_code
+                        ctx.write_run(task_id, **write_kwargs)
+            except Exception as persist_exc:
+                persistence_error = type(persist_exc).__name__
+            if recoverable_failure and pause_persisted:
+                try:
+                    current_result = (task or {}).get("result") or {}
+                    ctx.record_pause_failure(
+                        task_id, "scrape", pause_code, error_message,
+                        processed=len(current_result.get("completed_combos") or []),
+                        total=int(current_result.get("combinations") or 0),
+                        extra={"platform": task_platform},
                     )
-                    task["error"] = (
-                        error_message if persistence_error is None
-                        else f"{error_message}；状态保存失败：{persistence_error}"
-                    )
-                task.pop("finalizing", None)
-        if not paused and not finishing:
-            ctx.clear_auto_screen(task_id)
-        _final_flow_status = "paused" if paused else "cancelled" if cancelled else "failed"
-        try:
-            _flow_run = ctx.store.get_screening_run(task_id) or {}
-            _flow_params = _flow_run.get("execution_params") or {}
-            _flow_id = str(_flow_params.get("flow_id") or "").strip()
-        except Exception:
-            _flow_id = ""
-        if _flow_id and _final_flow_status in {"paused", "failed"}:
-            close_flow_task_state(
-                ctx,
-                task_id=task_id,
-                scrape_task_id=task_id,
-                status=_final_flow_status,
-                error_code=failure_code,
-                reason=error_message,
-                platform=str(_flow_run.get("platform") or _flow_params.get("platform") or "boss"),
-                stage="scrape",
-            )
-        else:
-            _sync_flow_track_after_scrape(
-                ctx, task_id, _final_flow_status,
-                error_code=failure_code,
-                reason=error_message,
-            )
-        ctx.schedule_pipeline_task_cleanup(task_id)
-        ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
+                except Exception as audit_exc:
+                    # Durable run/checkpoint state is already preserved; audit
+                    # failure must not turn a recoverable pause into failed.
+                    logger = getattr(ctx, "logger", None)
+                    if logger is not None:
+                        logger.warning(
+                            "pause-failure audit record failed: %s",
+                            type(audit_exc).__name__,
+                        )
+            with ctx.lock:
+                task = ctx.tasks.get(task_id)
+                if task is worker_task:
+                    if ctx.is_user_finished(task_id):
+                        task["status"] = "cancelled"
+                        task["error"] = ctx.msg_user_finished
+                    elif paused:
+                        task["status"] = "paused"
+                        task["error"] = error_message
+                    elif finishing:
+                        pass
+                    else:
+                        task["status"] = (
+                            "cancelled" if cancelled and persistence_error is None else "failed"
+                        )
+                        task["error"] = (
+                            error_message if persistence_error is None
+                            else f"{error_message}；状态保存失败：{persistence_error}"
+                        )
+                    task.pop("finalizing", None)
+            if not paused and not finishing:
+                ctx.clear_auto_screen(task_id)
+            _final_flow_status = "paused" if paused else "cancelled" if cancelled else "failed"
+            try:
+                _flow_run = ctx.store.get_screening_run(task_id) or {}
+                _flow_params = _flow_run.get("execution_params") or {}
+                _flow_id = str(_flow_params.get("flow_id") or "").strip()
+            except Exception:
+                _flow_id = ""
+            if _flow_id and _final_flow_status in {"paused", "failed"}:
+                close_flow_task_state(
+                    ctx,
+                    task_id=task_id,
+                    scrape_task_id=task_id,
+                    status=_final_flow_status,
+                    error_code=failure_code,
+                    reason=error_message,
+                    platform=str(_flow_run.get("platform") or _flow_params.get("platform") or "boss"),
+                    stage="scrape",
+                )
+            else:
+                _sync_flow_track_after_scrape(
+                    ctx, task_id, _final_flow_status,
+                    error_code=failure_code,
+                    reason=error_message,
+                )
+            ctx.schedule_pipeline_task_cleanup(task_id)
+            ctx.release_worker_resume_claims(worker_task)

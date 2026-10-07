@@ -1,7 +1,7 @@
 import { computed, onBeforeUnmount, ref, watch, type Ref } from "vue";
 import type { ConditionSnapshotV2, Notice, Platform, TaskSnapshot as ApiTaskSnapshot } from "../types";
 import { errorMessage, userFacingMessage } from "../api";
-import { platformLabel, ACTIVE_TRACK_STATUSES, TRACK_PROBLEM_STATUSES } from "../discovery";
+import { platformLabel, ACTIVE_TRACK_STATUSES, TRACK_PROBLEM_STATUSES, TERMINAL_TRACK_STATUSES } from "../discovery";
 import { projectConditionChips } from "./useDiscoveryState";
 import { trackHasDeliveredResult, type FlowPresentationTrack } from "./useDiscoveryFlowPresentation";
 import { hasUnfinishedRound } from "./useDiscoveryState";
@@ -17,6 +17,7 @@ import {
   type useDiscoveryParallelFlow,
 } from "./useDiscoveryParallelFlow";
 import { useDiscoveryFlowPresentation } from "./useDiscoveryFlowPresentation";
+import { useExecutionPanelCollapse, stageSnapshotHasProgress } from "./useExecutionPanelCollapse";
 import type { useDiscoverySceneState } from "./useDiscoverySceneState";
 
 /** A Flow is active when either its envelope or one of its Tracks is active. */
@@ -219,6 +220,33 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
     { immediate: true },
   );
 
+  // ---------------------------------------------------------------------------
+  // 047 US3/FR-005：02/03 的真实阶段进度首次出现时收拢对应配置抽屉。
+  // 进度事实只读既有投影（单平台 legacy 快照 + 全部 Flow 两条轨的快照），
+  // 不另造进度判定；scene 身份与轮次一致，历史只读现场不动手。全部/自动 AI
+  // 的启动入口都不经过单平台的 startScrape/startAiScreen 收拢，统一由这里补齐。
+  // ---------------------------------------------------------------------------
+  const executionCollapseSceneKey = computed(
+    () => `${options.profileId()}|${options.sceneStore.roundEpoch.value}|${flow.flow.value?.id || ""}`,
+  );
+  const hasScrapeStageProgress = computed(() => (
+    stageSnapshotHasProgress(state.scrapeSnapshot.value)
+    || flowPresentation.scrapeItems.value.some((item) => stageSnapshotHasProgress(item.snapshot))
+  ));
+  const hasScreenStageProgress = computed(() => (
+    stageSnapshotHasProgress(state.screenSnapshot.value)
+    || flowPresentation.screenItems.value.some((item) => stageSnapshotHasProgress(item.snapshot))
+  ));
+  useExecutionPanelCollapse({
+    searchPanelsOpen: state.searchPanelsOpen,
+    advancedPanelsOpen: state.advancedPanelsOpen,
+    screenPanelOpen: state.screenPanelOpen,
+    hasScrapeProgress: hasScrapeStageProgress,
+    hasScreenProgress: hasScreenStageProgress,
+    historyMode: state.historyMode,
+    sceneKey: executionCollapseSceneKey,
+  });
+
   const flowFailureNotice = computed(() => {
     if (!parallelMode.value || flow.flow.value?.selection !== "all") return "";
     const tracks = (state.pipelineResult.value as (typeof state.pipelineResult.value & {
@@ -288,6 +316,40 @@ export function useDiscoveryFlowCoordinator(options: DiscoveryFlowCoordinatorOpt
   // pipelineBusy 与 02 主启动按钮读这一份投影，不再由「本轮未结束」代答——那会让服务
   // 重启打断的轮次把主按钮永久锁死（收口第一单强阻断）。
   watch(flow.newRoundLocked, (locked) => state.setFlowLocksNewRound(locked), { immediate: true });
+  // Flow 是绑定任务的权威状态；本地会话中旧的 paused 快照不能继续占用已终结的轨道。
+  // 只协调当前绑定的任务，不触碰其它轮次或独立任务的暂停标记。
+  watch([() => flow.flow.value, parallelMode, state.pausedRunId, state.scrapeTaskId, state.screenTaskId], () => {
+    const current = flow.flow.value;
+    const tracks = current?.tracks || [];
+    if (parallelMode.value && current?.selection === "all"
+      && TERMINAL_TRACK_STATUSES.includes(String(current.status || ""))
+      && tracks.every((track) => TERMINAL_TRACK_STATUSES.includes(track.status))) {
+      // 删除过失败兄弟轨后，本地单平台任务 ID 可能已不在 Flow 中。
+      // 已结束的全部现场不能继续借用它的旧暂停快照占位；独立补抓仍保留。
+      for (const [field, taskId, snapshot, busy] of [
+        ["scrape_run_id", state.scrapeTaskId, state.scrapeSnapshot, state.scrapeBusy],
+        ["screen_run_id", state.screenTaskId, state.screenSnapshot, state.screenBusy],
+      ] as const) {
+        busy.value = false;
+        if (taskId.value && state.pausedRunId.value === taskId.value) state.pausedRunId.value = "";
+        if (!tracks.some((track) => track[field] === taskId.value)) snapshot.value = null;
+      }
+    }
+    for (const track of tracks) {
+      if (!TERMINAL_TRACK_STATUSES.includes(track.status)) continue;
+      for (const [runId, taskId, snapshot, busy] of [
+        [track.scrape_run_id, state.scrapeTaskId, state.scrapeSnapshot, state.scrapeBusy],
+        [track.screen_run_id, state.screenTaskId, state.screenSnapshot, state.screenBusy],
+      ] as const) {
+        if (!runId) continue;
+        if (state.pausedRunId.value === runId) state.pausedRunId.value = "";
+        if (taskId.value !== runId) continue;
+        busy.value = false;
+        const authoritative = track[`${runId}:snapshot`] as ApiTaskSnapshot | undefined;
+        if (authoritative?.status) snapshot.value = { ...authoritative, status: authoritative.status };
+      }
+    }
+  }, { immediate: true, flush: "post" });
   watch(
     [parallelMode, () => flow.flow.value?.selection, flowPresentation.unlockedSteps, flowPresentation.hydrated],
     ([allPlatforms, selection, projected, hydrated]) => {

@@ -101,6 +101,37 @@ class ScrapeEvidence:
             severity=str(fact.get("severity") or "info"),
         )
 
+    def blocked_before_start(self, code: str, reason: str) -> None:
+        """Record a real preflight block for every unit that never started.
+
+        047 C1：预检失败（含 unknown）时，所有 planned 状态的行组合都必须
+        留下真实阻断事实；保留 planned/未执行含义，不伪造页完成或空结果。
+        已开始/已终结的单元不在此改写。
+        """
+        code = str(code or "source_unknown_error")
+        reason = str(reason or code)
+        for key, unit in self.units.items():
+            if str(unit.get("status") or "planned") not in {"planned"}:
+                continue
+            attempt = self.attempts.get(key, 1)
+            unit.update(status="failed", evidence_complete=False,
+                        error_code=code, error_reason=reason)
+            self._record(
+                "unit_failed",
+                "scrape_list",
+                {
+                    "error_code": code,
+                    "error_reason": reason,
+                    "reason": reason,
+                    "stop_reason": "preflight_blocked",
+                    "executed": False,
+                },
+                key=key,
+                severity="error",
+                idem=f"unit-blocked:{key}:{attempt}:{code}",
+                attempt=attempt,
+            )
+
     def unit_started(self, key: str, pages: int, start_page: int) -> None:
         key = str(key)
         previous = self.attempts.get(key, 1)
@@ -306,7 +337,7 @@ class ScrapeEvidence:
         self._record(
             "unit_incomplete",
             "scrape_list",
-            {"stop_reason": code, "reason": reason},
+            {"stop_reason": code, "reason": reason, "error_code": code},
             key=key,
             severity="error",
             idem=f"incomplete:{key}:{attempt}:{code}",

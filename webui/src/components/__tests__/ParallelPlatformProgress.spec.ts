@@ -162,6 +162,29 @@ describe("ParallelPlatformProgress", () => {
     wrapper.unmount();
   });
 
+  // 047 C2：failed 轨在平台壳里也要把「重试」原样转发给页面，且不再有 stop/finish。
+  // 重试与暂停/继续/终止共用既有 action 通道；updated_at 等身份由下游按当前轨道解析。
+  it("forwards a failed Track's retry click with its own platform and run id", async () => {
+    const wrapper = mount(ParallelPlatformProgress, {
+      props: {
+        items: [
+          item({ platform: "boss", status: "failed", snapshot: snapshotFor("failed") }),
+          item({ platform: "zhilian", status: "running" }),
+        ],
+      },
+    });
+
+    const rowBoss = row(wrapper, "boss");
+    const retry = rowBoss.get('[data-testid="retry-flow-track"]');
+    expect(retry.text()).toContain("重试");
+    expect(rowBoss.find('[data-testid="parallel-track-boss-finish-save"]').exists()).toBe(false);
+    expect(rowBoss.find('[data-testid="parallel-track-boss-cancel"]').exists()).toBe(false);
+    await retry.trigger("click");
+    expect(wrapper.emitted("action")).toEqual([["boss", "retry-track", "run-boss"]] as never);
+    expect(wrapper.emitted("finish")).toBeUndefined();
+    wrapper.unmount();
+  });
+
   it("labels the Track cancel action 终止本轨 and emits cancel for that platform only", async () => {
     const wrapper = mount(ParallelPlatformProgress, {
       props: {

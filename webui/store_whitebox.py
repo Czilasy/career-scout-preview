@@ -10,6 +10,12 @@ from typing import Any
 
 from webui.logging_setup import redact
 from webui.store_helpers import _now
+from webui.store_whitebox_lifecycle import (
+    guard_finalize_conclusion,
+    is_projected_fact,
+    late_write_verdict,
+    record_late_fact,
+)
 
 
 _OWNER_KINDS = {"scrape", "screening", "recrawl", "workbench", "legacy_task", "tuning"}
@@ -277,6 +283,22 @@ class StoreWhiteboxMixin:
         with self._connection() as conn:
             if hasattr(self, "_assert_recovery_writes_allowed"):
                 self._assert_recovery_writes_allowed(conn)
+            guard_reason, guard_detail = late_write_verdict(
+                conn, run_id, event_type="unit_upsert",
+                unit_key=unit_key, attempt_no=attempt_no,
+            )
+            if guard_reason:
+                record_late_fact(
+                    conn, run_id, event_type="unit_upsert", unit_key=unit_key,
+                    attempt_no=attempt_no, reason=guard_reason, detail=guard_detail,
+                )
+                current = conn.execute(
+                    "SELECT * FROM whitebox_units WHERE whitebox_run_id=? AND stage=? "
+                    "AND unit_kind=? AND unit_key=? AND attempt_no=?",
+                    (str(run_id), stage, unit_kind, unit_key, attempt_no),
+                ).fetchone()
+                if current is not None:
+                    return dict(current)
             row = conn.execute(
                 "SELECT id FROM whitebox_units WHERE whitebox_run_id=? AND stage=? AND unit_kind=? "
                 "AND unit_key=? AND attempt_no=?",
@@ -381,6 +403,24 @@ class StoreWhiteboxMixin:
                 result = dict(existing)
                 result["_duplicate"] = True
                 return result
+            if is_projected_fact(event_type):
+                reason, detail = late_write_verdict(
+                    conn, run_id, event_type=event_type,
+                    unit_key=fact.get("unit_key"), attempt_no=fact.get("attempt_no") or 0,
+                )
+                if reason:
+                    late = record_late_fact(
+                        conn, run_id, event_type=event_type,
+                        unit_key=fact.get("unit_key"), attempt_no=fact.get("attempt_no") or 0,
+                        reason=reason, detail=detail, idem=idem,
+                    )
+                    if late is not None:
+                        # 047：被终结守卫挡下的事实只留安全诊断，调用方
+                        # 必须据此跳过单元投影，否则会给这条线凭空造出
+                        # 一个新的 planned attempt，反过来覆盖真实归因。
+                        blocked = dict(late)
+                        blocked["blocked_late_callback"] = True
+                        return blocked
             sequence = int(conn.execute(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 FROM whitebox_events WHERE whitebox_run_id=?",
                 (str(run_id),),
@@ -439,6 +479,13 @@ class StoreWhiteboxMixin:
             unchanged = all(current.get(name) == value for name, value in desired.items())
             if unchanged and current.get("finalized_at"):
                 return current
+            blocked, block_detail = guard_finalize_conclusion(current, desired)
+            if blocked:
+                record_late_fact(
+                    conn, run_id, event_type="summary", unit_key="", attempt_no=0,
+                    reason="terminal_protected", detail=block_detail,
+                )
+                return current
             revision = int(current.get("revision") or 0) + 1
             conn.execute(
                 "UPDATE whitebox_runs SET lifecycle_status=?, conclusion=?, evidence_complete=?, degraded=?, "
@@ -482,6 +529,13 @@ class StoreWhiteboxMixin:
                 "primary_reason": conclusion.get("primary_reason"),
             }
             if all(current.get(name) == value for name, value in desired.items()) and current.get("finalized_at"):
+                return current
+            blocked, block_detail = guard_finalize_conclusion(current, desired)
+            if blocked:
+                record_late_fact(
+                    conn, run_id, event_type="finalize", unit_key="", attempt_no=0,
+                    reason="terminal_protected", detail=block_detail,
+                )
                 return current
             revision = int(current.get("revision") or 0) + 1
             conn.execute(

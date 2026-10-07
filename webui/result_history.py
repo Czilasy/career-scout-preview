@@ -149,8 +149,30 @@ class ResultHistoryService:
                 "is_latest": bool(latest_ids.get(platform_key) == str(row["id"])),
                 "scrape_task_id": str(params.get("scrape_task_id") or ""),
                 "integrity": integrity,
-            })
+            } | self._history_eligibility_fields(row))
         return items
+
+    def _history_eligibility_fields(self, row: dict[str, Any]) -> dict[str, Any]:
+        """047 US6：聚合轮次也用唯一资格 helper，旧响应保留兼容。
+
+        缺 helper 或异常时退回「未给出资格」的兼容形状（不在此自算）。
+        """
+        analyze = getattr(self.store, "analyze_history_deletion", None)
+        if not callable(analyze):
+            return {}
+        try:
+            eligibility = analyze(
+                str(row.get("id") or ""), profile_id=row.get("profile_id"),
+            )
+        except Exception:  # noqa: BLE001 - projection stays readable
+            return {
+                "can_delete": False,
+                "delete_block_reason": "暂时无法确认删除资格",
+            }
+        return {
+            "can_delete": bool(eligibility.get("can_delete")),
+            "delete_block_reason": eligibility.get("delete_block_reason"),
+        }
 
     def list_flow_history(self, profile_id: str) -> list[dict[str, Any]]:
         """Return one outer history item per Flow with platform inner tracks."""

@@ -15,37 +15,14 @@ from webui.logging_setup import get_logger
 _logger = get_logger(__name__)
 
 
-FLOW_ERROR_MESSAGES = {
-    "track_submit_failed": "平台任务提交失败",
-    "scrape_failed": "平台抓取失败",
-    "flow_ai_start_failed": "AI 筛选启动失败",
-    "ai_unavailable": "AI 筛选暂不可用",
-    "submit_failed": "后台任务提交失败",
-    "internal_error": "流程执行失败",
-    "account_pool_empty": "平台账号池为空，任务未能启动",
-    "browser_busy": "平台浏览器资源正忙，任务已暂停",
-    "source_cdp_unavailable": "平台登录空间暂不可用，任务已暂停",
-    "source_login_required": "平台登录已失效，请重新登录后重试",
-    "scope_validation_failed": "搜索范围参数无效",
-    "config_resolution_failed": "执行配置无效",
-    "location_validation_failed": "搜索地点参数无效",
-    "platform_disabled": "该平台当前不可用",
-    "platform_validation_failed": "平台参数无效",
-    "location_catalog_unavailable": "地点目录暂时不可用，任务已暂停",
-    "scope_preview_required": "搜索范围已失效，请重新校验",
-    "scope_platform_mismatch": "搜索范围与平台不一致",
-    "scope_request_mismatch": "搜索参数与已确认范围不一致",
-    "preflight_resume_unavailable": "任务提交条件尚未满足，请稍后重试",
-    "whitebox_incomplete": "AI 筛选证据不足，岗位暂未标记为已筛选",
-    "flow_result_incomplete": "AI 筛选未完成，岗位暂未标记为已筛选",
-    "flow_result_empty": "AI 筛选未生成可展示结果",
-    "flow_result_save_failed": "筛选结果保存失败，请重试",
-}
-
-
-def public_flow_message(error_code: str, _detail: object = "") -> str:
-    """Map internal exceptions to a stable, credential-safe public message."""
-    return FLOW_ERROR_MESSAGES.get(str(error_code or ""), "流程执行失败")
+# 047 结构前置：共享错误与安全文案搬到 flow_errors；这里保持兼容 re-export，
+# 异常对象身份与旧 catch/import 语义不变。
+from webui.flow_errors import (
+    FLOW_ERROR_MESSAGES,
+    FlowResumeError,
+    PlatformUnavailableError,
+    public_flow_message,
+)
 
 
 def submit_platform_task(ctx, flow_id, platform, fn, *args, **kwargs):
@@ -72,24 +49,6 @@ def submit_platform_task(ctx, flow_id, platform, fn, *args, **kwargs):
             raise RuntimeError("flow platform lane unavailable")
         return lane.submit(platform, fn, *args, **kwargs)
     return ctx.executor.submit(fn, *args, **kwargs)
-
-
-class PlatformUnavailableError(ValueError):
-    """A requested platform cannot accept a new task."""
-
-    def __init__(self, platform: str):
-        self.platform = str(platform)
-        super().__init__(f"platform unavailable: {self.platform}")
-
-
-class FlowResumeError(FlowConflictError):
-    """A preflight-paused Track remains retryable but cannot resume now."""
-
-    def __init__(self, error_code: str, message: str | None = None):
-        self.error_code = str(error_code or "preflight_resume_unavailable")
-        self.retryable = True
-        self.message = message or public_flow_message(self.error_code)
-        super().__init__(self.message)
 
 
 class FlowService:
@@ -383,127 +342,42 @@ class FlowService:
             status=status,
         )
 
-    def operate_track(self, *, flow_id, platform, profile_id, action, expected_run_id=None) -> dict:
-        action = str(action or "").strip().lower()
-        platform = str(platform or "").strip().lower()
-        target_status = {
-            "pause": "paused",
-            "resume": "running",
-            "stop": "stopped",
-        }.get(action)
-        if target_status is None:
-            raise ValueError("action must be pause, resume, or stop")
-        flow = self.store.get_flow(flow_id, profile_id=profile_id)
-        track = next(
-            (item for item in flow["tracks"] if item["platform"] == platform),
-            None,
-        )
-        if track is None:
-            raise KeyError(f"{flow_id}:{platform}")
-        from webui.flow_task_actions import assert_action_target
+    def retry_track(
+        self, *, flow_id, platform, profile_id,
+        expected_run_id="", expected_updated_at=None,
+        expected_track_id=None,
+    ) -> dict:
+        """Retry one failed Track through the dedicated submission service."""
+        operation_ctx = getattr(self, "operation_context", None)
+        if operation_ctx is None:
+            raise FlowConflictError("失败重试缺少可用的提交上下文")
+        from webui.flow_submission_service import FlowSubmissionService
 
-        assert_action_target(track, expected_run_id)
-        if action == "pause" and self.track_finalizing is not None:
-            if self.track_finalizing(flow, track):
-                raise FlowConflictError("finalizing")
-        if (
-            action == "resume"
-            and track.get("status") == "paused"
-            and not any(
-                track.get(key)
-                for key in ("scrape_run_id", "screen_run_id")
-            )
-        ):
-            if track.get("result_run_id"):
-                raise FlowConflictError("已有结果的平台运行线不能再次继续")
-            if not track.get("submission_snapshot"):
-                raise FlowConflictError("暂停的平台运行线缺少可重试的搜索快照")
-            return self.resume_preflight_track(
-                flow=flow, track=track, profile_id=profile_id,
-            )
-        if track.get("status") == target_status:
-            return flow
-        if track.get("status") in {"done", "succeeded", "failed", "stopped", "cancelled"}:
-            raise FlowConflictError("已结束的平台运行线不能再次操作")
-        from webui.flow_task_coordinator import (
-            FlowTaskOperationError,
-            _target_run_ids,
-        )
-
-        target_run_ids = _target_run_ids(track)
-        if action == "stop" and not target_run_ids:
-            stop_without_run = getattr(
-                self.store, "stop_flow_track_without_run", None,
-            )
-            if not callable(stop_without_run):
-                raise FlowTaskOperationError("missing atomic no-run stop boundary")
-            stopped_flow = stop_without_run(
-                flow_id,
-                platform,
-                profile_id=profile_id,
-            )
-            self._record_track_event(
-                flow_id,
-                platform,
-                stopped_flow,
-                "flow_track_stop",
-                {"action": action, "status": target_status},
-            )
-            return self.store.get_flow(flow_id, profile_id=profile_id)
-        if target_run_ids and self.operate_track_callback is None:
-            # A durable Run is an instruction to operate a real worker, not a
-            # reason to publish a Track status optimistically.  Production
-            # injects the shared coordinator callback; direct service users
-            # must fail closed when that dependency is absent.
-            raise FlowTaskOperationError(
-                "Flow task operation callback is unavailable"
-            )
-        if self.operate_track_callback is not None:
-            operation_ctx = getattr(self, "operation_context", None)
-
-            if target_run_ids:
-                from webui.flow_task_coordinator import resolve_flow_binding
-
-                if operation_ctx is None:
-                    from types import SimpleNamespace
-
-                    operation_ctx = SimpleNamespace(store=self.store)
-                binding = resolve_flow_binding(operation_ctx, target_run_ids[0])
-                if binding is None or (
-                    binding["flow_id"] != str(flow_id)
-                    or binding["track_id"] != str(track.get("id") or "")
-                    or binding["platform"] != platform
-                    or binding["profile_id"] != str(profile_id)
-                ):
-                    raise FlowTaskOperationError(
-                        "Flow action target is not exactly bound to its Track"
-                    )
-            operated = self.operate_track_callback(action, platform, flow, track)
-            # Legacy callbacks may return Flask-style ``(payload, status)``
-            # responses.  Treat every explicit failure as an operation error;
-            # Track publication is only allowed after a real target action.
-            from webui.flow_task_coordinator import _ensure_operation_succeeded
-            try:
-                _ensure_operation_succeeded(operated)
-            except FlowTaskOperationError:
-                raise
-        from webui.flow_task_coordinator import _normalize_track_stage
-
-        updated = self.store.update_flow_track(
-            flow_id,
-            platform,
+        return FlowSubmissionService(operation_ctx, self).retry_failed_track(
+            flow_id=flow_id,
+            platform=platform,
             profile_id=profile_id,
-            status=target_status,
-            stage=_normalize_track_stage(track.get("stage") or "scrape"),
+            expected_run_id=expected_run_id,
+            expected_updated_at=expected_updated_at,
+            expected_track_id=expected_track_id,
         )
-        self._record_track_event(
-            flow_id,
-            platform,
-            updated,
-            f"flow_track_{action}",
-            {"action": action, "status": target_status},
+
+    def operate_track(self, *, flow_id, platform, profile_id, action,
+                      expected_run_id=None, expected_updated_at=None,
+                      expected_track_id=None) -> dict:
+        """Thin delegate: the track action编排 lives in flow_track_operations."""
+        from webui.flow_track_operations import operate_track as _operate_track
+
+        return _operate_track(
+            self,
+            flow_id=flow_id,
+            platform=platform,
+            profile_id=profile_id,
+            action=action,
+            expected_run_id=expected_run_id,
+            expected_updated_at=expected_updated_at,
+            expected_track_id=expected_track_id,
         )
-        return self.store.get_flow(flow_id, profile_id=profile_id)
 
     def fail_track(
         self,

@@ -40,6 +40,12 @@ export function useDiscoveryInstanceActions(deps: InstanceActionDeps) {
     const context = target(platform, runId);
     if (busy[platform] || !context.isCurrent()) return;
     const operation = TRACK_ACTION_OPERATIONS[action];
+    if (operation === "retry") {
+      // 失败重试走独立入口；operate() 只承载 pause/resume/stop。
+      await retry(platform, runId);
+      return;
+    }
+    if (operation !== "pause" && operation !== "resume" && operation !== "stop") return;
     const pause = operation === "pause";
     const execute = async (mode: "immediate" | "graceful") => {
       if (!context.isCurrent() || busy[platform]) return;
@@ -81,5 +87,34 @@ export function useDiscoveryInstanceActions(deps: InstanceActionDeps) {
     await deps.round.requestInstanceAction("finish", { runId, ...context, execute });
   }
 
-  return { busy, operate, finish };
+  /**
+   * 047 C2：失败轨道重试。入口资格来自呈现层（failed 终态才给按钮），
+   * 这里只核对身份、锁本轨忙态并发送精确 expected 身份。
+   */
+  async function retry(platform: Platform, runId: string, updatedAt?: string) {
+    if (busy[platform]) return;
+    const flowId = deps.parallel.flow.value?.id;
+    const track = deps.parallel.flow.value?.tracks.find((entry) => entry.platform === platform);
+    if (!flowId || !track || deps.parallel.stale.value) return;
+    if (String(track.screen_run_id || track.scrape_run_id || "") !== String(runId)) return;
+    busy[platform] = "retry";
+    try {
+      // 页面只上报「哪条轨、哪个动作」；CAS 需要的当前 updated_at 由本层从
+      // 权威 Flow 的这条轨读，不要求平台壳或页面自带第二份身份。
+      await deps.parallel.retryTrack(platform, {
+        runId,
+        updatedAt: updatedAt || String((track as { updated_at?: unknown }).updated_at || ""),
+        trackId: String((track as { id?: unknown }).id || ""),
+      });
+      await deps.parallel.refresh();
+      // 新尝试改变了这条线的证据快照；共同结果保持原阅读现场。
+      await deps.refreshResults({ preservePresentation: true });
+    } catch {
+      // retryTrack 已给出一次真实错误并刷新权威 Flow；这里不重复提示。
+    } finally {
+      delete busy[platform];
+    }
+  }
+
+  return { busy, operate, finish, retry };
 }

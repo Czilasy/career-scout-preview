@@ -138,7 +138,8 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/pipeline_exec_status.py` — 失败码口径、taxonomy 理由与抓取进度权重（021 B7 T023）
 - `webui/pipeline_exec_chrome.py` — 调试浏览器生命周期：就绪检查与关闭（021 B7 T023）
 - `webui/pipeline_exec_filters.py` — 搜索参数展开与本地岗位过滤匹配（021 B7 T023）
-- `webui/pipeline_exec_search.py` — run_search：关键词×城市组合抓取主流程（021 B7 T023）
+- `webui/pipeline_exec_search.py` — run_search：关键词×城市组合抓取主流程（021 B7 T023；047 结构前置后保留入口，源失败辅助与预检编排移交 pipeline_search_preflight）
+- `webui/pipeline_search_preflight.py` — 047 结构前置：源失败辅助与 ensure-chrome/登录预检编排；由 pipeline_exec_search 单向调用
 - `webui/pipeline_exec_retry.py` — 偶发失败一次重试的判定与白箱 retry_scheduled 事实/断点续抓字段构造（039）；纯逻辑，仅由 pipeline_exec_search 单向调用
 - `webui/pipeline_exec_details.py` — fetch_job_details：批量详情抓取与 R2 会话/尝试事实接线（021 B7 T023 / 038 B091 V4）
 - `webui/pipeline_exec_artifacts.py` — 组合产物检查点与冻结清单（021 B7 T023）
@@ -238,7 +239,9 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/exec_search_resume.py` — 047 搜索断点续跑路由与恢复身份/检查点编排；保持 `ctx.continue_execute_search` 兼容注入
 - `webui/src/components/JobLifecycleDialog.vue` — 047 岗位轨迹弹窗组件；接收既有岗位/画像并转发关闭与反馈事件
 - `webui/flow_api.py` — B096 Flow/Track HTTP 路由：创建、读取、单线操作与流程结果边界
-- `webui/flow_service.py` — B096 Flow/Track 协调：新轮门禁、平台可用性、状态推进、提交补偿与失败留痕
+- `webui/flow_service.py` — B096 Flow/Track 协调：新轮门禁、平台可用性、状态推进、提交补偿与失败留痕（047 结构前置后保留门面，operate_track 薄委托 flow_track_operations）
+- `webui/flow_track_operations.py` — 047 结构前置：普通 Track 动作编排；由 FlowService.operate_track 单向调用
+- `webui/flow_errors.py` — 047 结构前置：Flow 共享错误、安全文案与异常身份；service 兼容 re-export
 - `webui/flow_task_actions.py` — Flow 动作 run 身份校验与既有任务暂停入口接线
 - `webui/src/composables/useDiscoveryInstanceActions.ts` — 实例动作身份/忙态绑定与共同 Flow 结果合流协调，复用共享批次选择和结束保存
 - `webui/store_flow.py` — B096 Flow store 门面：组装声明式 mixin，不承载业务实现
@@ -255,13 +258,25 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/task_continue_support.py` — 续跑批次状态与等待辅助
 - `webui/task_continue_results.py` — 续跑结果投影辅助
 - `webui/task_continue_finish.py` — 048 结束保存路由与部分结果快照编排
-- `webui/flow_submission_service.py` — B096 抓取 Flow Track claim、run 创建/绑定、lane 提交与失败补偿
+- `webui/flow_submission_service.py` — B096 抓取 Flow Track claim、run 创建/绑定、lane 提交与失败补偿（047 结构前置后保留门面，resume 编排经 FlowPreflightRecoveryMixin）
+- `webui/flow_preflight_recovery.py` — 047 结构前置：预检恢复 scope/config/login/probe 编排 mixin；由 FlowSubmissionService 组合
 - `webui/flow_ai_coordinator.py` — B096 AI run 创建、Flow claim、白箱、lane 提交与自动筛选协调
 - `webui/flow_task_state.py` — B096 task、screening/search run 与 Flow Track 的状态感知统一收口
-- `webui/store_flow_state.py` — B096 screening/search run 与 Flow Track 失败/暂停状态在同一 SQLite 事务内收口
+- `webui/store_flow_state.py` — B096 screening/search run 与 Flow Track 失败/暂停状态在同一 SQLite 事务内收口（047 结构前置后保留 finish/claim/restore，组装 cancel/failure 两 mixin）
+- `webui/store_flow_cancel.py` — 047 结构前置：cancel_task_atomic 取消原子域 mixin；由 StoreFlowStateMixin 组合
+- `webui/store_flow_failure.py` — 047 结构前置：close_flow_task_state_atomic 与 closure 辅助失败收口域 mixin；由 StoreFlowStateMixin 组合
 - `webui/src/parallelFilterMapping.ts` — B096 V2 统一条件映射：冻结表、简历语义投影、字段级覆盖与快照构造；只依赖类型，不依赖 Vue 页面
 - `webui/src/composables/useDiscoveryFlowPresentation.ts` — B096 V2 Flow 页面投影：真实进度、解锁水位、自动前进与结果签名通知；由视图单向消费
 - `webui/store_migrations_v8.py` — B096 V2 迁移 040：为常用配置增加条件快照列；由迁移门面单向组装
+- `webui/flow_run_lifecycle.py` — 047 US5：当前尝试判定、finish claim pending 与迟到回调安全审计；由失败/白箱收口链路单向调用
+- `webui/store_run_lifecycle.py` — 047 US1：执行段终态/原因与关联账本同事务原子入口（partial 保留具体原因）；由 store_flow 门面组装（TaskStore 经该门面继承）
+- `webui/store_flow_retry.py` — 047 US2：failed 单轨重试的 CAS、新 attempt 落库与绑定补偿事务；由 FlowTrackRecovery 单向调用
+- `webui/flow_track_recovery.py` — 047 US2：failed AI 轨重试服务，复用旧抓取输入/冻结条件/账号身份；由 FlowSubmissionService 组合
+- `webui/store_whitebox_lifecycle.py` — 047 US5：白箱写事务内当前 owner/终结守卫，迟到事实改记诊断；由 store_whitebox 薄接线
+- `webui/task_state_lifecycle.py` — 047 US5：task-state 只读 closure 投影（finish/stop 分相）；由 task_state_api 薄接线
+- `webui/store_history_lifecycle.py` — 047 US6：历史删除资格分析与确定旧 queued search 的局部修正；由 store_flow 门面组装（TaskStore 经该门面继承）、GET 只读
+- `webui/src/composables/useFlowOperationEpoch.ts` — 047 US5：前端操作/响应代次与 profile/flow/track/run 身份守卫
+- `webui/src/composables/useExecutionPanelCollapse.ts` — 047 US3：真实阶段进度首次出现时收拢 02/03 配置抽屉（边沿一次，写既有 scene 现场）
 - `webui/src/composables/useDiscoveryParallelFlow.ts` — B096 双平台 Flow 草稿、确认、轮询与单线操作状态
 - `webui/src/components/ParallelPlatformProgress.vue` — B096 BOSS/智联独立进度与暂停/继续/停止操作展示
 

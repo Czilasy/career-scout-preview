@@ -1380,6 +1380,42 @@ class BossCdpSourcePreflightTests(_LoginCacheIsolated):
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.failed_code, "source_login_required")
 
+    def test_recheck_login_bypasses_cached_unknown(self):
+        """复核必须绕过未知缓存并拿到当次真实结果（047 US1）。"""
+        from scripts import boss_cdp_raw as boss
+        from scripts import login_state_cache as cache
+        cache.write_login_state("a", "boss", "unknown")
+        source = self._source()
+        with mock.patch.object(
+                boss, "check_login_state_tri", return_value="logged_in") as m:
+            outcome = source.recheck_login()
+        self.assertTrue(outcome.ok)
+        self.assertGreaterEqual(m.call_count, 1)
+        self.assertEqual(cache.read_cached_state("a", "boss"), "logged_in")
+
+    def test_recheck_not_logged_in_transmits_login_required(self):
+        from scripts import boss_cdp_raw as boss
+        from scripts import login_state_cache as cache
+        cache.write_login_state("a", "boss", "logged_in")
+        source = self._source()
+        with mock.patch.object(
+                boss, "check_login_state_tri", return_value="not_logged_in"):
+            outcome = source.recheck_login()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_login_required")
+        self.assertEqual(cache.read_cached_state("a", "boss"), "not_logged_in")
+
+    def test_preflight_unknown_never_masquerades_as_cdp(self):
+        """047 C1：unknown 保持 source_status_unclear，不冒充 CDP 不可用。"""
+        from scripts import boss_cdp_raw as boss
+        source = self._source()
+        with self._mock_cdp_ok(), \
+                mock.patch.object(boss, "check_login_state_tri", return_value="unknown"):
+            outcome = source.preflight()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_status_unclear")
+        self.assertNotEqual(outcome.failed_code, "source_cdp_unavailable")
+
 
 # ===========================================================================
 # 020 US1：熔断器开闸失败码透传 last_signal + 冷却期满可复位

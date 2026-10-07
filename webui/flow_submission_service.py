@@ -6,17 +6,15 @@ and failure compensation that must happen after a Flow is selected.
 """
 from __future__ import annotations
 
-import hashlib
-import json
-import uuid
-
 from webui.exec_search_whitebox import mark_scrape_submission_failed
-from webui.flow_service import (
+from webui.flow_errors import (
     FlowConflictError,
     FlowResumeError,
-    submit_platform_task,
     public_flow_message,
 )
+from webui.flow_service import submit_platform_task
+from webui.flow_preflight_recovery import FlowPreflightRecoveryMixin
+from webui.flow_track_recovery import FlowTrackRecoveryMixin
 from webui.flow_task_state import FlowStateClosureError, close_flow_task_state
 from webui.logging_setup import get_logger
 
@@ -24,406 +22,218 @@ from webui.logging_setup import get_logger
 _logger = get_logger(__name__)
 
 
-class FlowSubmissionService:
+class FlowSubmissionService(FlowPreflightRecoveryMixin, FlowTrackRecoveryMixin):
     def __init__(self, ctx, flow_service=None):
         self.ctx = ctx
         self.store = ctx.store
         self.flow_service = flow_service or getattr(ctx, "flow_service", None)
-
-    @staticmethod
-    def _value_list(value):
-        if isinstance(value, str):
-            return [item.strip() for item in value.replace("，", ",").split(",") if item.strip()]
-        if isinstance(value, (list, tuple)):
-            return [str(item).strip() for item in value if item is not None and str(item).strip()]
-        return []
-
-    def _resume_scope(self, *, platform, track):
-        """Rebuild the immutable source scope from the durable submission snapshot."""
-        from webui.execution_config import FrozenTaskScope, preview_scope
-
-        snapshot = track.get("submission_snapshot") or {}
-        if not isinstance(snapshot, dict):
-            raise FlowResumeError("scope_validation_failed", "暂停任务的搜索快照无效")
-        script_params = snapshot.get("script_params")
-        if not isinstance(script_params, dict):
-            raise FlowResumeError("scope_validation_failed", "暂停任务缺少可恢复的搜索范围")
-        script_params = dict(script_params)
-        keywords = self._value_list(
-            script_params.get("keyword", script_params.get("keywords"))
+    def claim_track(self, *, flow_id, platform, profile_id) -> str | None:
+        flow = self.flow_service.claim_track_submission(
+            flow_id=flow_id,
+            platform=str(platform).strip().lower(),
+            profile_id=profile_id,
         )
-        cities = self._value_list(
-            script_params.get("city", script_params.get("cities"))
+        return next(
+            (
+                str(track.get("id"))
+                for track in flow.get("tracks", [])
+                if track.get("platform") == str(platform).strip().lower()
+            ),
+            None,
         )
-        if not keywords or not cities:
-            raise FlowResumeError("scope_validation_failed", "暂停任务缺少关键词或城市")
-        try:
-            # execute-search uses three pages when the request omits pages;
-            # retrying must preserve that frozen source contract.
-            pages = int(script_params.get("pages") or 3)
-        except (TypeError, ValueError) as exc:
-            raise FlowResumeError("scope_validation_failed", "暂停任务的页数无效") from exc
-        locations = script_params.get("locations") or []
-        if not isinstance(locations, list):
-            raise FlowResumeError("location_validation_failed", "暂停任务的搜索地点无效")
-        scope_payload = snapshot.get("scope")
-        if isinstance(scope_payload, dict):
-            try:
-                scope = FrozenTaskScope.from_dict(scope_payload)
-            except (KeyError, TypeError, ValueError) as exc:
-                raise FlowResumeError(
-                    "scope_validation_failed", "暂停任务的搜索范围已失效",
-                ) from exc
-            if scope.platform != platform:
-                raise FlowResumeError("scope_platform_mismatch", "暂停任务的平台与搜索范围不一致")
-        else:
-            try:
-                scope_payload = preview_scope(
-                    keywords=keywords,
-                    scope_kind="nationwide" if cities == ["全国"] else "cities",
-                    cities=[] if cities == ["全国"] else cities,
-                    pages_per_combination=pages,
-                    locations=locations,
-                    platform=platform,
-                )["scope"]
-                scope = FrozenTaskScope.from_dict(scope_payload)
-            except (KeyError, TypeError, ValueError) as exc:
-                raise FlowResumeError(
-                    "scope_validation_failed", "暂停任务的搜索范围已失效",
-                ) from exc
-        expected_digest = str(snapshot.get("scope_digest") or "").strip()
-        if expected_digest and expected_digest != scope.scope_digest:
-            raise FlowResumeError("scope_validation_failed", "暂停任务的搜索范围已失效")
-        script_params["keyword"] = ",".join(scope.keywords)
-        script_params["city"] = ["全国"] if scope.scope_kind == "nationwide" else list(scope.cities)
-        script_params["pages"] = scope.pages_per_combination
-        if scope.locations:
-            script_params["locations"] = [dict(item) for item in scope.locations]
-        else:
-            script_params.pop("locations", None)
-        return snapshot, script_params, scope
 
-    def _resume_execution_config(self, frozen_scope):
-        from webui.execution_config import ExecutionConfigSnapshot
-
-        try:
-            state = self.store.get_advanced_config_state()
-            selected = self.store.select_mode(
-                state["active_selection"], task_size=frozen_scope.task_size,
-            )
-            return ExecutionConfigSnapshot.from_dict(selected["config"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise FlowResumeError("config_resolution_failed", "执行配置无效") from exc
-
-    def _resume_login_space(self, *, platform, snapshot):
-        from webui.pipeline_exec import account_for_role, resolve_browser_account
-        from webui.platforms import resolve_login_space
-
-        app = getattr(self.ctx, "app", None)
-        config = getattr(app, "config", {}) if app is not None else {}
-        accounts_path = config.get("BROWSER_ACCOUNTS_PATH")
-        account = str(snapshot.get("browser_account") or "").strip()
-        if not account:
-            resolver = getattr(self.ctx, "account_for_run", None)
-            fallback = str(resolver() if callable(resolver) else "").strip()
-            account = account_for_role("R1", accounts_path, fallback=fallback)
-        if not account:
-            raise FlowResumeError("source_cdp_unavailable", "平台登录空间暂不可用，任务已暂停")
-        try:
-            profile_dir = resolve_browser_account(account, accounts_path)
-            return resolve_login_space(
-                platform,
-                account,
-                boss_profile_dir=profile_dir or "unresolved",
-            )
-        except Exception as exc:  # noqa: BLE001 - login/CDP failures are retryable
-            raise FlowResumeError(
-                "source_cdp_unavailable", "平台登录空间暂不可用，任务已暂停",
-            ) from exc
-
-    def _check_resume_block(
-        self, *, candidate, flow_id, profile_id, track_id, frozen_scope,
+    def create_scrape_records(
+        self,
+        *,
+        task_id,
+        profile_id,
+        platform,
+        flow_id,
+        track_id,
+        frozen_scope,
+        script_params,
+        browser_account,
+        login_space,
+        task_input_digest,
+        execution_config,
+        resolved_cities,
+        auto_screen,
+        auto_screen_fields,
+        auto_screen_profile,
+        auto_screen_facts,
+        cross_platform_dedupe,
+        profile_summary,
+        profile_facts,
     ):
-        """Run the production resume/CDP probe before claiming a Track.
+        """Create the durable screening/search identities and bind a Track.
 
-        ``ctx.check_resume_block`` records diagnostics against a screening Run
-        when it is using its built-in checker.  A preflight Track intentionally
-        has no Run yet, so provide a short-lived, unbound process-log row for
-        that checker and remove it in the same boundary.  Explicit injected
-        checkers remain pure and receive the candidate directly.
+        047 复核 P1：抓取 retry 的 claim 事务已经原子创建主记录与绑定
+        （``retry_of_run_id`` 冻结在 ``execution_params``）。初始化必须复用
+        该记录，补冻结参数和辅助快照，不能用 ``INSERT OR REPLACE`` 重建，
+        否则会抹掉重试关联。未 claim 的首轮提交保持原创建路径。
         """
-        checker = getattr(self.ctx, "check_resume_block", None)
-        if not callable(checker):
-            return True, "", ""
-
-        def _stable_probe_code(raw_code, *, default="source_cdp_unavailable"):
-            code = str(raw_code or "").strip().lower()
-            if code in {
-                "login_required", "not_logged_in", "login_expired",
-                "source_login_expired", "boss_login_required",
-                "zhilian_login_required",
-            }:
-                return "source_login_required"
-            if code in {
-                "cdp_unavailable", "cdp_unreachable", "browser_unavailable",
-                "source_status_unclear", "source_unreachable",
-            }:
-                return "source_cdp_unavailable"
-            return str(raw_code or default).strip() or default
-        app = getattr(self.ctx, "app", None)
-        config = getattr(app, "config", {}) if app is not None else {}
-        injected = callable(config.get("RESUME_BLOCK_CHECKER"))
-        provisional = False
-        if not injected:
-            try:
-                self.store.create_screening_run(
-                    candidate["id"],
-                    frozen_filters={},
-                    source_count=frozen_scope.combination_count,
-                    profile_id=profile_id,
-                    execution_params={
-                        **dict(candidate.get("execution_params") or {}),
-                        "flow_id": str(flow_id),
-                        "track_id": str(track_id or ""),
-                    },
-                    backend_version=getattr(self.ctx, "backend_version", None),
-                )
-                provisional = True
-            except Exception as exc:  # noqa: BLE001 - no safe probe boundary
-                return False, "preflight_resume_unavailable", str(exc)
-        try:
-            result = checker(candidate)
-            if not isinstance(result, tuple) or len(result) != 3:
-                return False, "source_cdp_unavailable", "平台登录空间暂不可用"
-            passed, code, reason = result
-            return bool(passed), _stable_probe_code(code), str(reason or "")
-        except Exception as exc:  # noqa: BLE001 - map checker failure safely
-            return False, _stable_probe_code(
-                getattr(exc, "error_code", None)
-                or getattr(exc, "failed_code", None)
-            ), str(exc)
-        finally:
-            if provisional:
-                try:
-                    self.store.delete_unbound_flow_ai_run(
-                        candidate["id"], flow_id=str(flow_id),
-                    )
-                    # ``check_resume_block`` records its diagnostic event via
-                    # ``append_task_event``.  That helper creates a legacy
-                    # task/log anchor for foreign-key compatibility; a
-                    # preflight probe must not leave that anchor behind as a
-                    # fake user task after the screening row is removed.
-                    cleanup_task = getattr(self.store, "delete_task_with_logs", None)
-                    if callable(cleanup_task):
-                        cleanup_task(candidate["id"])
-                except Exception as exc:  # noqa: BLE001 - cleanup must be visible
-                    raise FlowResumeError(
-                        "preflight_resume_unavailable",
-                        "登录预检收口失败，请刷新后重试",
-                    ) from exc
-
-    def _pause_preflight_resume(self, *, flow_id, platform, profile_id, code, reason):
-        safe_reason = reason or public_flow_message(code)
-        try:
-            self.flow_service.record_preflight_failure(
-                flow_id=flow_id,
-                platform=platform,
+        init_params = {
+            "platform": platform,
+            "filter_schema_version": None,
+            "script_params": script_params,
+            "browser_account": browser_account,
+            "cdp_port": login_space.cdp_port,
+            "profile_key": login_space.profile_key,
+            "task_input_digest": task_input_digest,
+            "execution_config": execution_config.to_dict(),
+            "resolved_cities": resolved_cities,
+            "frozen_scope": frozen_scope.to_dict(),
+            "auto_screen": auto_screen,
+            "auto_screen_fields": auto_screen_fields,
+            "auto_screen_profile": auto_screen_profile,
+            "auto_screen_facts": auto_screen_facts,
+            "cross_platform_dedupe": cross_platform_dedupe,
+            "profile_summary": profile_summary,
+            "profile_facts": profile_facts,
+            "active_account_at_freeze": self.ctx.account_for_run(),
+            "flow_id": flow_id,
+            "track_id": track_id,
+        }
+        existing = self.store.get_screening_run(task_id)
+        if existing is None:
+            self.store.create_screening_run(
+                task_id,
+                frozen_filters={},
+                source_count=frozen_scope.combination_count,
                 profile_id=profile_id,
-                error_code=code,
-                recoverable=True,
-                reason=safe_reason,
+                execution_params=init_params,
+                backend_version=self.ctx.backend_version,
             )
-        except Exception as exc:  # noqa: BLE001 - preserve retryable failure
-            # Preserve the original retryable failure; the Track was already
-            # paused and must not be reported as a successful resume.
-            _logger.warning(
-                "preflight resume failure state write failed; retaining paused Track (%s)",
-                type(exc).__name__,
-                exc_info=True,
+        else:
+            # 已创建的主记录只做同身份校验与参数补全；retry_of_run_id 等
+            # claim 事实保持原样。
+            merged = dict(existing.get("execution_params") or {})
+            merged.update(init_params)
+            self.store.update_screening_execution_params(task_id, merged)
+            self.store.update_screening_run(
+                task_id, source_count=frozen_scope.combination_count,
+                backend_version=getattr(self.ctx, "backend_version", None),
             )
-        raise FlowResumeError(code, safe_reason)
-
-    def _compensate_claim_failure(
-        self, *, flow_id, platform, profile_id, task_id, future, exc,
-    ) -> None:
-        """Close a claimed submission and stop any worker already handed off."""
-        cleanup_errors = []
-        if future is not None:
-            cancel = getattr(future, "cancel", None)
-            if callable(cancel):
-                try:
-                    if cancel() is False:
-                        cleanup_errors.append("future cancellation was rejected")
-                except Exception as cancel_exc:  # noqa: BLE001 - preserve compensation failure
-                    cleanup_errors.append(cancel_exc)
-        try:
-            with self.ctx.lock:
-                task = self.ctx.tasks.get(task_id)
-                if task is not None:
-                    stop_event = task.get("stop_event")
-                    if stop_event is not None:
-                        try:
-                            from webui.task_pause_support import (
-                                STOP_MODE_CANCEL,
-                                request_stop,
-                            )
-
-                            request_stop(task, stop_event, STOP_MODE_CANCEL)
-                        except Exception as stop_exc:  # noqa: BLE001
-                            cleanup_errors.append(stop_exc)
-                    task["status"] = "paused"
-                    task["error"] = public_flow_message(
-                        getattr(exc, "error_code", "")
-                        or "preflight_resume_unavailable",
-                        exc,
-                    )
-        except Exception as task_exc:  # noqa: BLE001 - compensation must be visible
-            cleanup_errors.append(task_exc)
-
-        error_code = str(
-            getattr(exc, "error_code", "") or "preflight_resume_unavailable"
+        self.store.save_filter_snapshot(
+            task_id,
+            platform=platform,
+            filter_schema_version=None,
+            filter_snapshot={},
+            task_input_digest=task_input_digest,
         )
-        if error_code not in {
-            "source_cdp_unavailable", "source_login_required", "browser_busy",
-            "account_pool_empty", "scope_validation_failed",
-            "location_validation_failed", "config_resolution_failed",
-            "scope_platform_mismatch", "preflight_resume_unavailable",
-        }:
-            error_code = "preflight_resume_unavailable"
-        reason = public_flow_message(error_code, exc)
-        try:
-            self.flow_service.mark_submission_failed(
-                flow_id=flow_id,
-                platform=platform,
-                profile_id=profile_id,
+        if flow_id and profile_id:
+            self.flow_service.create_scrape_run(
                 task_id=task_id,
-                error_code=error_code,
-                reason=reason,
-                status="paused",
+                profile_id=profile_id,
+                platform=str(platform).strip().lower(),
+                flow_id=flow_id,
+                track_id=track_id,
+                profile_snapshot={
+                    "platform": str(platform).strip().lower(),
+                    "flow_id": flow_id,
+                    "track_id": track_id,
+                    "scope_digest": frozen_scope.scope_digest,
+                },
             )
-        except Exception as state_exc:  # noqa: BLE001 - never report success
-            raise FlowStateClosureError() from state_exc
+            self.flow_service.bind_track_runs(
+                flow_id=flow_id,
+                platform=str(platform).strip().lower(),
+                profile_id=profile_id,
+                scrape_run_id=task_id,
+            )
 
-        for name in ("schedule_pipeline_task_cleanup", "release_worker_resume_claims"):
-            callback = getattr(self.ctx, name, None)
-            if not callable(callback):
-                continue
-            try:
-                if name == "release_worker_resume_claims":
-                    callback(self.ctx.tasks.get(task_id))
-                else:
-                    callback(task_id)
-            except Exception as cleanup_exc:  # noqa: BLE001 - never hide cleanup loss
-                cleanup_errors.append(cleanup_exc)
-        if cleanup_errors:
-            raise FlowStateClosureError() from cleanup_errors[0]
+    def submit_scrape(self, *, flow_id, platform, task_id, script_params, execution_config, frozen_scope):
+        if flow_id:
+            return submit_platform_task(
+                self.ctx,
+                flow_id,
+                str(platform).strip().lower(),
+                self.ctx.run_pipeline_task,
+                task_id,
+                script_params,
+                execution_config,
+                frozen_scope,
+            )
+        return self.ctx.executor.submit(
+            self.ctx.run_pipeline_task,
+            task_id,
+            script_params,
+            execution_config,
+            frozen_scope,
+        )
 
-    def resume_preflight_track(
-        self, *, flow_id, platform, profile_id, flow=None, track=None,
+    def retry_failed_track(
+        self,
+        *,
+        flow_id,
+        platform,
+        profile_id,
+        expected_run_id="",
+        expected_updated_at=None,
+        expected_track_id=None,
+        flow=None,
+        track=None,
     ) -> dict:
-        """Safely re-submit a paused preflight Track which has no Run yet.
+        """CAS-claim one failed Track and resubmit it as a fresh attempt.
 
-        This is deliberately the same low-level submission coordinator used by
-        execute-search.  It creates one Flow-bound Run only after identity and
-        source scope checks pass, and leaves the Track paused on recoverable
-        activation/submission failures.
+        047 C2：复用既有提交域（冻结提交快照/预检/记录创建/worker 提交/
+        白箱），只把 claim 换成 retry 专用 CAS。旧失败 run、兄弟轨道与旧结果
+        完全不动；成功后返回权威 Flow 投影，失败只补偿本次新尝试。
         """
+        import hashlib
+        import json
+
         platform = str(platform or "").strip().lower()
         if flow is None:
             flow = self.store.get_flow(flow_id, profile_id=profile_id)
         if track is None:
             track = next(
-                item for item in flow.get("tracks", [])
-                if item.get("platform") == platform
+                (item for item in flow.get("tracks", [])
+                 if item.get("platform") == platform),
+                None,
             )
-        if track.get("status") != "paused":
-            raise FlowResumeError("preflight_resume_unavailable", "平台运行线当前不可继续")
-        if any(track.get(key) for key in ("scrape_run_id", "screen_run_id", "result_run_id")):
-            raise FlowResumeError("preflight_resume_unavailable", "平台运行线已提交，请刷新后重试")
+        if track is None:
+            raise KeyError(f"{flow_id}:{platform}")
+        if str(track.get("status") or "") != "failed":
+            raise FlowResumeError("preflight_resume_unavailable", "只有失败的平台运行线可以单独重试")
+
+        # 047 C2：AI 段失败复用该轨已有持久化抓取输入，不重抓 source；
+        # 抓取段失败才走冻结提交快照重新提交抓取。
+        if (str(track.get("stage") or "").strip().lower() == "ai"
+                and str(track.get("screen_run_id") or "").strip()):
+            return self.retry_failed_ai_track(
+                flow_id=flow_id,
+                platform=platform,
+                profile_id=profile_id,
+                expected_run_id=str(expected_run_id or ""),
+                expected_updated_at=expected_updated_at,
+                expected_track_id=expected_track_id,
+                flow=flow,
+                track=track,
+            )
 
         snapshot, script_params, frozen_scope = self._resume_scope(
             platform=platform, track=track,
         )
         execution_config = self._resume_execution_config(frozen_scope)
-        try:
-            login_space = self._resume_login_space(
-                platform=platform, snapshot=snapshot,
-            )
-        except FlowResumeError as exc:
-            self._pause_preflight_resume(
-                flow_id=flow_id,
-                platform=platform,
-                profile_id=profile_id,
-                code=exc.error_code,
-                reason=exc.message,
-            )
-        task_id = uuid.uuid4().hex
-        params = {
-            "platform": platform,
-            "flow_id": str(flow_id),
-            "track_id": str(track.get("id") or ""),
-            "script_params": script_params,
-            "browser_account": login_space.browser_account,
-            "cdp_port": login_space.cdp_port,
-            "profile_key": login_space.profile_key,
-        }
-        candidate = {
-            "id": task_id,
-            "profile_id": str(profile_id),
-            "platform": platform,
-            "current_stage": "scrape",
-            "execution_params": params,
-            "frozen_filters": frozen_scope.to_dict(),
-        }
-        activate = getattr(self.ctx, "activate_run_browser", None)
-        if callable(activate):
-            try:
-                activate(candidate)
-            except Exception as exc:  # noqa: BLE001 - map login/CDP failures safely
-                code = str(
-                    getattr(exc, "error_code", "")
-                    or getattr(exc, "failed_code", "")
-                    or "source_cdp_unavailable"
-                )
-                if code not in {
-                    "source_cdp_unavailable", "source_login_required",
-                    "browser_busy", "account_pool_empty",
-                }:
-                    code = "source_cdp_unavailable"
-                self._pause_preflight_resume(
-                    flow_id=flow_id, platform=platform, profile_id=profile_id,
-                    code=code, reason=public_flow_message(code),
-                )
+        login_space = self._resume_login_space(platform=platform, snapshot=snapshot)
 
-        passed, code, reason = self._check_resume_block(
-            candidate=candidate,
-            flow_id=flow_id,
-            profile_id=profile_id,
-            track_id=track.get("id"),
-            frozen_scope=frozen_scope,
+        claim = self.store.claim_flow_track_retry(
+            flow_id, platform, profile_id=profile_id,
+            expected_track_id=expected_track_id,
+            expected_run_id=str(expected_run_id or ""),
+            expected_updated_at=expected_updated_at,
         )
-        if not passed:
-            code = str(code or "source_cdp_unavailable")
-            if code not in {
-                "source_cdp_unavailable", "source_login_required",
-                "browser_busy", "account_pool_empty",
-            }:
-                code = "source_cdp_unavailable"
-            self._pause_preflight_resume(
-                flow_id=flow_id,
-                platform=platform,
-                profile_id=profile_id,
-                code=code,
-                reason=public_flow_message(code, reason),
+        if not claim.get("claimed"):
+            raise FlowResumeError(
+                "preflight_resume_unavailable",
+                public_flow_message("preflight_resume_unavailable"),
             )
-
-        claimed = False
+        task_id = str(claim["new_run_id"])
+        track_id = str(claim["track_id"])
+        claimed = True
         future = None
         try:
-            track_id = self.claim_track(
-                flow_id=flow_id, platform=platform, profile_id=profile_id,
-            )
-            claimed = True
             register = getattr(self.ctx, "register_pipeline_task", None)
             if not callable(register):
                 raise RuntimeError("pipeline task registration unavailable")
@@ -513,7 +323,7 @@ class FlowSubmissionService:
                 profile_id=profile_id,
             )
             return self.store.get_flow(flow_id, profile_id=profile_id)
-        except (FlowResumeError, FlowConflictError) as exc:
+        except Exception as exc:  # noqa: BLE001 - compensate only this new attempt
             if claimed:
                 self._compensate_claim_failure(
                     flow_id=flow_id,
@@ -524,139 +334,6 @@ class FlowSubmissionService:
                     exc=exc,
                 )
             raise
-        except Exception as exc:  # noqa: BLE001 - close one claimed Track safely
-            if not claimed:
-                raise
-            self._compensate_claim_failure(
-                flow_id=flow_id,
-                platform=platform,
-                profile_id=profile_id,
-                task_id=task_id,
-                future=future,
-                exc=exc,
-            )
-            # The durable Track is paused and the caller receives a stable
-            # retryable error; never turn a post-claim failure into success.
-            raise FlowResumeError(
-                "preflight_resume_unavailable",
-                public_flow_message("preflight_resume_unavailable"),
-            ) from exc
-
-    def claim_track(self, *, flow_id, platform, profile_id) -> str | None:
-        flow = self.flow_service.claim_track_submission(
-            flow_id=flow_id,
-            platform=str(platform).strip().lower(),
-            profile_id=profile_id,
-        )
-        return next(
-            (
-                str(track.get("id"))
-                for track in flow.get("tracks", [])
-                if track.get("platform") == str(platform).strip().lower()
-            ),
-            None,
-        )
-
-    def create_scrape_records(
-        self,
-        *,
-        task_id,
-        profile_id,
-        platform,
-        flow_id,
-        track_id,
-        frozen_scope,
-        script_params,
-        browser_account,
-        login_space,
-        task_input_digest,
-        execution_config,
-        resolved_cities,
-        auto_screen,
-        auto_screen_fields,
-        auto_screen_profile,
-        auto_screen_facts,
-        cross_platform_dedupe,
-        profile_summary,
-        profile_facts,
-    ):
-        """Create the durable screening/search identities and bind a Track."""
-        self.store.create_screening_run(
-            task_id,
-            frozen_filters={},
-            source_count=frozen_scope.combination_count,
-            profile_id=profile_id,
-            execution_params={
-                "platform": platform,
-                "filter_schema_version": None,
-                "script_params": script_params,
-                "browser_account": browser_account,
-                "cdp_port": login_space.cdp_port,
-                "profile_key": login_space.profile_key,
-                "task_input_digest": task_input_digest,
-                "execution_config": execution_config.to_dict(),
-                "resolved_cities": resolved_cities,
-                "frozen_scope": frozen_scope.to_dict(),
-                "auto_screen": auto_screen,
-                "auto_screen_fields": auto_screen_fields,
-                "auto_screen_profile": auto_screen_profile,
-                "auto_screen_facts": auto_screen_facts,
-                "cross_platform_dedupe": cross_platform_dedupe,
-                "profile_summary": profile_summary,
-                "profile_facts": profile_facts,
-                "active_account_at_freeze": self.ctx.account_for_run(),
-                "flow_id": flow_id,
-                "track_id": track_id,
-            },
-            backend_version=self.ctx.backend_version,
-        )
-        self.store.save_filter_snapshot(
-            task_id,
-            platform=platform,
-            filter_schema_version=None,
-            filter_snapshot={},
-            task_input_digest=task_input_digest,
-        )
-        if flow_id and profile_id:
-            self.flow_service.create_scrape_run(
-                task_id=task_id,
-                profile_id=profile_id,
-                platform=str(platform).strip().lower(),
-                flow_id=flow_id,
-                track_id=track_id,
-                profile_snapshot={
-                    "platform": str(platform).strip().lower(),
-                    "flow_id": flow_id,
-                    "track_id": track_id,
-                    "scope_digest": frozen_scope.scope_digest,
-                },
-            )
-            self.flow_service.bind_track_runs(
-                flow_id=flow_id,
-                platform=str(platform).strip().lower(),
-                profile_id=profile_id,
-                scrape_run_id=task_id,
-            )
-
-    def submit_scrape(self, *, flow_id, platform, task_id, script_params, execution_config, frozen_scope):
-        if flow_id:
-            return submit_platform_task(
-                self.ctx,
-                flow_id,
-                str(platform).strip().lower(),
-                self.ctx.run_pipeline_task,
-                task_id,
-                script_params,
-                execution_config,
-                frozen_scope,
-            )
-        return self.ctx.executor.submit(
-            self.ctx.run_pipeline_task,
-            task_id,
-            script_params,
-            execution_config,
-            frozen_scope,
-        )
 
     def begin_whitebox(self, *, task_id, script_params, pages_per_combination):
         """Create the scrape evidence plan for a Flow-owned task."""

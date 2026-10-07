@@ -6,6 +6,7 @@ import unittest
 from flask import Flask
 
 from webui.result_history import ResultHistoryService
+from webui.run_cleanup import HistoryDeletionBlocked
 from webui.result_history_api import register_result_history_routes
 from webui.store import TaskStore
 
@@ -328,6 +329,35 @@ class B096FlowHistoryTests(unittest.TestCase):
         self.assertIsNotNone(ResultHistoryService(self.store).get_round(run_id, self.profile_id))
         self.assertTrue(self.store.list_task_events(run_id))
         self.assertEqual(len(ResultHistoryService(self.store).list_flow_history(self.profile_id)), 1)
+
+    def test_history_projection_exposes_can_delete_and_block_reason(self):
+        """047 US6：聚合轨/轮次的删除资格由同一 helper 投影，DELETE 重判。"""
+        flow = self.store.create_flow(
+            profile_id=self.profile_id, selection="boss", start_key="history-eligibility",
+            confirmed_filters={"boss": {}},
+        )
+        run_id = self._snapshot(flow, "boss", "Eligible")
+        item = next(
+            entry for entry in ResultHistoryService(self.store).list_flow_history(self.profile_id)
+            if entry["flow_id"] == flow["id"]
+        )
+        track = item["tracks"][0]
+        self.assertTrue(track["can_delete"])
+        self.assertIsNone(track["delete_block_reason"])
+
+        # GET 之后另一个 Flow 的 Track 共享该结果 → DELETE 必须重判并拒绝。
+        other = self.store.create_flow(
+            profile_id=self.profile_id, selection="boss", start_key="history-eligibility-2",
+            confirmed_filters={"boss": {}},
+        )
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE flow_tracks SET result_run_id = ? WHERE flow_id = ? AND platform = 'boss'",
+                (run_id, other["id"]),
+            )
+        with self.assertRaises(HistoryDeletionBlocked):
+            ResultHistoryService(self.store).delete_round(run_id, self.profile_id)
+        self.assertTrue(self.store.history_round_exists(run_id))
 
     def test_archive_rejects_partial_flow_scope_instead_of_archiving_global_results(self):
         app = Flask(__name__)

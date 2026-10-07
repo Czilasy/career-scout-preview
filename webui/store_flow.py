@@ -16,6 +16,9 @@ from webui.store_flow_preflight import StoreFlowPreflightMixin
 from webui.store_flow_results import StoreFlowResultsMixin
 from webui.store_flow_legacy import StoreFlowLegacyMixin
 from webui.store_flow_state import StoreFlowStateMixin
+from webui.store_flow_retry import StoreFlowRetryMixin
+from webui.store_run_lifecycle import StoreRunLifecycleMixin
+from webui.store_history_lifecycle import HistoryDeletionEligibilityMixin
 from webui.store_flow_core import FlowStoreSupportMixin
 
 
@@ -25,6 +28,9 @@ class StoreFlowMixin(
     StoreFlowResultsMixin,
     StoreFlowLegacyMixin,
     StoreFlowStateMixin,
+    StoreFlowRetryMixin,
+    StoreRunLifecycleMixin,
+    HistoryDeletionEligibilityMixin,
     FlowStoreSupportMixin,
 ):
     """Compatibility facade assembled from focused B096 store mixins."""
