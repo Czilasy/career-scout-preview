@@ -353,6 +353,31 @@ class ZhilianCdpSourcePreflightTests(_LoginCacheIsolated):
         self.assertTrue(outcome.ok)
         self.assertIsNone(outcome.failed_code)
 
+    def test_recheck_unreachable_keeps_its_own_fact(self):
+        """047 C1：复核探测的 unreachable 事实原样保留，不冒充 CDP 不可用。"""
+        from scripts import login_state_cache as cache
+        cache.write_login_state("a", "zhilian", "logged_in")
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=lambda port: _fake_preflight(signal="unreachable"),
+        )
+        outcome = source.recheck_login()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_unreachable")
+        self.assertEqual(cache.read_cached_state("a", "zhilian"), "unknown")
+
+    def test_recheck_login_required_keeps_login_fact_without_cache(self):
+        """047 C1：缓存命中 logged_in 时复核仍以当次登录事实为准。"""
+        from scripts import login_state_cache as cache
+        cache.write_login_state("a", "zhilian", "logged_in")
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=lambda port: _fake_preflight(signal="login_required"),
+        )
+        outcome = source.recheck_login()
+        self.assertEqual(outcome.failed_code, "source_login_required")
+        self.assertEqual(cache.read_cached_state("a", "zhilian"), "not_logged_in")
+
     def test_recheck_login_bypasses_cached_logged_in_state(self):
         """继续前的登录复检必须调用新鲜 runner，不能信任 15 分钟缓存。"""
         from scripts import login_state_cache as cache

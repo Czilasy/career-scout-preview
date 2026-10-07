@@ -359,6 +359,17 @@ export interface TaskSnapshot {
   auto_screen?: boolean;
   /** 033 V2：不得由 status、岗位数或旧 ok 重新推断。 */
   integrity?: IntegritySnapshot | null;
+  /**
+   * 047 C3：正常收尾的只读投影。pending 表示结束保存进行中（不声称成功），
+   * committed 表示精确 run 收尾、Track 终结且结果已绑定；无正面证据为 null。
+   */
+  closure?: TaskClosure | null;
+}
+
+/** 047 C3：收尾事实（后端只读推导，前端只展示不猜测）。 */
+export interface TaskClosure {
+  kind: "finish" | "stop";
+  phase: "pending" | "committed";
 }
 
 /** 016：单个组合的软失败记录（combo_issue 事件投影）。 */

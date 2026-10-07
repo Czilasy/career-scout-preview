@@ -169,6 +169,11 @@ class ResultHistoryStoreMixin:
         with self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._assert_recovery_writes_allowed(conn)
+            # 047 US6：DELETE 必须重判；确定旧 queue 残留允许在同一事务内
+            # 先局部修正再复查，异常整体回滚（不猜其它终态）。
+            eligibility = self.repair_and_analyze_history_deletion(
+                conn, target, profile_id=profile_id,
+            )
             track = conn.execute(
                 "SELECT ft.*, f.profile_id FROM flow_tracks ft "
                 "JOIN flows f ON f.id = ft.flow_id "
@@ -181,6 +186,10 @@ class ResultHistoryStoreMixin:
             owner = (track if track is not None else row)["profile_id"]
             if profile_id and owner and str(owner) != str(profile_id):
                 return False
+            if not eligibility["can_delete"]:
+                raise HistoryDeletionBlocked(
+                    eligibility["delete_block_reason"] or "当前历史轮次暂时不能删除"
+                )
             active = {"queued", "running", "paused"}
             if track is not None and track["status"] in active:
                 raise HistoryDeletionBlocked("请先结束或取消流程，再删除历史轮次")
@@ -208,8 +217,14 @@ class ResultHistoryStoreMixin:
                 for table in ("screening_runs", "search_runs", "tasks"):
                     related = conn.execute(f"SELECT * FROM {table} WHERE id IN ({marks})", ids).fetchall()
                     for item in related:
-                        if item["status"] in active:
-                            raise HistoryDeletionBlocked("请先结束或取消流程，再删除历史轮次")
+                        if item["status"] not in active:
+                            continue
+                        if table == "search_runs" and self._proven_stale_queue(conn, ids, item["id"]):
+                            # 047 US6：已在同一事务内证明「Track 终结 + 同 id
+                            # execution 终结 + 精确归属」的 queued search 残留，
+                            # 属可删除闭包，不再误当成活体阻止删除。
+                            continue
+                        raise HistoryDeletionBlocked("请先结束或取消流程，再删除历史轮次")
                         if "profile_id" in item.keys() and item["profile_id"] and item["profile_id"] != (owner or profile_id):
                             return False
                 # Never erase a run still owned by another platform track.
@@ -236,6 +251,35 @@ class ResultHistoryStoreMixin:
                     (track["flow_id"], track["flow_id"]),
                 )
         return True
+
+    def _proven_stale_queue(self, conn, ids, run_id) -> bool:
+        """同一删除事务内证明该 queued search 只是已终结执行留下的残留。
+
+        必须同时满足：search 行仍在本次删除闭包中、同 id 的 screening
+        execution 已终结、其冻结归属指向闭包内的某条已终结 Track。
+        """
+        run_id = str(run_id or "")
+        if "#" in run_id:
+            return False
+        if run_id not in ids:
+            return False
+        search = conn.execute(
+            "SELECT id FROM search_runs WHERE id = ? AND status = 'queued'",
+            (run_id,),
+        ).fetchone()
+        if search is None:
+            return False
+        track = conn.execute(
+            "SELECT ft.* FROM flow_tracks ft "
+            "WHERE ft.scrape_run_id = ? OR ft.screen_run_id = ? "
+            "OR ft.result_run_id = ?",
+            (run_id, run_id, run_id),
+        ).fetchone()
+        if track is None or str(track["status"] or "") not in {
+            "done", "succeeded", "failed", "stopped", "cancelled", "interrupted",
+        }:
+            return False
+        return self._stale_queue_proven(conn, track, run_id)
 
     # ------------------------------------------------------------------
     # 043：未收尾流程的一次性提醒（记号与水位）

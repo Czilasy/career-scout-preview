@@ -16,8 +16,14 @@ interface PauseInfo {
   error_reason?: string;
 }
 
+interface TaskClosureFact {
+  kind: "finish" | "stop";
+  phase: "pending" | "committed";
+}
+
 interface TaskSnapshot {
   status?: string;
+  closure?: TaskClosureFact | null;
   progress?: Record<string, unknown>;
   logs?: string[];
   error?: string;
@@ -65,6 +71,12 @@ const props = defineProps<{
    * 不在此另起一套判定。
    */
   roundClosed?: boolean;
+  /**
+   * 047 C3：本轨正常收尾的只读投影（后端推导）。finish pending 表示用户点了
+   * 「结束并保存」但结果尚未提交绑定——显示进行中，不声称成功；committed 才是
+   * 正常收尾完成。stop 与 finish 语义分开，不互相冒充。
+   */
+  closure?: { kind: "finish" | "stop"; phase: "pending" | "committed" } | null;
 }>();
 
 // 终态与完成态口径以后端 flow_tracks 状态白名单为唯一权威
@@ -110,8 +122,34 @@ function isTerminalStatus(status?: string) {
   return Boolean(status && TERMINAL_STATUSES.has(status));
 }
 
+const closure = computed(() => props.closure ?? props.snapshot?.closure ?? null);
+
 const integrity = computed<IntegritySnapshot | null>(() => {
   const raw = props.snapshot?.integrity ?? null;
+  const status = String(props.snapshot?.status || "");
+  // 047 C3：正常收尾的 closure 是后端推导的正面证据。真实失败/显式取消仍然
+  // 优先：只有非硬失败路径才按 closure 说明收尾，避免迟到回调把错误盖掉。
+  const hardFailure = status === "failed" || status === "unavailable" || status === "cancelled";
+  if (closure.value?.kind === "finish" && !hardFailure) {
+    if (closure.value.phase === "pending") {
+      // 结束保存进行中：不显示硬失败，也不声称成功。
+      return {
+        ...(raw || {}),
+        conclusion: "partial",
+        label: "正在结束保存",
+        primary_code: "user_finished",
+        primary_reason: "正在结束保存，请稍候",
+      } as IntegritySnapshot;
+    }
+    // 用户主动「结束并保存」：正常收尾口径（部分完成 / 已结束保存），不报中断。
+    return {
+      ...(raw || {}),
+      conclusion: "partial",
+      label: "部分完成",
+      primary_code: "user_finished",
+      primary_reason: "已结束保存部分结果",
+    } as IntegritySnapshot;
+  }
   if (!raw || raw.conclusion !== "interrupted") return raw;
   // 用户主动「结束并保存」的轮次：白箱如实记 interrupted（任务确实被停止），
   // 但那是用户自己的收尾动作，展示口径按轮次走（部分完成 / 已结束保存），
@@ -377,7 +415,15 @@ const integrityMessage = computed(() => {
 // 状态词出自树干的那一份计算（discovery.ts）：轨道头部徽章与卡体共用同一个函数，
 // 同一张卡不会头部说「完成，但有待确认」、卡体说「无法确认是否完成」。
 // 白箱完整性结论仍然由这里说话，头部跟着说同一句，不丢信号。
-const statusLabel = computed(() => stageStatusLabel(explicitStatus.value, integrityConclusion.value));
+const statusLabel = computed(() => {
+  const status = explicitStatus.value;
+  // 047 C3：结束保存进行中的 pending 是正面证据，说明这句话而不是「已暂停」。
+  if (closure.value?.kind === "finish" && closure.value.phase === "pending"
+      && !["failed", "unavailable", "cancelled"].includes(status)) {
+    return "正在结束保存";
+  }
+  return stageStatusLabel(status, integrityConclusion.value);
+});
 
 // 没有证据的段不演成在跑：排队（等待开始）与读不到状态（状态更新中）都用静止图标。
 const idleStageStatus = computed(() =>
@@ -450,6 +496,12 @@ const stageLabel = computed(() => {
 
 const failureVisible = computed(() => {
   const status = props.snapshot?.status;
+  // 047 C3：结束保存进行中不显示暂停/失败原因；真实失败（failed/unavailable）
+  // 与显式取消仍然显示。
+  if (closure.value?.kind === "finish" && closure.value.phase === "pending"
+      && !["failed", "unavailable", "cancelled"].includes(String(status || ""))) {
+    return false;
+  }
   return status === "failed" || status === "paused" || status === "unavailable"
     || ["failed", "unverifiable", "interrupted"].includes(integrityConclusion.value);
 });

@@ -63,6 +63,35 @@ function setup(tracks: FlowPresentationTrack[], deps: FlowPresentationDeps = {},
   return { flow, activeStep, presentation };
 }
 
+it("047: publishes scrape and screen rows in one synchronous commit", async () => {
+  const tracks = [
+    track({ id: "t1", platform: "boss", stage: "ai",
+            scrape_run_id: "scrape-1", screen_run_id: "screen-1", status: "running" }),
+  ];
+  // 两次 task-state 读取之间让出事件循环，渲染机会只有在这一窗口内才能观察到。
+  let releaseScreen: (() => void) | null = null;
+  const gate = new Promise<void>((resolve) => { releaseScreen = resolve; });
+  const deps: FlowPresentationDeps = {
+    fetchTaskState: async (id: string) => {
+      if (id === "screen-1") await gate;
+      return { status: "running", progress: {}, logs: [] } as ApiTaskSnapshot;
+    },
+  };
+  const { presentation } = setup(tracks, deps);
+  const applying = presentation.refresh();
+  // 把所有可解析的微任务跑干净；筛选段的 gate 仍挂着，正好停在两段之间。
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  await nextTick();
+  // 筛选段尚未返回：这一瞬间两段都必须保持空，不能先发布抓取行。
+  expect(presentation.scrapeItems.value).toHaveLength(0);
+  expect(presentation.screenItems.value).toHaveLength(0);
+  releaseScreen!();
+  await applying;
+  await nextTick();
+  expect(presentation.scrapeItems.value.map((item) => item.trackId)).toEqual(["t1"]);
+  expect(presentation.screenItems.value.map((item) => item.trackId)).toEqual(["t1"]);
+});
+
 it("顶部完成状态等待本轮每条轨道，页面解锁不代表整步完成", async () => {
   const { flow, presentation } = setup([
     track({ id: "b", stage: "complete", status: "done", screen_run_id: "screen-a", result_run_id: "result-a" }),
@@ -120,23 +149,57 @@ it("046 A03: paused Track uses authoritative recovered run capability", async ()
   expect(presentation.screenItems.value[0]?.action.kind).toBe("continue");
 });
 
-it("046 A03: terminal failed run offers no unsupported retry, stop or finish", async () => {
+it("046 A03 + 047 C2: terminal failed run offers only the single-track retry", async () => {
   const { presentation } = setup([track({ stage: "ai", status: "failed", screen_run_id: "screen-a" })], {
     fetchTaskState: async (runId) => ({ status: runId === "screen-a" ? "failed" : "completed", progress: {}, logs: [] }),
   });
   await presentation.refresh();
   const item = presentation.screenItems.value[0]!;
-  expect(item.action.kind).toBe("none");
+  // 047 确认的独立重试出口（046 当时的“不提供重试”已被本主体取代）；
+  // stop/finish 在 failed 终态依然不出现。
+  expect(item.action.kind).toBe("retry-track");
   expect(item.showFinishSave).toBe(false);
   expect(item.showCancel).toBe(false);
 });
 
-it("046 A03: a failed Track cannot resume even if a historical run projects paused", async () => {
+it("047 T055: failed Track keeps its retry entry when the stage snapshot reports completed_with_pending", async () => {
+  const { presentation } = setup([
+    track({
+      id: "track-b", platform: "boss", status: "failed", stage: "scrape",
+      scrape_run_id: "scrape-b", screen_run_id: null,
+    }),
+  ], {
+    fetchTaskState: async () => ({
+      status: "completed_with_pending",
+      db_status: "partial",
+      integrity: {
+        conclusion: "unverifiable", label: "无法确认",
+        primary_code: "unit_evidence_missing", primary_reason: "至少一个计划单元缺少完成证据",
+        evidence_complete: false, degraded: false, revision: 1,
+        summary: { completed_units: 0, failed_units: 0, unknown_units: 4, unit_output_sum: 0, run_unique_count: 0, quality_counts: {} },
+      },
+      progress: { overall_percent: 100, current: 0, total: 4 },
+      logs: [],
+    } as ApiTaskSnapshot),
+  });
+  await presentation.refresh();
+  const item = presentation.scrapeItems.value[0]!;
+  // 真实入口（2026-10-07 Flow 79a49be0064045d7）暴露：抓取任务落账 partial、
+  // 白箱完整性 unverifiable 时快照是 completed_with_pending；轨道自己的 failed
+  // 事实必须仍然给出口，否则「无法确认是否完成」的失败轨一条按钮都没有。
+  expect(item.action.kind).toBe("retry-track");
+  expect(item.showFinishSave).toBe(false);
+  expect(item.showCancel).toBe(false);
+});
+
+it("046 A03 + 047 C2: a failed Track never resumes even if a historical run projects paused", async () => {
   const { presentation } = setup([track({ stage: "ai", status: "failed", screen_run_id: "screen-a" })], {
     fetchTaskState: async (runId) => ({ status: runId === "screen-a" ? "paused" : "completed", progress: {}, logs: [] }),
   });
   await presentation.refresh();
-  expect(presentation.screenItems.value[0]?.action.kind).toBe("none");
+  // 仍然不是「继续」（不冒充暂停恢复），而是 047 的独立重试；状态仍是 failed。
+  expect(presentation.screenItems.value[0]?.action.kind).toBe("retry-track");
+  expect(presentation.screenItems.value[0]?.action.kind).not.toBe("continue");
   expect(presentation.screenItems.value[0]?.snapshot.status).toBe("failed");
 });
 

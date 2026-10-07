@@ -830,6 +830,39 @@ class ChromeSetupTests(unittest.TestCase):
         cdp.eval_js.return_value = ""
         self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "unknown")
 
+    def test_probe_tri_state_unexpected_structure_is_unknown(self):
+        module = load_module()
+        cdp = mock.Mock()
+        cdp.eval_js.return_value = self._probe_payload(
+            module, json.dumps([1, 2, 3]))
+        self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "unknown")
+
+    def test_probe_tri_state_unknown_business_code_is_unknown(self):
+        module = load_module()
+        cdp = mock.Mock()
+        cdp.eval_js.return_value = self._probe_payload(
+            module, json.dumps({"code": 7}))
+        self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "unknown")
+
+    def test_probe_tri_state_malformed_json_is_unknown(self):
+        module = load_module()
+        cdp = mock.Mock()
+        cdp.eval_js.return_value = self._probe_payload(module, "{oops")
+        self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "unknown")
+
+    def test_check_login_state_failure_log_excludes_exception_text(self):
+        """CDP 阶段异常只记类别，不复制可能携带 URL/凭据的异常正文。"""
+        module = load_module()
+        import requests as _requests
+        secret = "synthetic-secret-in-exception-text"
+        with mock.patch.object(
+                cdp_session, "CDPSession",
+                side_effect=_requests.ConnectionError(secret)), \
+                mock.patch.object(login, "log") as log:
+            self.assertEqual(module.check_login_state_tri(9333), "unknown")
+        for call in log.method_calls:
+            self.assertNotIn(secret, str(call))
+
     def test_check_login_state_unknown_on_cdp_failure(self):
         module = load_module()
         import requests as _requests

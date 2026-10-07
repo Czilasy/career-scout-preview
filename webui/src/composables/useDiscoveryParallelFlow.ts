@@ -18,6 +18,7 @@ import {
   UNIFIED_FILTER_FIELDS,
 } from "../parallelFilterMapping";
 import type { FlowResultProjectionTrack } from "./useDiscoveryFlowPresentation";
+import { useFlowOperationEpoch } from "./useFlowOperationEpoch";
 
 export type ParallelSelection = "all" | Platform;
 
@@ -138,14 +139,18 @@ export function flowHasLiveWorker(flow: ParallelFlowState | null | undefined): b
  * 树干不认识任何平台，也不新造端点：kind 只落到后端既有的三种轨道操作上，
  * 「终止本轨」就是这条线的 stop。
  */
-export type TrackActionKind = "pause" | "pause-scrape" | "continue" | "continue-scrape" | "cancel";
+export type TrackActionKind =
+  | "pause" | "pause-scrape" | "continue" | "continue-scrape" | "cancel"
+  | "retry-track";
 
-export const TRACK_ACTION_OPERATIONS: Readonly<Record<TrackActionKind, "pause" | "resume" | "stop">> = {
+export const TRACK_ACTION_OPERATIONS: Readonly<Record<TrackActionKind, "pause" | "resume" | "stop" | "retry">> = {
   pause: "pause",
   "pause-scrape": "pause",
   continue: "resume",
   "continue-scrape": "resume",
   cancel: "stop",
+  // 047 C2：failed 单轨重试是独立动作，不复用 resume（resume 只走暂停恢复）。
+  "retry-track": "retry",
 };
 
 /**
@@ -233,9 +238,25 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     const current = profileSnapshot();
     return current.id === profileId && current.generation === generation;
   }
+  // 047 C4：操作代次绑定 profile/flow/track/run；动作开始使旧 GET 失效。
+  const operationEpoch = useFlowOperationEpoch();
   const flow = ref<ParallelFlowState | null>(null);
   const loading = ref(false);
   const operatingPlatform = ref<Platform | null>(null);
+  // 047 复核 P1：忙态按动作归属。后启动的动作接管忙态；过期动作的 finally
+  // 只能清自己那一份，不能把新动作的忙态或兄弟轨道的忙态一起清掉。
+  // refresh 会自增它自己的读取代次，因此动作过期判定使用独立的动作代次：
+  // 只有新的动作开始才推进它。
+  let activeActionOwner: object | null = null;
+  let actionGeneration = 0;
+  function claimActionOwner(): object {
+    const owner = {};
+    activeActionOwner = owner;
+    return owner;
+  }
+  function ownsActionBusy(owner: object): boolean {
+    return activeActionOwner === owner;
+  }
   const error = ref("");
   // A failed read leaves the last known Flow available for context, but it is
   // no longer safe to mutate.  Consumers use this bit to keep the old view
@@ -293,6 +314,7 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     }
     refreshGeneration += 1;
     prepareGeneration += 1;
+    operationEpoch.invalidate();
     flowResultsCache.clear();
     restore(null);
   }
@@ -524,41 +546,45 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     const generation = ++refreshGeneration;
     const profileId = profile.id;
     if (!profileId) return null;
+    const epoch = operationEpoch.begin({ profileId });
     try {
       const response = await request<{ flow?: ParallelFlowState | null }>(
         `/api/flows/current?profile_id=${encodeURIComponent(profileId)}`,
       );
       if (generation !== refreshGeneration || !isCurrentProfile(profileId, profile.generation)
+        || !operationEpoch.isCurrent({ profileId }, epoch)
         || options.isCurrent && !options.isCurrent()) return flow.value;
-      // 能力由接口成功响应确认；flow 是否存在只表示当前是否有可恢复流程。
-      available.value = true;
       const restoredFlow = isDismissedFlow(response.flow || null) ? null : response.flow || null;
-      flow.value = restoredFlow;
-      await hydrateTrackSnapshots();
+      await hydrateTrackSnapshots(restoredFlow, profileId);
       if (generation !== refreshGeneration || !isCurrentProfile(profileId, profile.generation)
+        || !operationEpoch.isCurrent({ profileId }, epoch)
         || options.isCurrent && !options.isCurrent()) {
-        if (options.isCurrent && !options.isCurrent() && flow.value === restoredFlow) {
-          clearPolling();
-          flow.value = null;
-        }
         return flow.value;
       }
+      // Publish the Track envelope and both stage snapshots as one version.
+      // A failed/stale hydration preserves the previous trusted scene.
+      available.value = true;
+      flow.value = restoredFlow;
       if (!hasUnfinishedRound.value) clearPolling();
       clearFlowStatus();
       return flow.value;
     } catch (reason: unknown) {
-      if (generation === refreshGeneration && isCurrentProfile(profileId, profile.generation)
-        && (!options.isCurrent || options.isCurrent())) {
-        markFlowReadFailure(reason);
+      const belongsToCurrentAttempt = generation === refreshGeneration
+        && isCurrentProfile(profileId, profile.generation)
+        && operationEpoch.isCurrent({ profileId }, epoch)
+        && (!options.isCurrent || options.isCurrent());
+      if (!belongsToCurrentAttempt) {
+        // 过期请求的失败属于旧身份/旧代次：不标 stale、不写旧错误，也不把
+        // 旧失败抛给调用方（轮询的 catch 同样会因此保持静默）。
+        return flow.value;
       }
+      markFlowReadFailure(reason);
       throw reason;
     }
   }
 
-  async function hydrateTrackSnapshots() {
-    const profileId = currentProfileId();
+  async function hydrateTrackSnapshots(targetFlow: ParallelFlowState | null, profileId: string) {
     if (!profileId) return;
-    const targetFlow = flow.value;
     const runs = (targetFlow?.tracks || []).flatMap((track) => {
       const entries: Array<{ key: string; runId: string; trackId: string }> = [];
       for (const field of ["scrape_run_id", "screen_run_id"] as const) {
@@ -568,9 +594,8 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
       return entries;
     });
     if (!runs.length) return;
-    await Promise.allSettled(runs.map(async (entry) => {
+    await Promise.all(runs.map(async (entry) => {
       const snapshot = await request<ApiTaskSnapshot>(`/api/task-state/${encodeURIComponent(entry.runId)}?profile_id=${encodeURIComponent(profileId)}`);
-      if (profileId !== currentProfileId() || flow.value !== targetFlow) return;
       const track = targetFlow?.tracks.find((item) => item.id === entry.trackId);
       if (track) track[entry.key] = snapshot;
     }));
@@ -730,17 +755,34 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     }
     operatingPlatform.value = platform;
     error.value = "";
+    const actionOwner = claimActionOwner();
+    const actionEpoch = ++actionGeneration;
+    const flowId = flow.value.id;
+    const epoch = operationEpoch.begin({
+      profileId, flowId, platform, runId: target?.runId || "",
+    });
     try {
       const response = await request<{ flow: ParallelFlowState }>(
-        `/api/flows/${encodeURIComponent(flow.value.id)}/tracks/${platform}/${action}`,
+        `/api/flows/${encodeURIComponent(flowId)}/tracks/${platform}/${action}`,
         {
           method: "POST",
           json: { profile_id: profileId, ...(target ? { expected_run_id: target.runId, mode: target.mode || "graceful" } : {}) },
         },
       );
+      if (!operationEpoch.isCurrent({ profileId, flowId }, epoch)
+          || currentProfileId() !== profileId) {
+        return flow.value;
+      }
       flow.value = response.flow;
       return flow.value;
     } catch (reason: unknown) {
+      const ownsFailure = actionEpoch === actionGeneration
+        && currentProfileId() === profileId
+        && (!flow.value || flow.value.id === flowId);
+      if (!ownsFailure) {
+        // 过期动作的失败不得污染当前状态：不提示、不写 error、不标 stale。
+        throw reason;
+      }
       const actionError = errorMessage(reason, "流程操作失败");
       // 动作被拒绝先给用户一句话提示（pause / resume / stop 同一条路径），
       // 再补权威状态；异常继续上抛，调用方保留原有失败处理。
@@ -749,16 +791,21 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
         await refresh();
         // The action error remains useful even when the authoritative refresh
         // succeeds: the user still needs to know why the action was rejected.
-        error.value = actionError;
+        if (actionEpoch === actionGeneration) error.value = actionError;
       } catch (refreshReason: unknown) {
-        // Preserve both facts when neither the action nor the follow-up read
-        // can establish the server's authoritative state.
-        stale.value = true;
-        error.value = `${actionError}；状态刷新失败：${errorMessage(refreshReason, "流程状态读取失败")}`;
+        if (actionEpoch === actionGeneration) {
+          // Preserve both facts when neither the action nor the follow-up read
+          // can establish the server's authoritative state.
+          stale.value = true;
+          error.value = `${actionError}；状态刷新失败：${errorMessage(refreshReason, "流程状态读取失败")}`;
+        }
       }
       throw reason;
     } finally {
-      operatingPlatform.value = null;
+      if (ownsActionBusy(actionOwner)) {
+        activeActionOwner = null;
+        operatingPlatform.value = null;
+      }
     }
   }
 
@@ -766,10 +813,87 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
    * 轨道行上传来的动作出口：只查模块作用域那张唯一落点表 TRACK_ACTION_OPERATIONS。
    * 表里的 kind 打到它对应的那一个后端操作；表外的 kind 不发请求、也不冒充做成了什么。
    */
-  async function operateTrack(platform: Platform, action: TrackActionKind) {
+  /**
+   * 047 C2：请求失败轨道的单轨重试。身份与代次与 operate 同一套守卫；
+   * 携带精确 expected_run_id/expected_updated_at（空 run 合法但不省略校验）。
+   */
+  async function retryTrack(platform: Platform, target: { runId: string; updatedAt?: string; trackId?: string }) {
+    if (!flow.value) throw new Error("当前没有流程");
+    const profileId = currentProfileId();
+    if (!profileId) throw new Error("当前画像不可用");
+    if (stale.value) {
+      throw new Error(error.value || "流程状态暂不可确认，当前仅可查看");
+    }
+    const flowId = flow.value.id;
+    operatingPlatform.value = platform;
+    error.value = "";
+    const actionOwner = claimActionOwner();
+    const actionEpoch = ++actionGeneration;
+    const epoch = operationEpoch.begin({ profileId, flowId, platform, runId: target.runId });
+    try {
+      const response = await request<{ flow: ParallelFlowState }>(
+        `/api/flows/${encodeURIComponent(flowId)}/tracks/${platform}/retry`,
+        {
+          method: "POST",
+          json: {
+            profile_id: profileId,
+            // C2 请求契约：精确轨道/版本身份一律随请求发；空串表示该字段没有值，不等于省略校验。
+            expected_track_id: target.trackId || "",
+            expected_run_id: target.runId,
+            expected_updated_at: target.updatedAt || "",
+          },
+        },
+      );
+      if (!operationEpoch.isCurrent({ profileId, flowId }, epoch)
+          || currentProfileId() !== profileId) {
+        return flow.value;
+      }
+      flow.value = response.flow;
+      // 已经停止轮询的失败外壳需要在新尝试开始后继续读权威状态；
+      // 已在轮询时不再重复补读。
+      if (hasUnfinishedRound.value && !polling.value) startPolling();
+      return flow.value;
+    } catch (reason: unknown) {
+      const ownsFailure = actionEpoch === actionGeneration
+        && currentProfileId() === profileId
+        && (!flow.value || flow.value.id === flowId);
+      if (!ownsFailure) {
+        throw reason;
+      }
+      const actionError = errorMessage(reason, "重试失败");
+      options.onActionError?.(`${platformLabel(platform)}：${readableActionReason(reason, "重试失败")}`);
+      try {
+        await refresh();
+        if (actionEpoch === actionGeneration) error.value = actionError;
+      } catch (refreshReason: unknown) {
+        if (actionEpoch === actionGeneration) {
+          stale.value = true;
+          error.value = `${actionError}；状态刷新失败：${errorMessage(refreshReason, "流程状态读取失败")}`;
+        }
+      }
+      throw reason;
+    } finally {
+      if (ownsActionBusy(actionOwner)) {
+        activeActionOwner = null;
+        operatingPlatform.value = null;
+      }
+    }
+  }
+
+  async function operateTrack(platform: Platform, action: TrackActionKind, target?: { runId?: string; updatedAt?: string }) {
     const operation = TRACK_ACTION_OPERATIONS[action];
     if (!operation) return null;
-    return operate(platform, operation);
+    if (operation === "retry") {
+      const track = tracks.value[platform];
+      const runId = String(target?.runId || track?.screen_run_id || track?.scrape_run_id || "");
+      return retryTrack(platform, {
+        runId, updatedAt: target?.updatedAt, trackId: String(track?.id || ""),
+      });
+    }
+    if (operation === "pause" || operation === "resume" || operation === "stop") {
+      return operate(platform, operation, target?.runId ? { runId: target.runId } : undefined);
+    }
+    return null;
   }
 
   function restore(next: ParallelFlowState | null) {
@@ -844,6 +968,7 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     restoreConditionSnapshot,
     resetConditionState,
     refresh,
+    operationEpoch,
     fetchTaskState,
     fetchFlowResults,
     loadPlatformGroups,
@@ -853,6 +978,7 @@ export function useDiscoveryParallelFlow(options: ParallelFlowOptions) {
     clearPolling,
     start,
     operate,
+    retryTrack,
     operateTrack,
     isFlowOwnedScrapeTask,
     getFlowTaskCancellationPlan,

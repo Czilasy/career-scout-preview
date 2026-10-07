@@ -1232,23 +1232,26 @@ button:disabled {
   pointer-events: auto;
 }
 .one-click-cta {
-  min-height: 50px;
-  padding: 0 22px;
-  font-size: 15px;
+  min-height: 44px;
+  padding: 0 18px;
+  font-size: 14px;
 }
 .one-click-secondary-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 9px;
+  gap: 8px;
   flex: 1 1 auto;
   justify-content: flex-end;
 }
-.one-click-secondary-actions .button {
-  min-height: 34px;
-  padding: 0 13px;
-  font-size: 13px;
-  gap: 6px;
+/* 047 US4/FR-006：02/03 操作区局部紧凑，只作用于命令条与筛选卡动作区，
+   不动全站 button；主 CTA 仍比同排次操作大一号，层级一眼可辨。 */
+.one-click-secondary-actions .button,
+.one-click-secondary-actions .screen-round-actions .button {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 12px;
+  gap: 5px;
 }
 .workflow-actions {
   display: flex;

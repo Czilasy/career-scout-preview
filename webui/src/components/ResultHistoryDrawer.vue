@@ -28,6 +28,31 @@ const emit = defineEmits<{
 const closeEl = ref<HTMLButtonElement | null>(null);
 const panelEl = ref<HTMLElement | null>(null);
 let previousFocus: HTMLElement | null = null;
+const headerBottom = ref<string>();
+let headerObserver: ResizeObserver | null = null;
+
+function measureHeader() {
+  const header = document.querySelector<HTMLElement>(".app-header");
+  const bottom = header?.getBoundingClientRect().bottom || 0;
+  headerBottom.value = bottom > 0 ? `${bottom + 8}px` : undefined;
+}
+
+function releaseHeaderObserver() {
+  headerObserver?.disconnect();
+  headerObserver = null;
+  window.removeEventListener("resize", measureHeader);
+}
+
+function observeHeader() {
+  releaseHeaderObserver();
+  measureHeader();
+  const header = document.querySelector<HTMLElement>(".app-header");
+  if (header && typeof ResizeObserver !== "undefined") {
+    headerObserver = new ResizeObserver(measureHeader);
+    headerObserver.observe(header);
+  }
+  window.addEventListener("resize", measureHeader);
+}
 
 const activePlatform = ref<"aggregate" | "boss" | "zhilian">("aggregate");
 // Flow 卡片视图只承载有 durable flow 身份的真实流程；后端会把每一条旧结果轮
@@ -72,6 +97,44 @@ function flowTrackDeleteId(track: FlowHistoryTrack): string {
 
 function historyDeleteBlocked(status: unknown): boolean {
   return ["queued", "running", "paused"].includes(String(status || ""));
+}
+
+/**
+ * 047 US6：服务端权威删除资格经响应原样带到这一层。两个历史形状都带
+ * 索引签名/未知厂商字段，按字段读取，不要求后端或共享类型先行升级；
+ * 字段缺席（旧响应）才回退既有的「非活动即允许」显示，真正是否删除
+ * 始终由 DELETE 重判。
+ */
+function authoritativeBool(source: unknown, field: string): boolean | undefined {
+  const value = (source as Record<string, unknown> | null | undefined)?.[field];
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function authoritativeText(source: unknown, field: string): string {
+  const value = (source as Record<string, unknown> | null | undefined)?.[field];
+  return typeof value === "string" ? value : "";
+}
+
+function flowTrackDeleteAllowed(track: FlowHistoryTrack): boolean {
+  const authoritative = authoritativeBool(track, "can_delete");
+  if (authoritative !== undefined) return authoritative;
+  return !historyDeleteBlocked(track.status);
+}
+
+function flowTrackDeleteTitle(track: FlowHistoryTrack): string {
+  if (flowTrackDeleteAllowed(track)) return "删除该轮次";
+  return authoritativeText(track, "delete_block_reason") || "请先结束或取消流程，再删除历史轮次";
+}
+
+function roundDeleteAllowed(item: HistoryRoundItem): boolean {
+  const authoritative = authoritativeBool(item, "can_delete");
+  if (authoritative !== undefined) return authoritative;
+  return !historyDeleteBlocked(item.status);
+}
+
+function roundDeleteTitle(item: HistoryRoundItem): string {
+  if (roundDeleteAllowed(item)) return "删除该轮次";
+  return authoritativeText(item, "delete_block_reason") || "请先结束或取消流程，再删除历史轮次";
 }
 
 function flowTrackJobCount(track: FlowHistoryTrack): number {
@@ -194,13 +257,19 @@ function handleKeydown(event: KeyboardEvent) {
 watch(() => props.open, (open) => {
   if (open) {
     previousFocus = document.activeElement as HTMLElement | null;
-    nextTick(() => closeEl.value?.focus());
+    nextTick(() => {
+      if (!props.open) return;
+      observeHeader();
+      closeEl.value?.focus();
+    });
   } else {
+    releaseHeaderObserver();
     previousFocus?.focus();
   }
 }, { immediate: true });
 
 onBeforeUnmount(() => {
+  releaseHeaderObserver();
   if (props.open) previousFocus?.focus();
 });
 
@@ -234,6 +303,7 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
       <aside
         ref="panelEl"
         class="history-drawer"
+        :style="{ '--history-header-bottom': headerBottom }"
         role="dialog"
         aria-modal="true"
         aria-labelledby="history-drawer-title"
@@ -386,8 +456,8 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
                           v-if="flowTrackDeleteId(track)"
                           class="icon-button history-delete"
                           type="button"
-                          :disabled="deleting || historyDeleteBlocked(track.status)"
-                          :title="historyDeleteBlocked(track.status) ? '请先结束或取消流程，再删除历史轮次' : '删除该轮次'"
+                          :disabled="deleting || !flowTrackDeleteAllowed(track)"
+                          :title="flowTrackDeleteTitle(track)"
                           :aria-label="`删除 ${platformLabel(track.platform)} 该轮次`"
                           data-testid="history-delete-trigger"
                           @click="emit('confirm-delete', flowRoundItem(track))"
@@ -489,8 +559,8 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
                     <button
                       class="icon-button history-delete"
                       type="button"
-                      :disabled="deleting || historyDeleteBlocked(item.status)"
-                      :title="historyDeleteBlocked(item.status) ? '请先结束或取消流程，再删除历史轮次' : '删除该轮次'"
+                      :disabled="deleting || !roundDeleteAllowed(item)"
+                      :title="roundDeleteTitle(item)"
                       :aria-label="`删除 ${formatHistoryTime(item.finished_at || item.created_at) || '该轮次'}`"
                       data-testid="history-delete-trigger"
                       @click="emit('confirm-delete', item)"
@@ -522,7 +592,7 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
 
 .history-drawer {
   position: fixed;
-  top: calc(80px + var(--titlebar-offset));
+  top: max(calc(80px + var(--titlebar-offset)), var(--history-header-bottom, 0px));
   right: 16px;
   bottom: 16px;
   z-index: 61;
@@ -991,7 +1061,7 @@ function onRoundRowKeydown(event: KeyboardEvent, item: HistoryRoundItem): void {
 
 @media (max-width: 720px) {
   .history-drawer {
-    top: 72px;
+    top: max(calc(72px + var(--titlebar-offset)), var(--history-header-bottom, 0px));
     right: 16px;
     bottom: 8px;
     width: calc(100vw - 32px);

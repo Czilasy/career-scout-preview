@@ -26,6 +26,7 @@ const emit = defineEmits<{
   "continue-recrawl": [];
   "pause-scrape": [];
   "continue-scrape": [];
+  "retry-track": [];
   "finish-save": [];
   cancel: [];
 }>();
@@ -39,6 +40,7 @@ const ACTION_TEST_IDS: Record<string, string> = {
   "continue-recrawl": "continue-recrawl",
   "pause-scrape": "pause-scrape",
   "continue-scrape": "continue-scrape",
+  "retry-track": "retry-flow-track",
 };
 
 function actionTestId(): string {
@@ -55,6 +57,7 @@ function emitAction() {
   else if (kind === "continue-recrawl") emit("continue-recrawl");
   else if (kind === "pause-scrape") emit("pause-scrape");
   else if (kind === "continue-scrape") emit("continue-scrape");
+  else if (kind === "retry-track") emit("retry-track");
 }
 
 function finishTestId(): string {
@@ -116,7 +119,7 @@ function cancelDisabled(): boolean {
     </button>
     <button
       v-if="showFinishSave"
-      class="button danger"
+      class="button danger secondary screen-round-finish"
       type="button"
       :data-testid="finishTestId()"
       :disabled="anyActionBusy()"
@@ -132,7 +135,7 @@ function cancelDisabled(): boolean {
     </button>
     <button
       v-if="showCancel"
-      class="button danger"
+      class="button danger secondary screen-round-cancel"
       type="button"
       :data-testid="cancelTestId()"
       :disabled="cancelDisabled()"
@@ -150,10 +153,30 @@ function cancelDisabled(): boolean {
 </template>
 
 <style scoped>
+/* 047 US4/C5：共享操作区局部紧凑密度，不动全站 button。
+   主操作保持 primary 明显；「结束并保存结果」「终止/放弃本轮」用 secondary 形态
+   与 primary 拉开层级、危险语义仍由 danger 色保留；忙态只换文案不换布局。 */
 .screen-round-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+.screen-round-actions .button {
+  min-height: 32px;
+  height: 32px;
+  padding: 0 11px;
+  gap: 5px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+.screen-round-actions .button.primary {
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 700;
+}
+.screen-round-actions .button svg {
+  width: 14px;
+  height: 14px;
 }
 </style>

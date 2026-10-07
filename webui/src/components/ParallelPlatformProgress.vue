@@ -29,6 +29,8 @@ const ACTION_KINDS = Object.keys(TRACK_ACTION_OPERATIONS) as TrackActionKind[];
 function actionHandlers(item: FlowProgressItem): Record<string, () => void> {
   const handlers: Record<string, () => void> = {};
   for (const kind of ACTION_KINDS) {
+    // 047 C2：失败重试与暂停/继续/终止一样走既有 action 通道，
+    // 身份（含 updated_at）由下游按当前轨道解析，平台壳只转发。
     handlers[kind] = () => emit("action", item.platform, kind, item.runId);
   }
   return handlers;
@@ -53,6 +55,7 @@ function actionHandlers(item: FlowProgressItem): Record<string, () => void> {
         :task-id="item.runId || undefined"
         :platform="item.platform"
         :round-closed="item.roundClosed"
+        :closure="item.snapshot?.closure ?? null"
       >
         <!-- 动作条是这张卡的一部分：交给卡的落点，不再另起一行掉在卡外。 -->
         <ScreenRoundActions

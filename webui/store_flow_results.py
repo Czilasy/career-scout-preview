@@ -155,6 +155,20 @@ class StoreFlowResultsMixin:
                     "failed", "stopped", "cancelled", "done", "succeeded"
                 }
             )
+            # 047 US6：删除资格只向唯一 helper 要；聚合投影不再自算。
+            eligibility = {"can_delete": False, "delete_block_reason": None}
+            analyze = getattr(self, "analyze_history_deletion", None)
+            if callable(analyze):
+                target = str(result_run_id or track.get("id") or "")
+                try:
+                    eligibility = analyze(
+                        target, profile_id=flow.get("profile_id"),
+                    )
+                except Exception:  # noqa: BLE001 - projection stays readable
+                    eligibility = {
+                        "can_delete": False,
+                        "delete_block_reason": "暂时无法确认删除资格",
+                    }
             return {
                 **dict(track),
                 "jobs": jobs,
@@ -162,6 +176,8 @@ class StoreFlowResultsMixin:
                 "ai_screened": ai_screened,
                 "unfinished_ai_screening": unfinished,
                 "screened_count": screened_count,
+                "can_delete": bool(eligibility.get("can_delete")),
+                "delete_block_reason": eligibility.get("delete_block_reason"),
                 "message": "未完成 AI 筛选" if unfinished else "",
             }
 

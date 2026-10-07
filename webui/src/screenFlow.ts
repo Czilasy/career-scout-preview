@@ -9,6 +9,7 @@ export type ScreenPrimaryAction =
   | { kind: "recrawl"; label: "全部重抓" }
   | { kind: "pause-recrawl"; label: "暂停重抓" }
   | { kind: "continue-recrawl"; label: "继续重抓" }
+  | { kind: "retry-track"; label: "重试" }
   | { kind: "none" };
 
 /** 抓取任务沿用 ScreenRoundActions 的公共动作外观，但文案不带 AI/筛选语义。 */
@@ -167,6 +168,12 @@ export interface TrackActionBarFacts {
   stage: "scrape" | "screen";
   /** 这条线自己的状态（不是别段的快照）。 */
   status: string;
+  /**
+   * 轨道级状态（flow_tracks.status）：阶段快照是任务账本口径，failed 的抓取任务
+   * 可能落账成 completed_with_pending（047 真实入口 79a49be0064045d7），
+   * 重试出口读这一份轨道事实，不能只看阶段快照。
+   */
+  trackStatus?: string;
   /** 本段自己的 run id（AI 段在交接窗口里可能还没有）。 */
   runId: string;
   /**
@@ -190,7 +197,17 @@ export interface TrackActionBar {
  */
 export function deriveTrackActionBar(facts: TrackActionBarFacts): TrackActionBar {
   const cancelLabel = TRACK_CANCEL_LABEL;
-  if (facts.operable === false || facts.terminal || facts.status === "failed") {
+  // 047 C2：当前 failed 版本给独立「重试」出口（与 resume 分开，不冒充整轮开始）。
+  // failed 终态不给 stop/finish：那一轮已经没有活体 worker 可以终止或收尾。
+  // 失败事实有两个来源：阶段快照自己说了 failed，或轨道状态 failed 而阶段快照
+  // 被任务账本（completed_with_pending）盖住。后者只有承载这条线状态的当前段才给
+  // 出口，别的段（例如 AI 失败轨的已完成抓取卡）不许长出重复的重试按钮。
+  if (facts.status === "failed"
+      || (facts.trackStatus === "failed" && facts.operable !== false)) {
+    const retry: SharedPrimaryAction = { kind: "retry-track", label: "重试" };
+    return { action: retry, showFinishSave: false, showCancel: false, cancelLabel };
+  }
+  if (facts.operable === false || facts.terminal) {
     return { action: { kind: "none" }, showFinishSave: false, showCancel: false, cancelLabel };
   }
   const finishRunId = facts.finishRunId ?? facts.runId;

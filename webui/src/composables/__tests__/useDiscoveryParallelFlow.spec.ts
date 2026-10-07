@@ -9,6 +9,56 @@ import type { ConditionSnapshotV2 } from "../../types";
 import { ref } from "vue";
 
 describe("useDiscoveryParallelFlow", () => {
+  it("publishes a refreshed Flow only after its task snapshots arrive", async () => {
+    let releaseSnapshot: (value: Record<string, unknown>) => void = () => {};
+    const request = async <T>(url: string): Promise<T> => {
+      if (url.startsWith("/api/task-state/")) {
+        return new Promise<T>((resolve) => { releaseSnapshot = (value) => resolve(value as T); });
+      }
+      return { flow: {
+        id: "flow-atomic", profile_id: "profile-atomic", selection: "boss",
+        tracks: [{ id: "b", flow_id: "flow-atomic", platform: "boss",
+          status: "paused", stage: "scrape", scrape_run_id: "scrape-atomic" }],
+      } } as T;
+    };
+    const state = useDiscoveryParallelFlow({ profileId: "profile-atomic", request });
+    const refreshing = state.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+    // The Track and the snapshot form one observable version of the scene.
+    expect(state.flow.value).toBeNull();
+    releaseSnapshot({ status: "paused", progress: { current: 2, total: 4 } });
+    await refreshing;
+    expect(state.flow.value?.tracks[0].status).toBe("paused");
+    expect(state.flow.value?.tracks[0]["scrape-atomic:snapshot"]).toMatchObject({ status: "paused" });
+    state.clearPolling();
+  });
+
+  it("keeps the previous scene and reports stale when snapshot hydration fails", async () => {
+    let failSnapshot = false;
+    const request = async <T>(url: string): Promise<T> => {
+      if (url.startsWith("/api/task-state/")) {
+        if (failSnapshot) throw new Error("snapshot unavailable");
+        return { status: "running" } as T;
+      }
+      return { flow: {
+        id: "flow-atomic", profile_id: "profile-atomic", selection: "boss",
+        tracks: [{ id: "b", flow_id: "flow-atomic", platform: "boss",
+          status: failSnapshot ? "failed" : "running", stage: "scrape", scrape_run_id: "r" }],
+      } } as T;
+    };
+    const state = useDiscoveryParallelFlow({ profileId: "profile-atomic", request });
+    await state.refresh();
+    const trusted = state.flow.value;
+    failSnapshot = true;
+    await expect(state.refresh()).rejects.toThrow("snapshot unavailable");
+    expect(state.flow.value).toBe(trusted);
+    expect(state.flow.value?.tracks[0].status).toBe("running");
+    expect(state.stale.value).toBe(true);
+    expect(state.error.value).toContain("snapshot unavailable");
+    state.clearPolling();
+  });
+
   it("recognizes a single-platform Flow's scrape ownership too", () => {
     const state = useDiscoveryParallelFlow({ profileId: "profile-owned" });
     state.restore({ id: "single", profile_id: "profile-owned", selection: "zhilian", tracks: [
@@ -802,6 +852,137 @@ describe("useDiscoveryParallelFlow", () => {
     state.clearPolling();
   });
 
+
+  // 047 复核 P1：过期请求的失败响应不得污染当前状态。
+  it("does not let a stale refresh failure mark the current Flow stale", async () => {
+    const profileId = ref("profile-stale-fail");
+    let rejectOld: (reason: Error) => void = () => {};
+    let currentCalls = 0;
+    const request = async <T>(url: string): Promise<T> => {
+      if (url.startsWith("/api/flows/current")) {
+        currentCalls += 1;
+        if (currentCalls === 1) {
+          return new Promise<T>((_resolve, reject) => { rejectOld = reject; });
+        }
+        return { flow: null } as T;
+      }
+      if (url.includes("/tracks/boss/pause")) {
+        return { flow: {
+          id: "flow-stale-fail", profile_id: "profile-stale-fail", selection: "all" as const,
+          tracks: [{
+            id: "b", flow_id: "flow-stale-fail", platform: "boss" as const,
+            status: "paused", stage: "scrape",
+          }],
+        } } as T;
+      }
+      return { flow: null } as T;
+    };
+    const state = useDiscoveryParallelFlow({ profileId, request, pollIntervalMs: 1000000 });
+    state.restore({
+      id: "flow-stale-fail", profile_id: "profile-stale-fail", selection: "all" as const,
+      tracks: [{
+        id: "b", flow_id: "flow-stale-fail", platform: "boss" as const,
+        status: "running", stage: "scrape",
+      }],
+    });
+    state.clearPolling();
+    const pendingRefresh = state.refresh();
+    // 动作开始：旧轮询（refresh）随即失效。
+    await state.operate("boss", "pause");
+    expect(state.flow.value?.tracks[0].status).toBe("paused");
+    // 暂停成功后，旧轮询才晚到失败——不得把当前流程标成 stale。
+    rejectOld(new Error("旧轮询失败"));
+    await pendingRefresh;
+    expect(state.flow.value?.tracks[0].status).toBe("paused");
+    expect((state as unknown as { stale?: { value: boolean } }).stale?.value).toBe(false);
+    expect(state.error.value).not.toContain("旧轮询失败");
+    state.clearPolling();
+  });
+
+  it("keeps the busy state scoped to its own track during overlapping actions", async () => {
+    let releaseBoss: (value: unknown) => void = () => {};
+    const request = async <T>(url: string): Promise<T> => {
+      if (url.includes("/tracks/boss/pause")) {
+        return new Promise<T>((resolve) => {
+          releaseBoss = (value) => resolve(value as T);
+        });
+      }
+      return { flow: {
+        id: "flow-busy-scope", profile_id: "profile-busy-scope", selection: "all" as const,
+        tracks: [
+          { id: "b", flow_id: "flow-busy-scope", platform: "boss" as const,
+            status: "paused", stage: "scrape" },
+          { id: "z", flow_id: "flow-busy-scope", platform: "zhilian" as const,
+            status: "running", stage: "ai" },
+        ],
+      } } as T;
+    };
+    const state = useDiscoveryParallelFlow({ profileId: "profile-busy-scope", request, pollIntervalMs: 1000000 });
+    state.restore({
+      id: "flow-busy-scope", profile_id: "profile-busy-scope", selection: "all" as const,
+      tracks: [
+        { id: "b", flow_id: "flow-busy-scope", platform: "boss" as const,
+          status: "running", stage: "scrape" },
+        { id: "z", flow_id: "flow-busy-scope", platform: "zhilian" as const,
+          status: "running", stage: "ai" },
+      ],
+    });
+    state.clearPolling();
+    const bossAction = state.operate("boss", "pause");
+    await Promise.resolve();
+    // 兄弟轨道的忙态必须是 null，不能被 boss 的操作冻结。
+    expect(state.operatingPlatform.value).toBe("boss");
+    releaseBoss({ flow: {
+      id: "flow-busy-scope", profile_id: "profile-busy-scope", selection: "all" as const,
+      tracks: [
+        { id: "b", flow_id: "flow-busy-scope", platform: "boss" as const,
+          status: "paused", stage: "scrape" },
+        { id: "z", flow_id: "flow-busy-scope", platform: "zhilian" as const,
+          status: "running", stage: "ai" },
+      ],
+    } });
+    await bossAction;
+    expect(state.operatingPlatform.value).toBeNull();
+    state.clearPolling();
+  });
+
+
+  it("drops a late failure from the previous profile instead of polluting new state", async () => {
+    const profileId = ref("profile-a");
+    let rejectOld: (reason: Error) => void = () => {};
+    let callsForA = 0;
+    const request = async <T>(url: string): Promise<T> => {
+      if (url.includes("profile_id=profile-a") && url.startsWith("/api/flows/current")) {
+        callsForA += 1;
+        if (callsForA === 1) {
+          return new Promise<T>((_resolve, reject) => { rejectOld = reject; });
+        }
+        return { flow: null } as T;
+      }
+      if (url.includes("profile_id=profile-b")) {
+        return { flow: {
+          id: "flow-b", profile_id: "profile-b", selection: "all" as const,
+          tracks: [{
+            id: "b", flow_id: "flow-b", platform: "boss" as const,
+            status: "running", stage: "scrape",
+          }],
+        } } as T;
+      }
+      return { flow: null } as T;
+    };
+    const state = useDiscoveryParallelFlow({ profileId, request, pollIntervalMs: 1000000 });
+    const pendingOld = state.refresh();
+    profileId.value = "profile-b";
+    await state.refresh();
+    expect(state.flow.value?.id).toBe("flow-b");
+    rejectOld(new Error("旧画像失败"));
+    await pendingOld;
+    expect(state.flow.value?.id).toBe("flow-b");
+    expect((state as unknown as { stale?: { value: boolean } }).stale?.value).toBe(false);
+    expect(state.error.value).not.toContain("旧画像失败");
+    state.clearPolling();
+  });
+
   it("keeps a failed refresh Flow as stale and blocks new rounds", async () => {
     const existing = {
       id: "flow-refresh-stale",
@@ -1268,6 +1449,7 @@ describe("useDiscoveryParallelFlow 轨道动作 kind 的实际落点", () => {
     continue: "resume",
     "continue-scrape": "resume",
     cancel: "stop",
+    "retry-track": "retry",
   };
 
   function flowWithRecordedRequests() {
@@ -1304,6 +1486,48 @@ describe("useDiscoveryParallelFlow 轨道动作 kind 的实际落点", () => {
       expect(urls.at(-1)).toBe(`/api/flows/flow-kinds/tracks/boss/${KIND_TO_OPERATION[kind]}`);
       flow.clearPolling();
     }
+  });
+
+  it("047: retry kind 先带精确身份走独立位置，并接受新投影", async () => {
+    const urls: string[] = [];
+    const bodies: Array<Record<string, unknown>> = [];
+    let payload = {
+      id: "flow-kinds", profile_id: "profile-kinds", selection: "all", status: "running",
+      tracks: [{
+        id: "b", flow_id: "flow-kinds", platform: "boss", status: "failed", stage: "ai",
+        updated_at: "2026-10-07T00:00:00Z", screen_run_id: "screen-old",
+      }],
+    };
+    const flow = useDiscoveryParallelFlow({
+      profileId: "profile-kinds",
+      request: async <T>(url: string, options?: Record<string, unknown>): Promise<T> => {
+        urls.push(String(url));
+        bodies.push((options?.json || {}) as Record<string, unknown>);
+        if (String(url).endsWith("/retry")) {
+          payload = {
+            ...payload,
+            tracks: [{ ...payload.tracks[0], status: "running", stage: "ai", screen_run_id: "screen-new" }],
+          };
+          return { flow: payload } as T;
+        }
+        return { flow: payload } as T;
+      },
+      pollIntervalMs: 1000000,
+    });
+    flow.restore(payload as never);
+    const result = await flow.operateTrack("boss", "retry-track", {
+      runId: "screen-old", updatedAt: "2026-10-07T00:00:00Z",
+    });
+    expect(urls).toContain("/api/flows/flow-kinds/tracks/boss/retry");
+    const retryIndex = urls.indexOf("/api/flows/flow-kinds/tracks/boss/retry");
+    expect(bodies[retryIndex]).toMatchObject({
+      profile_id: "profile-kinds",
+      expected_track_id: "b",
+      expected_run_id: "screen-old",
+      expected_updated_at: "2026-10-07T00:00:00Z",
+    });
+    expect((result as any).tracks[0].screen_run_id).toBe("screen-new");
+    flow.clearPolling();
   });
 
   it("映射表之外的 kind 既不发请求，也不冒充做成了什么", async () => {

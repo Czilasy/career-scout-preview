@@ -1,4 +1,6 @@
 import { mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import ScreenRoundActions from "../ScreenRoundActions.vue";
 import type { ScreenPrimaryAction } from "../../screenFlow";
 
@@ -10,6 +12,7 @@ function action(kind: ScreenPrimaryAction["kind"]): ScreenPrimaryAction {
     case "recrawl": return { kind, label: "全部重抓" };
     case "pause-recrawl": return { kind, label: "暂停重抓" };
     case "continue-recrawl": return { kind, label: "继续重抓" };
+    case "retry-track": return { kind, label: "重试" };
     default: return { kind };
   }
 }
@@ -169,6 +172,30 @@ describe("ScreenRoundActions 按钮矩阵", () => {
     expect(wrapper.emitted("continue")).toHaveLength(1);
   });
 
+  it("047 C2: failed 轨道渲染独立重试按钮，点击发 retry，不发 finish/cancel", async () => {
+    const wrapper = mount(ScreenRoundActions, {
+      props: { action: action("retry-track"), showFinishSave: false, showCancel: false },
+    });
+    const retry = wrapper.get('[data-testid="retry-flow-track"]');
+    expect(retry.text()).toContain("重试");
+    expect(retry.attributes("disabled")).toBeUndefined();
+    await retry.trigger("click");
+    expect(wrapper.emitted("retry-track")).toHaveLength(1);
+    expect(wrapper.emitted("finish-save")).toBeUndefined();
+    expect(wrapper.emitted("cancel")).toBeUndefined();
+    expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="cancel-scrape"]').exists()).toBe(false);
+  });
+
+  it("047 C2: failed 轨统一用 retry-track kind，落 retry-flow-track 测试 id", async () => {
+    const wrapper = mount(ScreenRoundActions, {
+      props: { action: { kind: "retry-track", label: "重试" } as const, showFinishSave: false, showCancel: false },
+    });
+    const retry = wrapper.get('[data-testid="retry-flow-track"]');
+    await retry.trigger("click");
+    expect(wrapper.emitted("retry-track")).toHaveLength(1);
+  });
+
   it("uses the start-ai-screen test id for fresh rounds", () => {
     const wrapper = mount(ScreenRoundActions, {
       props: { action: action("start") },
@@ -228,5 +255,94 @@ describe("ScreenRoundActions 现场只读时的收尾出口", () => {
     expect(wrapper.get('[data-testid="finish-save-results"]').attributes("disabled")).toBeDefined();
     expect(wrapper.get('[data-testid="cancel-scrape"]').attributes("disabled")).toBeDefined();
     wrapper.unmount();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 047 US4/FR-006 / C5：共享操作区的局部紧凑密度与清楚层级。
+// 只钉结构与局部样式作用域：主操作保持 primary；「结束并保存结果」「终止」降为
+// 次级形态但保留危险色语义。像素与最终视觉由 T051 真实渲染核对，这里不写像素镜像。
+// ---------------------------------------------------------------------------
+describe("ScreenRoundActions 047 紧凑层级", () => {
+  it("主操作保持 primary，保存与终止是次级形态且仍带危险色", () => {
+    const wrapper = mount(ScreenRoundActions, {
+      props: {
+        action: action("pause"),
+        showFinishSave: true,
+        showCancel: true,
+        cancelLabel: "终止本轨",
+      },
+    });
+
+    const primary = wrapper.get('[data-testid="pause-ai-screen"]');
+    expect(primary.classes()).toContain("primary");
+    expect(primary.classes()).not.toContain("secondary");
+
+    const finish = wrapper.get('[data-testid="finish-save-results"]');
+    expect(finish.classes()).toContain("danger");
+    expect(finish.classes()).toContain("secondary");
+
+    const cancel = wrapper.get('[data-testid="cancel-scrape"]');
+    expect(cancel.classes()).toContain("danger");
+    expect(cancel.classes()).toContain("secondary");
+    expect(cancel.text()).toContain("终止本轨");
+    wrapper.unmount();
+  });
+
+  it("重试轨道按钮与主操作同档，不再套危险色（失败恢复不是破坏动作）", () => {
+    const wrapper = mount(ScreenRoundActions, {
+      props: { action: action("retry-track"), showFinishSave: false, showCancel: false },
+    });
+    const retry = wrapper.get('[data-testid="retry-flow-track"]');
+    expect(retry.classes()).toContain("primary");
+    expect(retry.classes()).not.toContain("danger");
+    wrapper.unmount();
+  });
+
+  it("紧凑密度只落在共享操作区内部，且忙态只换文案不增删按钮", () => {
+    const css = readFileSync(path.join(__dirname, "../ScreenRoundActions.vue"), "utf8");
+    const scoped = css.match(/<style scoped>[\s\S]*?<\/style>/)?.[0] || "";
+    expect(scoped).toContain(".screen-round-actions .button");
+    expect(scoped).toMatch(/min-height:\s*32px/);
+    expect(scoped).not.toMatch(/^button\b/m);
+    expect(scoped).not.toMatch(/\.button\s*\{[^}]*min-height:\s*44px/s);
+
+    const running = mount(ScreenRoundActions, {
+      props: { action: action("pause"), showFinishSave: true, showCancel: true },
+    });
+    const before = running.findAll("button").length;
+    const busy = mount(ScreenRoundActions, {
+      props: {
+        action: action("pause"),
+        showFinishSave: true,
+        showCancel: true,
+        busy: true,
+        busyAction: "pause",
+        busyLabel: "正在暂停…",
+      },
+    });
+    expect(busy.findAll("button").length).toBe(before);
+    expect(busy.get('[data-testid="pause-ai-screen"]').text()).toContain("正在暂停…");
+    const clickable = busy.findAll("button").filter((b) => b.attributes("disabled") === undefined);
+    expect(clickable).toHaveLength(0);
+    running.unmount();
+    busy.unmount();
+  });
+});
+
+describe("ScreenRoundActions 047 US4 02/03 局部排列", () => {
+  it("命令条/筛选卡动作区的紧凑覆盖只落在 02/03 局部选择器内", () => {
+    const css = readFileSync(path.join(__dirname, "../../styles.css"), "utf8");
+    const cta = css.match(/\.one-click-cta \{[^}]*\}/s)?.[0] || "";
+    expect(cta).toMatch(/min-height:\s*44px/);
+    expect(cta).not.toMatch(/min-height:\s*50px/);
+
+    const local = css.match(/\.one-click-secondary-actions \.button,[\s\S]*?\}/)?.[0] || "";
+    expect(local).toMatch(/min-height:\s*32px/);
+    // 全局 button 基础档没有被这轮改动覆盖。
+    const base = css.match(/button\.button \{[^}]*\}/s)?.[0] || "";
+    expect(base).toMatch(/min-height:\s*44px/);
+    // 没有把紧凑规则写成裸 .button 选择器（那会波及全站）。
+    expect(local.startsWith(".one-click-secondary-actions")).toBe(true);
   });
 });

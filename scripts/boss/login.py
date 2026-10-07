@@ -50,6 +50,32 @@ def probe_login_state(cdp, sid):
     return probe_login_state_tri(cdp, sid) == "logged_in"
 
 
+def _probe_evidence(structure: object, status: int, *, non_json_risk: bool = False) -> str:
+    """Return a safe, credential-free evidence category for diagnostics.
+
+    Only HTTP class, response structure class, known business codes and stage
+    are allowed here; raw response text, URLs, cookies and tokens never are.
+    """
+    if status == 401:
+        return "http_401"
+    if status in (403, 412, 418, 429):
+        return f"http_{status}"
+    if isinstance(structure, dict):
+        code = structure.get("code")
+        if code == 31:
+            return "business_code_31"
+        if code == 37:
+            return "business_code_37"
+        if isinstance(code, int):
+            return "business_code_0" if code == 0 else "business_code_unknown"
+        return "structure_missing_code"
+    if structure is not None:
+        return "structure_unexpected"
+    if non_json_risk:
+        return "non_json_risk_text"
+    return "non_json_unparsable"
+
+
 def probe_login_state_tri(cdp, sid):
     """单次搜索 API 探测，返回四态: "logged_in" | "not_logged_in" | "restricted" | "unknown"。
 
@@ -57,9 +83,10 @@ def probe_login_state_tri(cdp, sid):
     - HTTP 401: 明确登录失效 → not_logged_in
     - 受限中: 其余 HTTP 4xx/429，或响应文本命中风控特征词（RISK_CONTROL_KEYWORDS）
     - 已登录: code==0 且 jobList 含明文 salaryDesc（is_logged_in_search_response）
-    - 未登录: 结构完整但无明文工资
-    - 未知: 空响应、JSON 解析失败或结构异常（不直接当成未登录）
+    - 未登录: code==0 但无明文工资
+    - 未知: 空响应、JSON 解析失败、异常结构或未识别业务码（不直接当成未登录）
 
+    安全诊断只记录 HTTP 类别、响应结构类别、已知业务码与阶段，不记录正文。
     相比旧版 3 关键词 × 3 城市共 9 次请求，这里固定单关键词单城市只发 1 次。
     """
     probe_url = build_login_probe_url(LOGIN_PROBE_QUERY, LOGIN_PROBE_CITY)
@@ -76,10 +103,12 @@ def probe_login_state_tri(cdp, sid):
     """
     val = cdp.eval_js(js, sid)
     if not val:
+        _logger.debug("login probe evidence: probe_empty")
         return "unknown"
     try:
         payload = json.loads(val) if isinstance(val, str) else val
     except ValueError:
+        _logger.debug("login probe evidence: probe_unparsable")
         return "unknown"
     status = 0
     text = ""
@@ -91,7 +120,9 @@ def probe_login_state_tri(cdp, sid):
     else:
         text = json.dumps(payload, ensure_ascii=False)
     if status in (401, 403, 412, 418, 429):
-        return "not_logged_in" if status == 401 else "restricted"
+        state = "not_logged_in" if status == 401 else "restricted"
+        _logger.debug("login probe evidence: %s", _probe_evidence(None, status))
+        return state
     # 016：先判"正常已登录返回"再谈风控——岗位正文/公司名里出现
     # "滑块/验证码/captcha"等词不再把已登录账号误判成受限。
     try:
@@ -101,12 +132,47 @@ def probe_login_state_tri(cdp, sid):
     if data is not None:
         code = data.get("code") if isinstance(data, dict) else None
         if code == 31:
+            _logger.debug(
+                "login probe evidence: %s",
+                _probe_evidence(data, status),
+            )
             return "restricted"
         if code == 37:
+            _logger.debug(
+                "login probe evidence: %s",
+                _probe_evidence(data, status),
+            )
             return "unknown"
-        return "logged_in" if is_logged_in_search_response(data) else "not_logged_in"
+        if isinstance(data, dict) and isinstance(code, int):
+            if code == 0:
+                state = (
+                    "logged_in"
+                    if is_logged_in_search_response(data)
+                    else "not_logged_in"
+                )
+                _logger.debug(
+                    "login probe evidence: business_code_0 state=%s", state,
+                )
+                return state
+            # 未识别业务码：无法确认登录态，不冒充未登录。
+            _logger.debug(
+                "login probe evidence: %s",
+                _probe_evidence(data, status),
+            )
+            return "unknown"
+        # 异常结构（非 dict、缺 code 或 code 类型异常）：如实保持未知。
+        _logger.debug(
+            "login probe evidence: %s",
+            _probe_evidence(data, status),
+        )
+        return "unknown"
     # 非正常结构（非 JSON）响应：高置信风控短语才判受限，其余无法确认
-    if looks_like_risk_control(text):
+    risk_text = looks_like_risk_control(text)
+    _logger.debug(
+        "login probe evidence: %s",
+        _probe_evidence(None, status, non_json_risk=risk_text),
+    )
+    if risk_text:
         return "restricted"
     return "unknown"
 
@@ -160,8 +226,10 @@ def check_login_state_tri(cdp_port=DEFAULT_CDP_PORT):
 
         return state
     except Exception as e:
-        # 覆盖 CDP 连接失败/超时/响应异常；requests 未加载时也要兜底返回 unknown
-        log.error(f"登录状态检测失败: {e}")
+        # 覆盖 CDP 连接失败/超时/响应异常；requests 未加载时也要兜底返回 unknown。
+        # 只记录异常类别与阶段，不复制可能携带 URL/凭据的异常正文。
+        log.error("登录状态检测失败（阶段=cdp_session，异常=%s）", type(e).__name__)
+        _logger.debug("login probe evidence: cdp_session_failed %s", type(e).__name__)
         return "unknown"
 
 

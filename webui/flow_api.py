@@ -18,8 +18,8 @@ from webui.flow_task_coordinator import (
     FlowTaskOperationError,
     FlowTrackTaskUnavailableError,
     MissingPlatformIdentityError,
-    operate_bound_task,
 )
+from webui.flow_track_operations import operate_flow_task_with_reason
 
 
 def register_flow_routes(app, ctx):
@@ -28,7 +28,7 @@ def register_flow_routes(app, ctx):
         service = FlowService(
             ctx.store,
             platform_enabled=_platform_enabled,
-            operate_track=lambda action, platform, flow, track: operate_bound_task(
+            operate_track=lambda action, platform, flow, track: operate_flow_task_with_reason(
                 ctx, action, platform, flow, track,
             ),
             track_finalizing=lambda flow, track: _track_finalizing(ctx, flow, track),
@@ -41,7 +41,7 @@ def register_flow_routes(app, ctx):
     # binding validation still happens in the shared coordinator.
     service.operation_context = ctx
     if getattr(service, "operate_track_callback", None) is None:
-        service.operate_track_callback = lambda action, platform, flow, track: operate_bound_task(
+        service.operate_track_callback = lambda action, platform, flow, track: operate_flow_task_with_reason(
             ctx, action, platform, flow, track,
         )
 
@@ -150,13 +150,20 @@ def register_flow_routes(app, ctx):
         ).strip()
         if not profile_id:
             return _error("profile_id_required", "profile_id 不能为空", 422)
+        extra = {}
+        if "expected_run_id" in body:
+            extra["expected_run_id"] = body["expected_run_id"]
+        if "expected_updated_at" in body:
+            extra["expected_updated_at"] = body["expected_updated_at"]
+        if "expected_track_id" in body:
+            extra["expected_track_id"] = body["expected_track_id"]
         try:
             flow = service.operate_track(
                 flow_id=flow_id,
                 platform=platform,
                 profile_id=profile_id,
                 action=action,
-                **({"expected_run_id": body["expected_run_id"]} if "expected_run_id" in body else {}),
+                **extra,
             )
         except FlowResumeError as exc:
             return _error(

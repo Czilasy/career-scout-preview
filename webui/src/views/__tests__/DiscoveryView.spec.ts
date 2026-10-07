@@ -7695,3 +7695,204 @@ describe("DiscoveryView 04 页「本轮仍在进行」说明（046 D-08）", () 
     expect(coordinator).not.toMatch(/filter\(\(track\) => String\(track\.result_run_id/);
   });
 });
+
+// 047 US3/FR-005：真实阶段进度首次出现 → 对应配置抽屉收拢。独立 describe，
+// 自带最小桩（不依赖主 describe 内部 helper）。断言真实挂载卡片的可见状态，
+// 覆盖全部流程与单平台恢复现场两条不会在启动路径收拢的入口。
+describe("DiscoveryView 047 进度收拢", () => {
+  function bootstrap(overrides: Record<string, (url: string, init?: RequestInit) => Promise<Response> | Response>) {
+    return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const route = url.split("?")[0];
+      if (overrides[url]) return overrides[url](url, init);
+      if (overrides[route]) return overrides[route](url, init);
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response({ ok: true, platform: "boss", schema_version: 1, enabled_for_new_tasks: true, fields: [] });
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: { pages: 3 }, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+  }
+
+  it.each(["047-stopped-owned-scrape", "047-deleted-sibling-scrape"])("Flow 已停止后刷新，旧暂停快照不再锁住新一轮入口（%s）", async (legacyRunId) => {
+    const profileId = "047-stopped-local-pause";
+    const runId = "047-stopped-owned-scrape";
+    sessionStorage.setItem(`career-scout-workflow:${profileId}`, JSON.stringify({
+      version: 1, unfinished: true, activeStep: "search", analysisReady: true,
+      keywords: [{ word: "Python", recommended: true }], selectedKeywords: ["Python"],
+      cityText: "上海", profileSummary: "Python 后端", profileFacts: {},
+      scrapeTaskId: legacyRunId, pausedRunId: runId,
+      scrapeSnapshot: { status: "paused", progress: { message: "登录已失效" }, logs: [] },
+      resultLoaded: false, resultsPageSeen: false,
+    }));
+    vi.stubGlobal("fetch", bootstrap({
+      "/api/latest-running-task": () => response(NO_TASK_PAYLOAD),
+      "/api/flows/current": () => response({ ok: true, flow: {
+        id: "047-stopped-flow", profile_id: profileId, selection: "all", status: "stopped",
+        tracks: [{ id: "047-stopped-track", platform: "zhilian", stage: "scrape", status: "stopped", scrape_run_id: runId }],
+      } }),
+      [`/api/task-state/${runId}`]: () => response({ status: "cancelled", closure: { kind: "stop", phase: "committed" }, progress: {}, logs: [] }),
+    }));
+    const wrapper = mount(DiscoveryView, { props: { profileId } });
+    await flushPromises();
+    await flushPromises();
+    const start = wrapper.findAll("button").find((button) => button.text() === "开始筛选并 AI 优化");
+    expect(start).toBeDefined();
+    expect(start?.attributes("disabled")).toBeUndefined();
+    expect(wrapper.text()).not.toContain("任务已暂停，平台已锁定");
+    wrapper.unmount();
+    sessionStorage.removeItem(`career-scout-workflow:${profileId}`);
+    vi.unstubAllGlobals();
+  });
+
+  it("同一页面轮次内启动另一个 Flow，重新收拢新流程的阶段面板", async () => {
+    let flowId = "collapse-old-flow";
+    let progressOn = false;
+    const payload = () => ({
+      id: flowId, profile_id: "collapse-flow-switch", selection: "all", status: "running",
+      tracks: ["boss", "zhilian"].map((platform) => ({
+        id: `${flowId}-${platform}`, platform, status: "running", stage: "scrape",
+        scrape_run_id: `${flowId}-${platform}-scrape`, screen_run_id: null,
+      })),
+    });
+    const progress = () => response({ status: "running", progress: progressOn ? { stage: "searching", current: 1, overall_percent: 25, total: 4 } : { message: "正在准备任务…" }, logs: [] });
+    vi.stubGlobal("fetch", bootstrap({
+      "/api/flows/current": () => response({ ok: true, flow: payload() }),
+      ...Object.fromEntries(["collapse-old-flow", "collapse-new-flow"].flatMap((id) =>
+        ["boss", "zhilian"].map((platform) => [`/api/task-state/${id}-${platform}-scrape`, progress]))),
+    }));
+    const wrapper = mount(DiscoveryView, { props: { profileId: "collapse-flow-switch" } });
+    await flushPromises();
+    await flushPromises();
+    progressOn = true;
+    await (wrapper.vm as any).$.setupState.parallelFlow.refresh();
+    await flushPromises();
+    await flushPromises();
+    const cards = [".search-layout > .collapsible-card:first-child", ".advanced-panel"];
+    for (const card of cards) {
+      expect(wrapper.find(`${card} .collapsible-body.open`).exists(), card).toBe(false);
+    }
+    await wrapper.get(`${cards[0]} .collapsible-header`).trigger("click");
+    await flushPromises();
+    for (const card of cards) expect(wrapper.find(`${card} .collapsible-body.open`).exists()).toBe(true);
+    flowId = "collapse-new-flow";
+    await (wrapper.vm as any).$.setupState.parallelFlow.refresh();
+    await flushPromises();
+    await flushPromises();
+    for (const card of cards) expect(wrapper.find(`${card} .collapsible-body.open`).exists()).toBe(false);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("全部流程：抓取进度出现收 02 两卡、筛选进度出现收 03 卡，手动重展不被抢", async () => {
+    const bossScrape = "scrape-047-all-b";
+    const zhilianScrape = "scrape-047-all-z";
+    const bossScreen = "screen-047-all-b";
+    let progressOn = false;
+    let screenBound = false;
+    const flowPayload = () => ({
+      id: "flow-047-all", profile_id: "profile-047-all", selection: "all", status: "running",
+      tracks: [
+        {
+          id: "t-b", platform: "boss", status: "running", stage: screenBound ? "ai" : "scrape",
+          scrape_run_id: bossScrape,
+          screen_run_id: screenBound ? bossScreen : null,
+        },
+        { id: "t-z", platform: "zhilian", status: "running", stage: "scrape", scrape_run_id: zhilianScrape, screen_run_id: null },
+      ],
+    });
+    const taskState = (stage: string) => (progressOn
+      ? { status: "running", progress: { stage, current: 1, total: 4, overall_percent: 25 }, logs: [] }
+      : { status: "running", progress: { message: "检查并启动调试浏览器…" }, logs: [] });
+    const fetchMock = bootstrap({
+      "/api/flows/current": () => response({ ok: true, flow: flowPayload() }),
+      [`/api/task-state/${bossScrape}`]: () => response(taskState("searching")),
+      [`/api/task-state/${zhilianScrape}`]: () => response(taskState("searching")),
+      [`/api/task-state/${bossScreen}`]: () => response(taskState("screen_a")),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-047-all" } });
+    await flushPromises();
+    await flushPromises();
+
+    const keywordCard = ".search-layout > .collapsible-card:first-child";
+    const advancedCard = ".advanced-panel";
+    const screenCard = '[data-testid="screen-condition-card"]';
+    const setupState = (wrapper.vm as any).$.setupState;
+    // 用户手动展开／现场恢复的旧展开：三个抽屉都开着。
+    setupState.searchPanelsOpen = true;
+    setupState.advancedPanelsOpen = true;
+    setupState.screenPanelOpen = true;
+    await flushPromises();
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(true);
+    expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(true);
+    expect(wrapper.find(`${screenCard} .collapsible-body.open`).exists()).toBe(true);
+
+    // 只有 loading 文案（进度数字未出现）不能收拢。
+    await setupState.parallelFlow.refresh();
+    await flushPromises();
+    await flushPromises();
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(true);
+
+    // 抓取进度出现：02 两卡收拢，03 卡保持展开（筛选阶段还没开始）。
+    progressOn = true;
+    await setupState.parallelFlow.refresh();
+    await flushPromises();
+    await flushPromises();
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(false);
+    expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(false);
+    expect(wrapper.find(`${screenCard} .collapsible-body.open`).exists()).toBe(true);
+
+    // 用户重新手动展开 02：同阶段后续轮询不抢回。
+    await wrapper.get(`${keywordCard} .collapsible-header`).trigger("click");
+    await flushPromises();
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(true);
+    await setupState.parallelFlow.refresh();
+    await flushPromises();
+    await flushPromises();
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(true);
+
+    // 自动 AI 交接：筛选进度随后到达，03 卡收拢。
+    screenBound = true;
+    await setupState.parallelFlow.refresh();
+    await flushPromises();
+    await flushPromises();
+    expect(wrapper.find(`${screenCard} .collapsible-body.open`).exists()).toBe(false);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("单平台恢复现场：进度数字出现后收拢 02 两卡", async () => {
+    let progressOn = false;
+    const runId = "scrape-047-restore";
+    const fetchMock = bootstrap({
+      "/api/flows/current": () => response({ ok: true, flow: null }),
+      "/api/latest-running-task": () => response({
+        ok: true, has_task: true, task_id: runId, kind: "scrape", status: "running", platform: "boss",
+        scrape_task_id: runId, progress: { message: "检查并启动调试浏览器…" }, logs: [],
+      }),
+      [`/api/task-state/${runId}`]: () => response(progressOn
+        ? { status: "running", progress: { stage: "searching", current: 1, total: 4, overall_percent: 25 }, logs: [] }
+        : { status: "running", progress: { message: "检查并启动调试浏览器…" }, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-047-restore" } });
+    await flushPromises();
+    await flushPromises();
+
+    const keywordCard = ".search-layout > .collapsible-card:first-child";
+    const advancedCard = ".advanced-panel";
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(true);
+    expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(true);
+
+    progressOn = true;
+    await (wrapper.vm as any).$.setupState.pollTask(runId, "scrape");
+    await flushPromises();
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(false);
+    expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(false);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+});

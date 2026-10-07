@@ -109,6 +109,9 @@ class WhiteboxService:
         normalized = self._validate_fact(fact)
         try:
             receipt = self.store.append_whitebox_event(run_id, normalized)
+            if isinstance(receipt, dict) and receipt.get('blocked_late_callback'):
+                # 047 US5：已终结/旧 attempt 的迟到事实只记诊断，不投影。
+                return {'run_id': run_id, 'sequence': int(receipt.get('sequence') or 0), 'idempotency_key': normalized['idempotency_key'], 'duplicate': False, 'late_callback': True}
             self._project_unit(run_id, normalized)
             return {'run_id': run_id, 'sequence': int(receipt.get('sequence') if isinstance(receipt, dict) else receipt['sequence']), 'idempotency_key': normalized['idempotency_key'], 'duplicate': self._receipt_is_duplicate(receipt, normalized)}
         except Exception as exc:

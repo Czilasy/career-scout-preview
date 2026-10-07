@@ -44,6 +44,52 @@ it("046 A02: an old scrape click never operates the current AI", async () => {
   expect(ctx.finish).not.toHaveBeenCalled();
 });
 
+
+it("047: failed 实例重试发送精确身份并刷新权威 Flow", async () => {
+  const ctx = setup();
+  ctx.flow.value = { ...ctx.flow.value, tracks: [
+    { ...ctx.flow.value.tracks[0], status: "failed", updated_at: "2026-10-07T00:00:00Z" },
+    ctx.flow.value.tracks[1],
+  ] };
+  const retryTrack = vi.fn(async () => ctx.flow.value);
+  (ctx.parallel as any).retryTrack = retryTrack;
+  await ctx.actions.retry("boss", "screen-a", "2026-10-07T00:00:00Z");
+  expect(retryTrack).toHaveBeenCalledWith("boss", {
+    runId: "screen-a", updatedAt: "2026-10-07T00:00:00Z", trackId: "a",
+  });
+  expect(ctx.parallel.refresh).toHaveBeenCalled();
+  expect(ctx.refreshResults).toHaveBeenCalledWith({ preservePresentation: true });
+});
+
+it("047: 过期身份（run 已不是当前绑定）不发重试", async () => {
+  const ctx = setup();
+  const retryTrack = vi.fn(async () => ctx.flow.value);
+  (ctx.parallel as any).retryTrack = retryTrack;
+  await ctx.actions.retry("boss", "old-stale-run");
+  expect(retryTrack).not.toHaveBeenCalled();
+});
+
+it("047: 终止本轨与结束保存逐帧分开——终止不冒充保存，兄弟轨道保留", async () => {
+  const ctx = setup();
+  // 立即终止本轨：走 stop 路径，不得调用结束保存
+  await ctx.actions.operate("boss", "cancel", "screen-a");
+  expect(ctx.finish).not.toHaveBeenCalled();
+  expect(ctx.parallel.operate).toHaveBeenCalledWith("boss", "stop", { runId: "screen-a", mode: "graceful" });
+  expect(ctx.flow.value.tracks[1].status).toBe("running");
+});
+
+it("047: 保存被拒绝时不显示成功，只提示一次真实错误", async () => {
+  const ctx = setup();
+  ctx.finish = vi.fn(async () => { throw new Error("结果保存失败"); });
+  const actions = useDiscoveryInstanceActions({
+    parallel: ctx.parallel, round: ctx.round, finish: ctx.finish,
+    items: () => [ctx.item.value], refreshResults: ctx.refreshResults, notify: ctx.notify,
+  });
+  await actions.finish("screen-a", "boss", "screen");
+  expect(ctx.notify).toHaveBeenCalledTimes(1);
+  expect(ctx.refreshResults).not.toHaveBeenCalled();
+});
+
 it("046: a delayed batch choice cannot finish a changed flow or run", async () => {
   const ctx = setup();
   let pending: any;

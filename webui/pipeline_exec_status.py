@@ -85,15 +85,22 @@ def taxonomy_reason(code: str, platform: str = "", fallback: str = "任务被阻
 
 
 def classify_preflight_failure(preflight: object) -> dict[str, object]:
-    """Build the shared preflight failure payload and hard-stop decision."""
+    """Build the shared preflight failure payload and hard-stop decision.
+
+    047 C1：载荷始终保留规范 failed_code 与安全 error；systemic 另保留
+    hard_stop/hard_stop_code（执行策略字段），不决定是否保留失败事实。
+    """
     raw_code = getattr(preflight, "failed_code", None)
     failed_code = str(raw_code or "")
+    canonical = resolve_code(failed_code) if failed_code else ""
     message = user_visible_failure_reason(
         failed_code,
         getattr(preflight, "failed_reason", ""),
         getattr(preflight, "platform", ""),
     )
     result: dict[str, object] = {"error": message}
+    if canonical:
+        result["failed_code"] = canonical
     if raw_code and resolve_code(raw_code) in SYSTEMIC_BLOCK_CODES:
         result["hard_stop"] = True
         result["hard_stop_code"] = raw_code
